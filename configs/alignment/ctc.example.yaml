@@ -1,0 +1,14 @@
+# Neither reference repository defines forced-alignment CTC teachers.
+# Fill both immutable revisions after choosing character-level CTC models.
+# The Japanese model has been observed in the local HF cache, but no complete
+# checksum-pinned installation or experimental configuration was found.
+ja:
+  model: jonatasgrosman/wav2vec2-large-xlsr-53-japanese
+  revision: null
+  text_transform: identity
+  ignore_characters: ""
+en:
+  model: facebook/wav2vec2-base-960h
+  revision: null
+  text_transform: upper
+  ignore_characters: ""

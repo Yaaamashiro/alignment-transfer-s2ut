@@ -1,0 +1,6 @@
+checkpoint: models/vocoder/unit/g_00500000
+config: models/vocoder/unit/config.json
+checkpoint_url: https://dl.fbaipublicfiles.com/fairseq/speech_to_speech/vocoder/code_hifigan/hubert_base_100_lj/g_00500000
+config_url: https://dl.fbaipublicfiles.com/fairseq/speech_to_speech/vocoder/code_hifigan/hubert_base_100_lj/config.json
+checkpoint_sha256: b46cc9778377a3c1b72b44ff815126469511676083d728f1c0677a1be0f6bc36
+config_sha256: 769cd70effba4278d2d7eef7d5c42177651b9273f0678b418e7d48e2665f6043

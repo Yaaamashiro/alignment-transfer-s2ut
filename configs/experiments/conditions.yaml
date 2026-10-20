@@ -1,0 +1,14 @@
+# All non-transfer CLI options must be identical across conditions.
+baseline:
+  method: baseline
+distillation:
+  method: distillation
+  lambda_align: 1.0
+guidance:
+  method: guidance
+  beta: 1.0
+annealed_guidance:
+  method: annealed_guidance
+  beta_start: 1.0
+  beta_end: 0.0
+  anneal_steps: 10000

@@ -1,0 +1,10 @@
+hubert:
+  model: facebook/hubert-base-ls960
+  revision: dba3bb02fda4248b6e082697eee756de8fe8aa8a
+layer: 6
+clusters: 100
+reduce_consecutive: true
+kmeans:
+  path: models/hubert_base_l6_k100.bin
+  url: https://dl.fbaipublicfiles.com/textless_nlp/gslm/hubert/km100/km.bin
+  sha256: f14a3104615485381fc489701d6761c9abbdbb0d43607cf55518a1e2891023fe

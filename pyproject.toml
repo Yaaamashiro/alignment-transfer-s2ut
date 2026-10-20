@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alignment-transfer-s2ut"
+version = "0.1.0"
+description = "Controlled alignment transfer from text translation to fairseq S2UT"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26,<3", "torch>=2.2,<2.8", "PyYAML>=6,<7", "soundfile>=0.12,<1", "scipy>=1.11,<2"]
+
+[project.optional-dependencies]
+preprocess = ["transformers==4.44.2", "torchaudio==2.7.1", "joblib==1.4.2", "scikit-learn==1.5.2"]
+evaluation = ["sacrebleu==2.5.1", "matplotlib>=3.8,<4"]
+dev = ["pytest>=8,<9"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = ["fairseq: requires the pinned fairseq installation", "gpu: requires CUDA and external model assets"]

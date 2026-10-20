@@ -1,0 +1,26 @@
+# Both modalities load this same controlled configuration.
+backbone:
+  encoder_layers: 12
+  decoder_layers: 6
+  encoder_embed_dim: 256
+  decoder_embed_dim: 256
+  encoder_ffn_embed_dim: 2048
+  decoder_ffn_embed_dim: 2048
+  encoder_attention_heads: 4
+  decoder_attention_heads: 8
+  activation_fn: relu
+  dropout: 0.1
+  attention_dropout: 0.1
+  activation_dropout: 0.1
+  encoder_normalize_before: true
+  decoder_normalize_before: true
+  positional_encoding: sinusoidal
+  cross_attention: scaled_dot_product
+  decoder_self_attention: causal
+  no_scale_embedding: false
+  share_decoder_input_output_embed: true
+  conv_channels: 1024
+  conv_kernel_sizes: "5,5"
+  input_feat_per_channel: 80
+  max_source_positions: 6000
+  max_target_positions: 3000

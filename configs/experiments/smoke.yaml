@@ -1,0 +1,14 @@
+backbone:
+  encoder_layers: 1
+  decoder_layers: 1
+  encoder_embed_dim: 16
+  decoder_embed_dim: 16
+  encoder_ffn_embed_dim: 32
+  decoder_ffn_embed_dim: 32
+  encoder_attention_heads: 2
+  decoder_attention_heads: 2
+  dropout: 0.0
+  attention_dropout: 0.0
+  activation_dropout: 0.0
+  conv_channels: 32
+  input_feat_per_channel: 8

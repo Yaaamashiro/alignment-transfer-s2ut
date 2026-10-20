@@ -1,0 +1,6 @@
+# Same Whisper revision as the benchmark evaluation config; never an alignment teacher.
+model: openai/whisper-large-v3-turbo
+revision: 60be3615a4d667e1258e8ad29130467587c489aa
+generate_kwargs:
+  language: english
+  task: transcribe

@@ -1,0 +1,14 @@
+# Immutable revisions resolved from the official HF model API on 2026-10-20.
+# OOV punctuation/codepoints receive invalid spans, explicitly recorded in metadata.
+ja:
+  model: jonatasgrosman/wav2vec2-large-xlsr-53-japanese
+  revision: cf031e020336460d15a417eba710bbc5bb43be9a
+  text_transform: identity
+  unknown_policy: mask
+  ignore_characters: ""
+en:
+  model: facebook/wav2vec2-base-960h
+  revision: 22aad52d435eb6dbaf354bdad9b0da84ce7d6156
+  text_transform: upper
+  unknown_policy: mask
+  ignore_characters: ""

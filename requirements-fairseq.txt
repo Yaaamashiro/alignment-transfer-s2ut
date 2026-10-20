@@ -1,0 +1,9 @@
+# Python 3.10 on Linux. pip <24.1 is necessary for OmegaConf 2.0.6 metadata.
+torch==2.7.1
+torchaudio==2.7.1
+numpy==1.26.4
+hydra-core==1.0.7
+omegaconf==2.0.6
+Cython==3.2.9
+editdistance==0.8.1
+fairseq @ git+https://github.com/facebookresearch/fairseq.git@3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99
