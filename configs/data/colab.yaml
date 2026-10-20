@@ -1,0 +1,7 @@
+# Read-only reference locations from the two existing repositories.
+corpus_root: /content/drive/MyDrive/ja-en-direct-s2st-corpus-data
+accepted_manifest: /content/drive/MyDrive/ja-en-direct-s2st-corpus-data/production/manifests/releases/accepted.jsonl
+benchmark_reference_root: /content/drive/MyDrive/ja-en-direct-s2st-benchmark-data
+# All new checkpoints/artifacts go here, outside both reference repositories.
+output_root: /content/drive/MyDrive/alignment-transfer-s2ut-data
+hubert_cache: /content/huggingface
