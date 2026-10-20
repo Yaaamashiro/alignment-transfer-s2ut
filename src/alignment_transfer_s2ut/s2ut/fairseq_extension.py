@@ -54,6 +54,7 @@ class TransferAttention(MultiheadAttention):
     transfer_capture = False
     transfer_beta = 0.0
     transfer_heads = None
+    transfer_smoothing = 0.0
 
     def forward(self, query, key, value, key_padding_mask=None, incremental_state=None,
                 need_weights=True, static_kv=False, attn_mask=None, before_softmax=False,
@@ -79,7 +80,7 @@ class TransferAttention(MultiheadAttention):
         q = split(self.q_proj(query), target_len) * self.scaling
         k, v = split(self.k_proj(key), source_len), split(self.v_proj(value), source_len)
         raw, guided = attention(q @ k.transpose(-2, -1), self.transfer_prior,
-                                self.transfer_beta, key_padding_mask)
+                                self.transfer_beta, key_padding_mask, prior_smoothing=self.transfer_smoothing)
         selected = self.transfer_heads
         self.raw_attention = (raw if selected is None else raw[:, selected]).mean(1)
         self.guided_attention = (guided if selected is None else guided[:, selected]).mean(1)
@@ -116,7 +117,7 @@ def make_dictionary(vocabulary):
     return dictionary
 
 
-def build_native(config, modality, source_vocabulary, target_vocabulary):
+def build_native(config, modality, source_vocabulary, target_vocabulary, auxiliary=None):
     verify_fairseq()
     args = Namespace(**{k: v for k, v in config.asdict().items()
                         if k not in {"positional_encoding", "cross_attention", "decoder_self_attention"}})
@@ -129,9 +130,19 @@ def build_native(config, modality, source_vocabulary, target_vocabulary):
     transfer_fisher(args)
     task = Namespace(args=Namespace(target_is_code=True),
                      target_dictionary=make_dictionary(target_vocabulary), multitask_tasks={})
+    if auxiliary:
+        cfg = auxiliary["config"]
+        for name, vocabulary, decoder_type, input_config in (
+                ("source_letter", "source_vocabulary", "transformer", {"encoder_layer": cfg["source_layer"]}),
+                ("target_letter", "target_vocabulary", "transformer", {"encoder_layer": cfg["target_layer"]}),
+                ("decoder_target_ctc", "ctc_vocabulary", "ctc", {"decoder_layer": cfg["decoder_ctc_layer"]})):
+            task.multitask_tasks[name] = Namespace(
+                args=Namespace(decoder_type=decoder_type, decoder_args=Namespace(**cfg["decoder_args"]),
+                               input_from="encoder" if "encoder_layer" in input_config else "decoder"),
+                target_dictionary=make_dictionary(auxiliary[vocabulary]))
     model = AlignmentS2UT.build_model(args, task)
     if modality == "text":
         model.encoder.subsample = TextFrontend(len(source_vocabulary), config.encoder_embed_dim)
     elif modality != "speech":
         raise ValueError("modality must be text or speech")
-    return NativeModel(model, config)
+    return NativeModel(model, config, modality, auxiliary)

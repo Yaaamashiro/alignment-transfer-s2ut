@@ -9,6 +9,7 @@ from ..io import atomic_write, read_json, read_jsonl, write_json, write_jsonl, f
 from ..training import load_checkpoint, checkpoint_model
 from ..tokenization.character import EOS, PAD, BOS, UNK
 from ..progress import progress
+from ..recipes import transform_features
 
 
 @torch.no_grad()
@@ -117,7 +118,10 @@ def infer(args):
             predictions.append(cached)
             progress("inference resume", index + 1, len(rows))
             continue
-        source = features(row["ja_audio"], saved["backend"], saved["backbone"]["input_feat_per_channel"])
+        feature_recipe = saved["recipe"].get("speech_recipe", {})
+        source = features(row["ja_audio"], saved["backend"], saved["backbone"]["input_feat_per_channel"],
+                          feature_recipe.get("waveform_scale", 1.0))
+        source = transform_features(source, feature_recipe)
         units, completed = generate(model, source[None].to(args.device),
                                     torch.tensor([len(source)], device=args.device),
                                     args.beam_size, args.max_units, args.length_penalty)

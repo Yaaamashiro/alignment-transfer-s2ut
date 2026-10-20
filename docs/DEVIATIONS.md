@@ -1,9 +1,9 @@
 # Intentional Differences and Validation Limits
 
 1. **Modality frontends/vocabularies:** T2TTはUnicode codepoint embedding/文字projection、S2UTはnative FBANK+Conv frontend/KM100 projection。辞書サイズに伴うparameter数の差は意図されたもの。共有Transformer層のarchitectureは同じ。
-2. **独立trainer:** native fairseqモデルをPyTorch loopから学習する。benchmark固有の補助source/target character decoder、Unigram CTC loss、SpecAugment、オンラインBLEU monitor、fairseq trainerのdistributed/FP16機能は実装していない。これは既存benchmarkのtraining recipeの厳密な再現ではない。4条件内部では同一レシピで比較する。公開benchmarkへの直接的なスコア同等性を主張しない。
-3. **FBANK:** sourceは16 kHz mono、Kaldi FBANK 80 bins、25 ms/10 ms、dither 0。corpus全体のCMVNやSpecAugmentは既定で適用しない。
-4. **source時刻投影:** 実際のencoder出力長に対する等間隔time binを使用する。Convの受容野中心を語ごとの正確な音響境界とは見なさない。将来のfrontendでも保存時刻spanを再利用できる。
+2. **独立trainer:** native fairseqモデルをPyTorch loopから学習する。`controlled`は補助loss・CMVN・SpecAugmentなし、`strong`はnative source/target character decoder、Unigram decoder CTC、utterance CMVNとSpecAugmentを追加する。補助lossの重みと参照層はbenchmarkに合わせるが、文字語彙は全条件でtrainのみ、文字列は暗黙にstrip/space collapseしない。オンラインBLEU monitor、fairseq trainerのdistributed/FP16、token bucket samplerは未実装。公開benchmarkとの厳密な学習再現やスコア同等性を主張しない。
+3. **FBANK:** sourceは16 kHz mono、Kaldi FBANK 80 bins、25 ms/10 ms、dither 0。strongはfairseqの16-bit入力規約（waveform×32768）とutterance CMVNを使用し、trainだけにSpecAugmentを適用する。controlledは従来のwaveform scale 1を保持する。recipe間の混在比較は拒否する。
+4. **source時刻投影:** 既定はFBANK窓とConvの局所受容野によるsupport、旧方式は`--source-mapping uniform`。いずれも実際のencoder長と照合する。frontend supportを語の正確な音響境界やTransformer後の受容野とは見なさない。
 5. **target時刻投影:** HuBERT receptive-field中心を用い、重なる受容野そのものではなく1-hop幅でframe時間区間を作る。CTCのblank区間はtoken spanに自動的に埋め込まず、overlapしないunit rowはinvalidとして除外する。
 6. **CTC alignment:** 既定モデルは外部pretrained ASRであり、MT teacherではない。英語の大文字化はCTC lookupだけの明示的変換。語彙外文字/punctuationは設定に従いmaskまたはerror。日本語読み正規化/G2Pで異なる文字列を暗黙生成しない。
 7. **Teacher artifacts:** 前処理ではdense U×F行列を固定保存せず、MT attentionと時刻spanを持つpacketを保存する。実際のFに合わせてforward時に合成する。dense行列は可視化artifactへ保存できる。

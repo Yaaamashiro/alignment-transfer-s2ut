@@ -47,8 +47,14 @@ def parser_for(stage):
         parser.add_argument("--anneal-steps", type=int, default=10000)
         parser.add_argument("--units", required=stage == "train_s2ut")
         parser.add_argument("--teacher")
+        parser.add_argument("--recipe", choices=["controlled", "strong"], default="controlled")
+        parser.add_argument("--recipe-config", help="complete strong recipe override, including auxiliary depths")
+        parser.add_argument("--prior-type", choices=["t2tt", "monotonic"], default="t2tt")
+        parser.add_argument("--prior-smoothing", type=float, default=0.05)
+        parser.add_argument("--source-mapping", choices=["frontend", "uniform"], default="frontend")
+        parser.add_argument("--monotonic-sigma", type=float, default=0.1)
     if stage in {"train_t2tt", "train_s2ut", "extract_t2tt_attention", "visualize_attention"}:
-        parser.add_argument("--layer", type=int, default=-1)
+        parser.add_argument("--layer", type=int, default=None if stage == "visualize_attention" else -1)
         parser.add_argument("--heads", type=int, nargs="+")
     if stage in {"infer", "extract_t2tt_attention", "visualize_attention"}:
         parser.add_argument("--checkpoint", required=True)
@@ -77,7 +83,7 @@ def parser_for(stage):
         parser.add_argument("--asr-config")
     if stage == "visualize_attention":
         parser.add_argument("--pair-id", required=True)
-        parser.add_argument("--teacher", required=True)
+        parser.add_argument("--teacher")
         parser.add_argument("--units", required=True)
         parser.add_argument("--beta", type=float, default=1.0)
     if stage == "smoke":

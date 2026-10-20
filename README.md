@@ -31,6 +31,8 @@ A_T = M_tgt @ A_MT @ M_src
 
 推論は全条件でteacher-free。日本語音声、S2UT checkpoint、unit vocoderのみを使用する。
 
+学習レシピは、転移の効果を比較する`controlled`と、文字補助decoder・decoder CTC・CMVN・SpecAugmentを加えた`strong`を選択できる。T2TT由来priorと時間単調priorの対照実験、prior平滑化、frontendの受容野に基づく時刻投影、alignment品質診断に対応する。[実験手順](docs/USAGE.md#強いbaselineと単調priorの対照実験)を参照。
+
 ## モデル構成
 
 fairseqの`s2ut_transformer_fisher`を基準に、T2TTとS2UTで同一のEncoder/Decoder層とCross-Attention実装を使用する。
@@ -117,7 +119,7 @@ python -m alignment_transfer_s2ut.infer \
 | [DEVIATIONS](docs/DEVIATIONS.md) | 設計上の差異と実装範囲 |
 | [VALIDATION](docs/VALIDATION.md) | 検証環境とテスト結果 |
 
-S2UTには独立trainerを使用する。既存benchmarkの補助lossやSpecAugmentは含まず、本学習・実コーパスでの性能評価は未実施。詳細は[DEVIATIONS](docs/DEVIATIONS.md)に記載する。
+S2UTには独立trainerを使用する。本学習・実コーパスでの性能評価は未実施。benchmarkとのレシピ上の対応と差異は[DEVIATIONS](docs/DEVIATIONS.md)に記載する。
 
 ## ライセンス
 

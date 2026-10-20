@@ -1,0 +1,25 @@
+# Native fairseq multitask/FBANK recipe used by the reference benchmark.
+cmvn: true
+waveform_scale: 32768.0
+specaugment:
+  time_warp_W: 0
+  freq_mask_N: 1
+  freq_mask_F: 27
+  time_mask_N: 1
+  time_mask_T: 100
+  time_mask_p: 1.0
+auxiliary:
+  source_layer: 6
+  target_layer: 8
+  decoder_ctc_layer: 3
+  source_weight: 8.0
+  target_weight: 8.0
+  ctc_weight: 1.6
+  label_smoothing: 0.2
+  ctc_vocab_size: 1000
+  decoder_args:
+    decoder_layers: 2
+    decoder_embed_dim: 256
+    decoder_ffn_embed_dim: 2048
+    decoder_attention_heads: 4
+    dropout: 0.3

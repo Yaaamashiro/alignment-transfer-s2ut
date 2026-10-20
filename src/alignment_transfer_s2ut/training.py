@@ -16,6 +16,8 @@ from .tokenization.character import CharacterTokenizer, PAD, EOS
 from .s2ut.model import build_model
 from .guidance.attention import alignment_kl, beta_at, entropy
 from .alignment.projection import project_packet
+from .alignment.timing import encoder_time_spans, monotonic_prior
+from .recipes import load_recipe, fit_auxiliary, transform_features, augment_batch, auxiliary_losses
 from .progress import progress
 
 UNIT_VOCABULARY = ["<bos>", "<pad>", "<eos>", "<unk>"] + [str(i) for i in range(100)]
@@ -38,12 +40,12 @@ def checkpoint_model(checkpoint, device="cpu"):
     config = BackboneConfig(**checkpoint["backbone"])
     seed_all(checkpoint["recipe"]["seed"])
     model = build_model(config, checkpoint["modality"], checkpoint["source_vocabulary"],
-                        checkpoint["target_vocabulary"], checkpoint["backend"]).to(device)
+                        checkpoint["target_vocabulary"], checkpoint["backend"], checkpoint.get("auxiliary")).to(device)
     model.load_state_dict(checkpoint["model"])
     return model
 
 
-def collate(rows, modality, source_tokenizer, target_tokenizer, backend, unit_store, bins, device):
+def collate(rows, modality, source_tokenizer, target_tokenizer, backend, unit_store, bins, device, feature_recipe=None):
     sources, targets = [], []
     for row in rows:
         if modality == "text":
@@ -52,7 +54,8 @@ def collate(rows, modality, source_tokenizer, target_tokenizer, backend, unit_st
         else:
             if row.get("ja_sha256") and file_hash(row["ja_audio"]) != row["ja_sha256"]:
                 raise ValueError("source audio changed after manifest preparation")
-            sources.append(features(row["ja_audio"], backend, bins))
+            sources.append(transform_features(features(row["ja_audio"], backend, bins,
+                (feature_recipe or {}).get("waveform_scale", 1.0)), feature_recipe))
             meta, units = unit_store.get(row["pair_id"], {"split": row["split"],
                                         "en_audio_hash": file_hash(row["en_audio"])})
             tokens = (units["reduced_units"] + 4).tolist()
@@ -67,10 +70,21 @@ def collate(rows, modality, source_tokenizer, target_tokenizer, backend, unit_st
     return source, lengths, previous, target
 
 
-def prior_builder(rows, store, units_store, config, identity, backend, device):
+def prior_builder(rows, store, units_store, config, identity, backend, device,
+                  feature_lengths=None, source_mapping="uniform", prior_type="t2tt", monotonic_sigma=0.1):
+    if prior_type not in {"t2tt", "monotonic"}:
+        raise ValueError("unknown prior type")
     packets = []
     consistent = None
     for row in rows:
+        if prior_type == "monotonic":
+            from .data.audio import waveform
+            _, packet = units_store.get(row["pair_id"], {"split": row["split"], "manifest_hash": identity,
+                                                       "en_audio_hash": file_hash(row["en_audio"])})
+            wave, rate = waveform(row["ja_audio"])
+            packet = {**packet, "source_duration": len(wave) / rate}
+            packets.append(packet)
+            continue
         meta, packet = store.get(row["pair_id"], {"split": row["split"], "manifest_hash": identity,
                     "ja_audio_hash": file_hash(row["ja_audio"]), "en_audio_hash": file_hash(row["en_audio"]),
                     "s2ut_architecture_hash": digest(config.asdict()), "backend": backend,
@@ -84,7 +98,19 @@ def prior_builder(rows, store, units_store, config, identity, backend, device):
     def build(lengths, target_length):
         result = torch.zeros(len(rows), target_length, int(lengths.max()), device=device)
         for index, (packet, length) in enumerate(zip(packets, lengths.tolist())):
-            projected = project_packet(packet, length)
+            duration = float(packet["source_duration"])
+            if source_mapping == "frontend":
+                if feature_lengths is None:
+                    raise ValueError("frontend projection requires actual feature lengths")
+                spans = encoder_time_spans(int(feature_lengths[index]), length, config, backend, duration)
+            elif source_mapping == "uniform":
+                boundaries = np.linspace(0, duration, length + 1)
+                spans = np.stack([boundaries[:-1], boundaries[1:]], -1)
+            else:
+                raise ValueError("unknown source timing mapping")
+            projected = monotonic_prior(packet["unit_spans"], float(packet["duration"]), spans,
+                                        duration, monotonic_sigma) if prior_type == "monotonic" else project_packet(
+                                            packet, length, spans)
             if len(projected) + 1 > target_length:
                 raise ValueError("unit length exceeds target batch")
             result[index, :len(projected), :length] = torch.as_tensor(projected, device=device, dtype=torch.float32)
@@ -131,9 +157,13 @@ def train(args, modality):
     source_tokenizer = CharacterTokenizer.fit(rows, "ja_text")
     target_tokenizer = CharacterTokenizer.fit(rows, "en_text")
     unit_store = ArtifactStore(args.units) if modality == "speech" else None
-    if modality == "speech" and args.method != "baseline" and not args.teacher:
+    if modality == "speech" and args.method != "baseline" and args.prior_type == "t2tt" and not args.teacher:
         raise ValueError("alignment methods require --teacher")
-    teacher_store = ArtifactStore(args.teacher) if modality == "speech" and args.method != "baseline" else None
+    teacher_store = ArtifactStore(args.teacher) if modality == "speech" and args.method != "baseline" and args.prior_type == "t2tt" else None
+    speech_recipe = load_recipe(args.recipe, args.recipe_config) if modality == "speech" else load_recipe()
+    auxiliary = fit_auxiliary(train_rows, speech_recipe, config, args.backend)
+    if not 0 <= args.prior_smoothing <= 1 or not math.isfinite(args.monotonic_sigma) or args.monotonic_sigma <= 0:
+        raise ValueError("invalid prior smoothing or monotonic width")
     if not -config.decoder_layers <= args.layer < config.decoder_layers:
         raise ValueError("alignment layer out of range")
     if args.heads is not None and (not args.heads or len(set(args.heads)) != len(args.heads) or
@@ -141,7 +171,8 @@ def train(args, modality):
         raise ValueError("alignment heads must be unique, valid zero-based indices")
     if args.validation_interval < 1 or args.save_interval_updates < 1 or args.patience < 0 or not 0 <= args.label_smoothing < 1:
         raise ValueError("invalid validation or loss parameters")
-    if args.lambda_align < 0 or args.beta < 0 or args.beta_start < 0 or args.beta_end < 0:
+    if any(not math.isfinite(value) or value < 0 for value in
+           (args.lambda_align, args.beta, args.beta_start, args.beta_end)):
         raise ValueError("alignment coefficients must be nonnegative")
     teacher_signature = None
     if modality == "speech":
@@ -162,8 +193,10 @@ def train(args, modality):
     target_vocabulary = target_tokenizer.vocabulary if modality == "text" else UNIT_VOCABULARY
     method = args.method if modality == "speech" else "baseline"
     transfer = {key: getattr(args, key) for key in ("lambda_align", "beta", "beta_start", "beta_end",
-                                                   "anneal_steps", "layer", "heads")} if modality == "speech" else {}
+                                                   "anneal_steps", "layer", "heads", "prior_type", "prior_smoothing",
+                                                   "source_mapping", "monotonic_sigma")} if modality == "speech" else {}
     recipe = training_recipe(args)
+    recipe["speech_recipe"] = speech_recipe
     runtime = {"python": ".".join(map(str, sys.version_info[:3])), "torch": str(torch.__version__),
                "numpy": np.__version__}
     implementation_hash = digest({str(path.relative_to(Path(__file__).parent)): file_hash(path)
@@ -171,7 +204,8 @@ def train(args, modality):
     contract = {"backbone": config.asdict(), "backend": args.backend, "modality": modality,
                 "runtime": runtime, "implementation_hash": implementation_hash,
                 "source_vocabulary": source_vocabulary, "target_vocabulary": target_vocabulary,
-                "recipe": recipe, "train_hash": manifest_hash(train_rows), "dev_hash": manifest_hash(dev_rows),
+                "recipe": recipe, "auxiliary": auxiliary,
+                "train_hash": manifest_hash(train_rows), "dev_hash": manifest_hash(dev_rows),
                 "method": method, "transfer": transfer, "teacher_signature": teacher_signature,
                 "unit_config_hash": next(iter(unit_signatures)) if modality == "speech" else None}
     root = Path(args.output)
@@ -182,7 +216,7 @@ def train(args, modality):
     if args.resume and not last.is_file():
         raise FileNotFoundError("resume checkpoint missing: " + str(last))
     seed_all(args.seed)
-    model = build_model(config, modality, source_vocabulary, target_vocabulary, args.backend).to(args.device)
+    model = build_model(config, modality, source_vocabulary, target_vocabulary, args.backend, auxiliary).to(args.device)
     initial_hash = digest({k: file_tensor_hash(v) for k, v in model.state_dict().items()})
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.98), eps=1e-8)
     step, epoch, cursor, best, bad_validations = 0, 0, 0, float("inf"), 0
@@ -210,7 +244,13 @@ def train(args, modality):
 
     def batch(selected):
         return collate(selected, modality, source_tokenizer, target_tokenizer, args.backend,
-                       unit_store, config.input_feat_per_channel, args.device)
+                       unit_store, config.input_feat_per_channel, args.device, speech_recipe)
+
+    def make_builder(selected, lengths):
+        if modality != "speech" or method == "baseline":
+            return None
+        return prior_builder(selected, teacher_store, unit_store, config, identity, args.backend, args.device,
+                             lengths, args.source_mapping, args.prior_type, args.monotonic_sigma)
 
     def next_batch():
         nonlocal epoch, cursor
@@ -236,8 +276,8 @@ def train(args, modality):
                 selected = dev_rows[start:start + args.batch_size]
                 source, lengths, previous, target = batch(selected)
                 has_teacher = teacher_store is not None and all(teacher_store.path(r["pair_id"]).is_file() for r in selected)
-                builder = prior_builder(selected, teacher_store, unit_store, config, identity,
-                                        args.backend, args.device) if has_teacher else None
+                builder = make_builder(selected, lengths) if has_teacher or (
+                    modality == "speech" and method != "baseline" and args.prior_type == "monotonic") else None
                 logits, raw, _, prior = model(source, lengths, previous, builder, beta=0,
                                               layer=args.layer, heads=args.heads)
                 loss, tokens = unit_loss(logits, target, args.label_smoothing)
@@ -264,28 +304,46 @@ def train(args, modality):
         optimizer.zero_grad(set_to_none=True)
         microbatches = [next_batch() for _ in range(args.update_frequency)]
         total_tokens = sum(int(values[3].ne(PAD).sum()) for _, values in microbatches)
+        # Count valid rows over the entire optimizer update before any backward.
+        # Length arithmetic matches the frontend and consumes neither dropout nor RNG.
+        priors = []
+        for selected, (_, lengths, previous, _) in microbatches:
+            builder = make_builder(selected, lengths)
+            priors.append(builder(model.output_lengths(lengths), previous.size(1)) if builder else None)
+        total_rows = sum(int((p.sum(-1) > 0).sum()) for p in priors if p is not None)
         beta = beta_at(step, method, args.beta, args.beta_start, args.beta_end, args.anneal_steps)
         logs = {"train/main_loss": 0.0, "train/alignment_loss": 0.0,
                 "alignment/teacher_entropy": 0.0, "alignment/student_entropy": 0.0,
                 "alignment/kl_teacher_student": 0.0}
-        for selected, (source, lengths, previous, target) in microbatches:
-            builder = prior_builder(selected, teacher_store, unit_store, config, identity,
-                                    args.backend, args.device) if teacher_store else None
-            logits, raw, guided, prior = model(source, lengths, previous, builder, beta, args.layer, args.heads)
+        for (selected, (source, lengths, previous, target)), prepared_prior in zip(microbatches, priors):
+            if modality == "speech":
+                source = augment_batch(source, lengths, speech_recipe)
+            def prepared_builder(actual_lengths, target_length):
+                if not torch.equal(actual_lengths, model.output_lengths(lengths)):
+                    raise ValueError("predicted and actual encoder lengths disagree")
+                return prepared_prior
+            logits, raw, guided, prior = model(source, lengths, previous,
+                prepared_builder if prepared_prior is not None else None, beta, args.layer, args.heads,
+                args.prior_smoothing)
             main_sum, _ = unit_loss(logits, target, args.label_smoothing)
-            kl = alignment_kl(prior, raw) if prior is not None else raw.sum() * 0
+            kl = alignment_kl(prior, raw, reduction="sum") / max(1, total_rows) if prior is not None else raw.sum() * 0
             align = kl if method == "distillation" else kl * 0
-            loss = main_sum / total_tokens + args.lambda_align * align / args.update_frequency
+            aux_losses = auxiliary_losses(model, selected, target) if auxiliary else {}
+            aux_sum = sum(aux_losses.values(), main_sum * 0)
+            loss = (main_sum + aux_sum) / total_tokens + args.lambda_align * align
             if not torch.isfinite(loss):
                 raise ValueError("non-finite training loss")
             loss.backward()
             logs["train/main_loss"] += float(main_sum.detach()) / total_tokens
-            logs["train/alignment_loss"] += float(align.detach()) / args.update_frequency
-            logs["alignment/kl_teacher_student"] += float(kl.detach()) / args.update_frequency
-            logs["alignment/student_entropy"] += float(entropy(raw.detach())[target.ne(PAD)].mean()) / args.update_frequency
+            for name, value in aux_losses.items():
+                key = "train/auxiliary_" + name
+                logs[key] = logs.get(key, 0.0) + float(value.detach()) / total_tokens
+            logs["train/alignment_loss"] += float(align.detach())
+            logs["alignment/kl_teacher_student"] += float(kl.detach())
+            logs["alignment/student_entropy"] += float(entropy(raw.detach())[target.ne(PAD)].sum()) / total_tokens
             if prior is not None:
                 valid = prior.sum(-1) > 0
-                logs["alignment/teacher_entropy"] += float(entropy(prior)[valid].mean()) / args.update_frequency if valid.any() else 0
+                logs["alignment/teacher_entropy"] += float(entropy(prior)[valid].sum()) / max(1, total_rows)
         gradient_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_norm, error_if_nonfinite=True))
         step += 1
         lr = learning_rate(step, args.learning_rate, args.warmup_updates, args.warmup_init_lr)
@@ -293,7 +351,8 @@ def train(args, modality):
             group["lr"] = lr
         optimizer.step()
         logs.update(step=step, **{"guidance/beta": beta, "distillation/lambda": args.lambda_align if method == "distillation" else 0,
-                                 "train/total_loss": logs["train/main_loss"] + args.lambda_align * logs["train/alignment_loss"],
+                                 "train/total_loss": logs["train/main_loss"] + args.lambda_align * logs["train/alignment_loss"] +
+                                     sum(v for k, v in logs.items() if k.startswith("train/auxiliary_")),
                                  "train/gradient_norm": gradient_norm, "train/learning_rate": lr})
         if step % args.validation_interval == 0 or step == args.max_updates:
             dev_loss, dev_alignment_loss = validate()

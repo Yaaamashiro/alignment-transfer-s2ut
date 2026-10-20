@@ -8,7 +8,13 @@ T2TTのteacher-forced cross-attentionを`A_MT[T,S]`とする。最終decoder層�
 
 Distillationはhead平均後のraw S2UT attentionに`KL(A_T || A_S)`を適用する。teacherはdetachし、KLは有効unit rowで平均する。main lossはEOSを含む非padding target tokenのfairseq式label-smoothed CEである。
 
+gradient accumulationでは、各microbatchのKLの**和**を、同じoptimizer更新内の全microbatchに含まれる有効unit row総数で割る。microbatchごとの平均を等重みで平均しない。全rowが無効ならKLは0。main CEは同じ更新内の非padding unit token総数で正規化する。
+
 Guidanceは選択層の全headのlogitへ同じpriorを加え、そのsoftmaxから**実際のcontext**を計算する。raw/guidedを別々に保持する。`--heads`はalignment観測・KLのhead選択であり、priorは選択層全headへ作用する。`beta=0`はnative fairseq pathを呼ぶ。uniform priorはlogitに共通定数を加えるため元のattentionと一致する（丸め誤差を除く）。
+
+Guidanceでは有効なacoustic位置上のuniform分布`U`を使い、`P' = (1-alpha) A_T + alpha U`としてから`softmax(Z + beta log(P' + 1e-8))`を計算する。`--prior-smoothing 0.05`が既定値。padding、EOS、全0の無効rowへ質量を与えない。Distillationの教師は平滑化前の`A_T`。`--prior-smoothing 0`で平滑化を無効化できる。
+
+`--prior-type monotonic`は、各target unit runの中心時刻をtarget音声長で、source frontend supportの中心時刻をsource音声長で正規化し、距離にGaussian kernel（`--monotonic-sigma 0.1`）を適用する。行を正規化した同じ形のpriorをGuidance/KLへ渡す。unit時刻と音声長だけを使い、T2TT・transcript・CTC alignmentを参照しない。Baseline / Annealed Monotonic / Annealed T2TTを同じレシピで比較することで、単なる単調性の誘導と翻訳Attention由来の効果を区別する。
 
 Annealed Guidanceは完了更新数`step`について`beta_start + min(step/anneal_steps,1)*(beta_end-beta_start)`。推論・devのcheckpoint選択は全方式で常に`beta=0`とする。通常Guidanceも推論時はteacher-freeであり、train/inference間にpriorの有無の差がある。
 

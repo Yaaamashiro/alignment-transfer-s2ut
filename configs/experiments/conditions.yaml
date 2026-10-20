@@ -1,4 +1,4 @@
-# All non-transfer CLI options must be identical across conditions.
+# All runs in a comparison share one controlled/strong recipe and timing/smoothing.
 baseline:
   method: baseline
 distillation:
@@ -9,6 +9,13 @@ guidance:
   beta: 1.0
 annealed_guidance:
   method: annealed_guidance
+  beta_start: 1.0
+  beta_end: 0.0
+  anneal_steps: 10000
+annealed_monotonic:
+  method: annealed_guidance
+  prior_type: monotonic
+  monotonic_sigma: 0.1
   beta_start: 1.0
   beta_end: 0.0
   anneal_steps: 10000

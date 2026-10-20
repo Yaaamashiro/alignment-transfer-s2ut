@@ -5,14 +5,14 @@ from ..guidance.attention import attention
 from ..tokenization.character import PAD
 
 
-def build_model(config, modality, source_vocabulary, target_vocabulary, backend="fairseq"):
+def build_model(config, modality, source_vocabulary, target_vocabulary, backend="fairseq", auxiliary=None):
     if backend == "smoke":
         from .smoke import SmokeModel
         return SmokeModel(config, modality, source_vocabulary, target_vocabulary)
     if backend != "fairseq":
         raise ValueError("unknown model backend")
     from .fairseq_extension import build_native
-    return build_native(config, modality, source_vocabulary, target_vocabulary)
+    return build_native(config, modality, source_vocabulary, target_vocabulary, auxiliary)
 
 
 class TextFrontend(nn.Module):
@@ -28,15 +28,23 @@ class TextFrontend(nn.Module):
 
 
 class NativeModel(nn.Module):
-    def __init__(self, network, config):
+    def __init__(self, network, config, modality="speech", auxiliary=None):
         super().__init__()
         self.network = network
         self.config = config
+        self.modality = modality
+        self.auxiliary = auxiliary
+        self.auxiliary_states = None
 
     def encode(self, source, lengths):
-        return self.network.encoder(source, src_lengths=lengths)
+        return self.network.encoder(source, src_lengths=lengths,
+                                    return_all_hiddens=bool(self.auxiliary and self.training))
 
-    def decode(self, previous, encoded, prior=None, beta=0.0, layer=-1, heads=None):
+    def output_lengths(self, lengths):
+        from ..alignment.timing import output_lengths
+        return lengths if self.modality == "text" else output_lengths(lengths, self.config)
+
+    def decode(self, previous, encoded, prior=None, beta=0.0, layer=-1, heads=None, prior_smoothing=0.0):
         selected = layer % len(self.network.decoder.layers)
         adapter = self.network.decoder.layers[selected].encoder_attn
         for decoder_layer in self.network.decoder.layers:
@@ -46,8 +54,11 @@ class NativeModel(nn.Module):
         adapter.transfer_beta = beta
         adapter.transfer_capture = True
         adapter.transfer_heads = heads
+        adapter.transfer_smoothing = prior_smoothing
         try:
-            logits, _ = self.network.decoder(previous, encoder_out=encoded, alignment_layer=selected)
+            logits, extra = self.network.decoder(previous, encoder_out=encoded, alignment_layer=selected)
+            if self.auxiliary and self.training:
+                self.auxiliary_states = (encoded, extra)
             return logits, adapter.raw_attention, adapter.guided_attention
         finally:
             adapter.transfer_prior = None
@@ -60,8 +71,8 @@ class NativeModel(nn.Module):
         return (~masks[0]).sum(-1) if masks else torch.full((values.shape[1],), values.shape[0],
                                                           device=values.device, dtype=torch.long)
 
-    def forward(self, source, lengths, previous, prior_builder=None, beta=0.0, layer=-1, heads=None):
+    def forward(self, source, lengths, previous, prior_builder=None, beta=0.0, layer=-1, heads=None, prior_smoothing=0.0):
         encoded = self.encode(source, lengths)
         prior = prior_builder(self.encoder_lengths(encoded), previous.size(1)) if prior_builder else None
-        logits, raw, guided = self.decode(previous, encoded, prior, beta, layer, heads)
+        logits, raw, guided = self.decode(previous, encoded, prior, beta, layer, heads, prior_smoothing)
         return logits, raw, guided, prior

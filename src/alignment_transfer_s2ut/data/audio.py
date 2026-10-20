@@ -16,8 +16,11 @@ def waveform(path, sample_rate=16000):
     return torch.from_numpy(audio), sample_rate
 
 
-def features(path, backend="fairseq", bins=80):
+def features(path, backend="fairseq", bins=80, waveform_scale=1.0):
     wave, rate = waveform(path)
+    if not math.isfinite(waveform_scale) or waveform_scale <= 0:
+        raise ValueError("positive finite FBANK waveform scale required")
+    wave = wave * waveform_scale
     if backend == "fairseq":
         import torchaudio.compliance.kaldi as kaldi
         return kaldi.fbank(wave[None], sample_frequency=rate, num_mel_bins=bins,

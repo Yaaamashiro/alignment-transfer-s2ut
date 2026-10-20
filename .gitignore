@@ -8,6 +8,8 @@ outputs/*
 /models/
 /data/
 /third_party/
+/build/
+/dist/
 *.pt
 *.wav
 *.npz

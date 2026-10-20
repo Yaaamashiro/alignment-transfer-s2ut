@@ -31,6 +31,8 @@ class BackboneConfig:
     max_target_positions: int = 3000
 
     def __post_init__(self):
+        if any(int(kernel) < 1 or int(kernel) % 2 == 0 for kernel in self.conv_kernel_sizes.split(",")):
+            raise ValueError("frontend timing requires positive odd convolution kernels")
         for name in ("encoder", "decoder"):
             if getattr(self, name + "_embed_dim") % getattr(self, name + "_attention_heads"):
                 raise ValueError("embedding dimension must be divisible by heads")

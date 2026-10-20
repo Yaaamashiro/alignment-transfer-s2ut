@@ -20,11 +20,15 @@ def overlap(left, right):
     return result * valid[:, None] * valid_right[None, :]
 
 
-def source_mapping(spans, duration, encoder_length):
+def source_mapping(spans, duration, encoder_length, frame_spans=None):
     if duration <= 0 or encoder_length < 1:
         raise ValueError("positive speech duration and encoder length required")
     boundaries = np.linspace(0, duration, encoder_length + 1)
-    return normalize(overlap(spans, np.stack([boundaries[:-1], boundaries[1:]], axis=-1)))
+    if frame_spans is None:
+        frame_spans = np.stack([boundaries[:-1], boundaries[1:]], axis=-1)
+    if np.asarray(frame_spans).shape != (encoder_length, 2):
+        raise ValueError("frontend spans disagree with actual encoder length")
+    return normalize(overlap(spans, frame_spans))
 
 
 def target_mapping(token_spans, unit_spans):
@@ -38,7 +42,7 @@ def compose(mt, src, tgt):
     return normalize(tgt @ mt @ src)
 
 
-def project_packet(packet, encoder_length):
+def project_packet(packet, encoder_length, frame_spans=None):
     return compose(packet["mt_attention"],
-                   source_mapping(packet["source_spans"], float(packet["source_duration"]), encoder_length),
+                   source_mapping(packet["source_spans"], float(packet["source_duration"]), encoder_length, frame_spans),
                    target_mapping(packet["target_spans"], packet["unit_spans"]))

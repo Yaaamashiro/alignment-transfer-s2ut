@@ -71,6 +71,47 @@ python -m alignment_transfer_s2ut.compare_experiments \
 
 共通設定・初期化hash・train/dev pair・unit設定・teacher identity・予定更新数が一致しなければ失敗します。翻訳スコアを比較する際はvocoderと推論設定も同一にする。
 
+## Alignment品質診断
+
+teacher生成後、学習前にdevまたはtrainの100〜500件を確認する。
+
+```bash
+python -m alignment_transfer_s2ut.diagnose_alignment \
+  --manifest outputs/manifest.jsonl --teacher outputs/teacher --units outputs/units \
+  --config configs/s2ut/fisher.yaml --split dev --max-samples 500 --heatmaps 20 \
+  --source-mapping frontend --prior-smoothing 0.05 --output outputs/alignment-audit
+```
+
+`summary.json`に有効source/target token率・unit row率・prior entropy、`pairs.jsonl`にsample別の分子・分母を保存する。`heatmaps/`のPNG/NPZはraw MT、投影後、平滑化後、単調prior。CTC coverageとMT語彙外によるmaskを区別して確認する。時刻精度の確認には元の音声も使う。指標の定義は[ALIGNMENT](ALIGNMENT.md#品質診断)を参照。再実行で置換する場合は`--overwrite`を付ける。
+
+## 強いbaselineと単調priorの対照実験
+
+`controlled`を既定とし、`--recipe strong`でbenchmark相当の補助taskと音響前処理を有効にする。以下は同じstrongレシピでBaseline / Annealed Monotonic / Annealed T2TTを比較する例。`UPDATES=20000`はpilot用で、本学習では比較する全条件を同じ更新数へ変更する（参照benchmarkの推奨は400000更新）。
+
+```bash
+UPDATES=20000
+COMMON="--manifest outputs/manifest.jsonl --config configs/s2ut/fisher.yaml --units outputs/units --recipe strong --max-updates $UPDATES --validation-interval 1000 --save-interval-updates 1000 --device cuda"
+
+python -m alignment_transfer_s2ut.train_s2ut $COMMON \
+  --method baseline --output outputs/strong/baseline
+
+python -m alignment_transfer_s2ut.train_s2ut $COMMON \
+  --method annealed_guidance --prior-type monotonic --monotonic-sigma 0.1 \
+  --source-mapping frontend --prior-smoothing 0.05 --anneal-steps 10000 \
+  --output outputs/strong/annealed_monotonic
+
+python -m alignment_transfer_s2ut.train_s2ut $COMMON \
+  --method annealed_guidance --prior-type t2tt --teacher outputs/teacher \
+  --source-mapping frontend --prior-smoothing 0.05 --anneal-steps 10000 \
+  --output outputs/strong/annealed_t2tt
+
+python -m alignment_transfer_s2ut.compare_experiments \
+  outputs/strong/baseline outputs/strong/annealed_monotonic outputs/strong/annealed_t2tt \
+  --output outputs/strong/fair-comparison.json
+```
+
+単調priorの学習には`--teacher`、T2TT checkpoint、CTC artifactは不要。同じ対照実験を`--recipe controlled`でも実行できる。recipeを変更するときは別のrun directoryを使う。strongの補助loss・語彙・CMVN/SpecAugmentの詳細は[EXPERIMENTS](EXPERIMENTS.md#strong-recipe)を参照。
+
 ## 転移係数
 
 | 引数 | 既定値 |
@@ -79,6 +120,10 @@ python -m alignment_transfer_s2ut.compare_experiments \
 | `--beta` | 1.0 |
 | `--beta-start` / `--beta-end` | 1.0 / 0.0 |
 | `--anneal-steps` | 10000 |
+| `--prior-type` | t2tt（対照実験はmonotonic） |
+| `--prior-smoothing` | 0.05（0で無効） |
+| `--source-mapping` | frontend（旧方式はuniform） |
+| `--monotonic-sigma` | 0.1（音声長で正規化した時間座標） |
 
 annealingは完了済みoptimizer更新数を基準とし、`step >= anneal_steps`で終端値になる。
 
