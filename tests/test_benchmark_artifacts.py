@@ -5,6 +5,7 @@ import pytest
 from alignment_transfer_s2ut.benchmark import restore_snapshot
 from alignment_transfer_s2ut.io import digest, file_hash, write_json, read_json
 from alignment_transfer_s2ut.cli import parser_for, run
+from test_notebook_commands import validate_command
 
 
 def snapshot(root, updates):
@@ -93,6 +94,9 @@ def test_optional_monotonic_training_wiring(tmp_path, t2tt, monotonic):
     import json
     from types import SimpleNamespace
     calls, plans = [], []
+    def capture(name, module, *arguments, **kwargs):
+        validate_command(module, arguments)
+        calls.append((name, module, *arguments))
     def plan(command, **kwargs):
         plans.append(command)
         return json.dumps(dict(training_budget=300000, initialization="fresh", selection_policy={}))
@@ -101,7 +105,7 @@ def test_optional_monotonic_training_wiring(tmp_path, t2tt, monotonic):
     namespace = dict(Path=Path, json=json, ROOT=str(tmp_path), RUN_TRANSFER=t2tt, RUN_MONOTONIC=monotonic,
         BASELINE=tmp_path / "baseline.json", MANIFEST=tmp_path / "manifest.jsonl", PYTHON="python",
         BACKBONE_CONFIG=tmp_path / "backbone.json", T2TT_UPDATES=20000, ANNEAL_STEPS=200000,
-        subprocess=SimpleNamespace(check_output=plan), run=lambda *a, **kw: calls.append(a))
+        subprocess=SimpleNamespace(check_output=plan), run=capture)
     exec(notebook_cell("# Preserve primary preparation"), namespace)
     exec(notebook_cell("TRANSFER ="), namespace)
     assert any(a[1] == "alignment_transfer_s2ut.train_t2tt" for a in calls) == (t2tt or not monotonic)
@@ -136,6 +140,7 @@ def test_optional_control_uses_common_evaluation_and_table(tmp_path, monkeypatch
     monkeypatch.setitem(sys.modules, "IPython", ipython)
     monkeypatch.setitem(sys.modules, "IPython.display", display)
     def run(*args, **kwargs):
+        validate_command(args[1], args[2:])
         calls.append(args)
         if "--output" in args:
             path = Path(args[args.index("--output") + 1])

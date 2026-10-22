@@ -4,6 +4,17 @@
 
 参照元は[ja-en-direct-s2st-benchmark / 4361e55](https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark/tree/4361e55a99c7f4ea3a00c5c138f6820c34a07d06)。Colabが別のローカルcheckoutへ取得・editable installし、起動時にrevisionとtracked sourceの変更を検査する。benchmark checkoutや元データの編集は行わない。
 
+ローカルで同じruntimeを導入する場合は、alignment用Python環境を有効にして次を実行する。配置先は既存のbenchmark作業checkoutとは別にする。
+
+```bash
+git clone --no-checkout https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark.git ../alignment-benchmark-runtime
+git -C ../alignment-benchmark-runtime checkout --detach 4361e55a99c7f4ea3a00c5c138f6820c34a07d06
+python -m pip install PyYAML==6.0.2 --no-deps -e ../alignment-benchmark-runtime
+python -m alignment_transfer_s2ut.environment --native --benchmark --cuda
+```
+
+比較ノートブックも前処理より先にこの環境検査を実行する。Python 3.10、依存metadata、主要ライブラリのimport、公式fairseqのrevision、コンパイル済みbatch samplerの実行、benchmarkのrevision、CUDA接続を検査し、不足時は停止する。外部モデルの取得・実音声処理はこの検査に含まれない。
+
 | 項目 | 使用するbenchmarkの実装 |
 |---|---|
 | 音声ZIP・SHA256・ローカル展開・論理path mapping | `drive_staging.stage_audio` / `active_map` |

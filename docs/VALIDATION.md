@@ -1,10 +1,20 @@
-# Validation record — 2026-10-22
+# Validation record — 2026-10-23
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**75 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
+独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**96 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
 
+今回の横断確認では、全CLIのヘルプ起動、主要ライブラリのimport、wheel buildと同梱ファイル、Python構文、README/docsのローカルリンクを確認した。3つのNotebookはnbformat 5.10.4の標準schema検証（警告もエラー扱い）に通過し、nbconvert 7.16.6でHTMLへ変換できた。ブラウザでの実表示はローカル接続制約により確認していない。外部モデルを取得する検査やColab上のインストール試験とは区別する。
+
+依存関係は`pip check`に加え、新しい`environment` CLIでpreprocess/evaluation/dev extrasのバージョンとimportを検査する。CUDA・benchmarkの固定revision・native batch samplerは明示オプションで必須にできる。ローカルの通常preflightは成功し、`--native`では未buildの`fairseq.data.data_utils_fast`を検出して終了コード1になることを確認した。このWindows環境から本番native学習を開始できるという意味ではない。
+
+ローカル環境のPyYAML 6.0.3・Cython 3.3.0・setuptools 84.2.0は、ColabのPyYAML 6.0.2・Cython 3.2.9・setuptools<81と異なる。benchmarkはテストfixtureから固定sourceを読み込んでおり、ローカルのpackage metadataへ導入していない。従って`pip check`の成功はColabの依存環境全体の再現を証明しない。Linuxでの通常fairseq buildとColabのbootstrapは別途検証が必要。古いOmegaConfのmetadataに対するpipのdeprecationと、upstream fairseqのimportlib/autocast deprecationは残っているが、今回のテストではエラーではない。
+
 確認した内容:
+
+- NotebookのT2TT/Monotonicの4通りのスイッチ、2条件/3条件・ASR有無の評価コマンドを実際のCLI parserへ渡して検証。Monotonicはteacher不要、評価は共通dev条件であることを確認。
+- standalone Notebookの全CLIコマンドと5条件を検査。シェルescapeを引数listと`check=True`へ変更し、空白付きpathの保持と失敗時の停止を検証。学習レシピ・更新数・既存のコードpinは保持した。
+- 環境preflightが依存不整合・optional extraの異なるversion・DLL import失敗・Python不一致・fairseq provenance不一致・native samplerの異常を検出することを確認。
 
 - 固定revision `4361e55a99c7f4ea3a00c5c138f6820c34a07d06`のbenchmark runtimeを直接使用。実ZIP publisher・検証・復元を使い、pair処理の途中失敗→新VMを想定した復元→完了済みstageの再利用を検証。既存pairを後続増分packへ複製しない。
 - benchmarkのCPU WAV packを作成後、原本WAVを参照不能にしてもGPU側staging関数で復元可能。native fairseqの辞書・設定・TSV・音声も原本payloadを参照不能にした状態でローカルコピーから読み込めることを確認。
