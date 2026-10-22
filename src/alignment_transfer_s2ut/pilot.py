@@ -97,6 +97,11 @@ def commands(args):
               "--warmup-updates", str(args.warmup_updates), "--validation-interval", str(args.interval),
               "--save-interval-updates", str(args.interval), "--prior-smoothing", "0.05",
               "--source-mapping", "frontend", "--patience", "0", "--device", "cuda", "--resume-if-exists"]
+    for field, default in (("loader_workers", 2), ("prefetch_batches", 2), ("cache_gb", 8.), ("cache_reserve_gb", 1.)):
+        shared += ["--" + field.replace("_", "-"), str(getattr(args, field, default))]
+    shared.append("--pin-memory")
+    if getattr(args, "cache_dir", None):
+        shared += ["--cache-dir", str(args.cache_dir)]
     result = {}
     for name, method, prior in CONDITIONS:
         command = shared + ["--method", method, "--prior-type", prior, "--output", str(Path(args.output) / name)]
@@ -201,6 +206,9 @@ def report(runs, logs, output):
                   "checkpoint_best": str((root / "checkpoint_best.pt").resolve()),
                   "recorded_seconds": sum(a["elapsed_seconds"] for a in condition_attempts),
                   "attempts": len(condition_attempts), "failed_attempts": sum(a["status"] != "succeeded" for a in condition_attempts)}
+        record["input_pipeline"] = experiment.get("input_pipeline")
+        for field in ("input/data_wait_seconds", "input/optimization_seconds"):
+            record[field] = sum(row[field] for row in metrics.values()) if all(field in row for row in metrics.values()) else None
         evaluation = root / "dev-metrics.json"
         if evaluation.is_file():
             values = read_json(evaluation)
@@ -255,8 +263,12 @@ def main():
         for field in ("manifest", "config", "units", "teacher", "output", "logs"):
             child.add_argument("--" + field, required=True)
         for field, default in (("max-updates", 10000), ("anneal-steps", 5000), ("seed", 1), ("batch-size", 8),
-                               ("update-frequency", 4), ("max-tokens", 20000), ("warmup-updates", 1000), ("interval", 500)):
+                               ("update-frequency", 4), ("max-tokens", 20000), ("warmup-updates", 1000), ("interval", 500),
+                               ("loader-workers", 2), ("prefetch-batches", 2)):
             child.add_argument("--" + field, type=int, default=default)
+        child.add_argument("--cache-dir")
+        child.add_argument("--cache-gb", type=float, default=8.)
+        child.add_argument("--cache-reserve-gb", type=float, default=1.)
     child = sub.add_parser("report")
     for field in ("runs", "logs", "output"):
         child.add_argument("--" + field, required=True)
@@ -276,7 +288,7 @@ def main():
         result = commands(args)
         if args.action == "train":
             check_runtime()
-            rows = load_manifest(args.manifest)
+            rows = load_manifest(args.manifest, check_audio=False)
             if {r["split"] for r in rows} != {"train", "dev"}:
                 raise ValueError("pilot manifest must contain train/dev only")
             for name, command in result.items():

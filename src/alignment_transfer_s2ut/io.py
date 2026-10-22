@@ -63,6 +63,9 @@ class ArtifactStore:
     def path(self, pair_id):
         return self.root / (digest(pair_id) + ".npz")
 
+    def hash(self, pair_id):
+        return file_hash(self.path(pair_id))
+
     def put(self, pair_id, metadata, arrays, overwrite=False):
         metadata = {**metadata, "pair_id": pair_id, "schema_version": 1}
         arrays = {key: np.asarray(value) for key, value in arrays.items()}

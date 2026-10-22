@@ -75,6 +75,7 @@ def test_pilot_commands_have_three_strong_conditions_and_teacher_free_tail():
         parsed = parser_for("train_s2ut").parse_args(command[3:])
         assert parsed.recipe == "strong" and parsed.max_updates == 10000 and parsed.anneal_steps == 5000
         assert parsed.resume_if_exists and parsed.device == "cuda"
+        assert parsed.loader_workers == 2 and parsed.prefetch_batches == 2 and parsed.pin_memory
         assert parsed.teacher == ("teacher" if name == "annealed_t2tt" else None)
     args.anneal_steps = args.max_updates
     with pytest.raises(ValueError, match="teacher-free tail"):

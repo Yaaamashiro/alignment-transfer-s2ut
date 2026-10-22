@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import shutil
+import tempfile
 import pytest
 import torch
 
@@ -10,7 +11,14 @@ pytestmark = [pytest.mark.gpu, pytest.mark.skipif(
     reason="set AT_S2UT_GPU_MANIFEST to a small real train/dev manifest on a CUDA machine")]
 
 
-def test_real_ctc_hubert_native_s2ut_vocoder_teacher_free(tmp_path):
+@pytest.fixture
+def local_stream_cache():
+    # GPU test outputs may be on Drive; the input cache must be on the VM.
+    with tempfile.TemporaryDirectory(prefix="alignment-stream-") as directory:
+        yield directory
+
+
+def test_real_ctc_hubert_native_s2ut_vocoder_teacher_free(tmp_path, local_stream_cache):
     from alignment_transfer_s2ut.smoke_pipeline import invoke
     from alignment_transfer_s2ut.data.manifest import load_manifest
     from alignment_transfer_s2ut.io import write_jsonl
@@ -22,7 +30,8 @@ def test_real_ctc_hubert_native_s2ut_vocoder_teacher_free(tmp_path):
     invoke("fetch_assets", "--config", root / "configs/units/hubert_km100.yaml")
     invoke("fetch_assets", "--config", root / "configs/s2ut/vocoder.yaml")
     common = ["--manifest", manifest, "--config", root / "configs/s2ut/fisher.yaml",
-              "--device", "cuda", "--batch-size", 1, "--update-frequency", 1, "--max-updates", 2]
+              "--device", "cuda", "--batch-size", 1, "--update-frequency", 1, "--max-updates", 2,
+              "--loader-workers", 2, "--prefetch-batches", 2, "--pin-memory"]
     invoke("train_t2tt", *common, "--output", tmp_path / "t2tt")
     invoke("extract_t2tt_attention", "--manifest", manifest, "--checkpoint", tmp_path / "t2tt/checkpoint_best.pt",
            "--device", "cuda", "--output", tmp_path / "mt")
@@ -37,6 +46,7 @@ def test_real_ctc_hubert_native_s2ut_vocoder_teacher_free(tmp_path):
     for name, method, prior in methods:
         invoke("train_s2ut", *common, "--units", tmp_path / "units", "--teacher", tmp_path / "teacher",
                "--recipe", "strong", "--method", method, "--prior-type", prior, "--anneal-steps", 1,
+               "--cache-dir", local_stream_cache,
                "--output", tmp_path / name)
     for name in ("t2tt", "mt", "ctc", "teacher"):
         shutil.rmtree(tmp_path / name)

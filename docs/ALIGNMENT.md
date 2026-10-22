@@ -16,7 +16,7 @@
 
 ## Projection
 
-source token spanと`F`個の音声時間binのoverlapをrow normalizeして`M_src[S,F]`を作る。**Fは実際のforwardから取得する。** source保存artifactにencoder indexを焼き込まない。target reduced run spanとEnglish token spanのoverlapをrow normalizeして`M_tgt[U,T]`を作る。
+source token spanと`F`個の音声時間binのoverlapをrow normalizeして`M_src[S,F]`を作る。学習のCPU先読みでは実際のfeature長とfrontendの式からFを計算し、**各forwardでencoderの実測長との一致を検査する。** source保存artifactにencoder indexを焼き込まない。target reduced run spanとEnglish token spanのoverlapをrow normalizeして`M_tgt[U,T]`を作る。
 
 既定の`--source-mapping frontend`は実際のFBANK frame数とConvのkernel/stride/paddingから、各encoder位置の音響frontend supportを計算する。25 ms窓・10 ms shiftのFBANK、kernel 5/5・stride 2/2では、位置`j`の中心frameは`4j`、supportは元のFBANKの`4j-6`〜`4j+6`。有効なframe indexに切り詰め、各FBANK窓の開始・終了時刻を使う。畳み込みpaddingを観測音声として扱わず、出力長の予測とforwardの実測値が違えば停止する。これはfrontendの局所受容野であり、Transformer self-attention後の情報範囲を制限するものではない。
 
@@ -26,7 +26,7 @@ source token spanと`F`個の音声時間binのoverlapをrow normalizeして`M_s
 
 Guidance用のuniform混合は投影後に行う。CTC blankの扱いや元のtoken spanを変更せず、raw priorと平滑化後priorを診断で別々に観測できる。
 
-teacher生成CLIは時刻spanとMT attentionを持つ**projection packet**を保存する。denseなU×F行列はforwardと可視化時に生成する。これはencoder長を前処理で固定しないための設計である。
+teacher生成CLIは時刻spanとMT attentionを持つ**projection packet**を保存する。denseなU×F行列は学習のCPU先読みと可視化時に生成する。これはencoder長を前処理で固定しないための設計である。
 
 ## Integrity
 

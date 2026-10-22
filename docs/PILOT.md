@@ -11,7 +11,7 @@ GPUランタイムを選択し、冒頭セルの`CORPUS`と`ROOT`を指定する
 | 設定 | 既定値 |
 |---|---|
 | accepted manifest | `CORPUS/production/manifests/releases/accepted.jsonl` |
-| 出力先 | `/content/drive/MyDrive/alignment-transfer-s2ut-data/pilot-001` |
+| 出力先 | `/content/drive/MyDrive/alignment-transfer-s2ut-data/pilot-stream-001` |
 | train / dev上限 | 10000 / 200 pairs |
 | seed | 1 |
 | T2TT更新数 | 20000 |
@@ -20,12 +20,16 @@ GPUランタイムを選択し、冒頭セルの`CORPUS`と`ROOT`を指定する
 | warmup | 全条件1000 updates |
 | validation / checkpoint間隔 | 500 updates |
 | batch size / accumulation / max tokens | 8 / 4 / 20000 |
+| CPU workers / prefetch | 2 / 2 nominal batches |
+| local cache | `/content/alignment-transfer-cache`、上限8 GiB |
 | recipe / smoothing / source mapping | strong / 0.05 / frontend |
 | dev評価 | unit error rate（音声生成・ASR-BLEUは冒頭で有効化） |
 
 更新数はT2TTとS2UTで独立する。S2UTを5000〜20000更新へ変更する際も、`ANNEAL_STEPS < S2UT_UPDATES`としてbeta=0の学習区間を残す。ここでのwarmupはpilot用設定で、[共通レシピ](EXPERIMENTS.md)の既定10000更新とは異なる。
 
 初回セルはPython 3.10.22・固定バージョンの依存package・固定commitのfairseqを構築し、CUDA、torch/torchaudio、fairseq provenanceを検査する。CPU版PyTorchでは実行を停止する。
+
+学習stageでは、少量の入力が揃うと学習を開始し、CPU workerが次を先読みする。未拡張のFBANK/CMVN・unit・teacherはVMのcacheへ必要時に保存し、3条件で共有する。[STREAMING](STREAMING.md)に上限・再開・検証を記載する。CTC/HuBERT/teacherの生成は学習前に完了させる。
 
 ## 実行順
 

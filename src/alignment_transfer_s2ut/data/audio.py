@@ -16,18 +16,21 @@ def waveform(path, sample_rate=16000):
     return torch.from_numpy(audio), sample_rate
 
 
-def features(path, backend="fairseq", bins=80, waveform_scale=1.0):
+def features(path, backend="fairseq", bins=80, waveform_scale=1.0, return_duration=False):
     wave, rate = waveform(path)
+    duration = len(wave) / rate
     if not math.isfinite(waveform_scale) or waveform_scale <= 0:
         raise ValueError("positive finite FBANK waveform scale required")
     wave = wave * waveform_scale
     if backend == "fairseq":
         import torchaudio.compliance.kaldi as kaldi
-        return kaldi.fbank(wave[None], sample_frequency=rate, num_mel_bins=bins,
+        value = kaldi.fbank(wave[None], sample_frequency=rate, num_mel_bins=bins,
                            frame_length=25, frame_shift=10, dither=0.0,
                            energy_floor=1.0).float()
-    # Synthetic smoke uses log STFT bins, not production FBANK. It cannot report research results.
-    spec = torch.stft(wave, 400, hop_length=160, window=torch.hann_window(400),
+    else:
+        # Synthetic smoke uses log STFT bins, not production FBANK.
+        spec = torch.stft(wave, 400, hop_length=160, window=torch.hann_window(400),
                       return_complex=True).abs().clamp_min(1e-5).log().T
-    return torch.nn.functional.interpolate(spec[:, None], size=bins, mode="linear",
+        value = torch.nn.functional.interpolate(spec[:, None], size=bins, mode="linear",
                                             align_corners=False)[:, 0].contiguous()
+    return (value, duration) if return_duration else value

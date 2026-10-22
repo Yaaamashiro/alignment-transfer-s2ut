@@ -25,6 +25,8 @@
 | prior-type / prior-smoothing | t2tt / 0.05 |
 | source-mapping / monotonic-sigma | frontend / 0.1 |
 
+入力の並列読み込みは[STREAMING](STREAMING.md)を参照。worker数・先読み数・cache設定は`input_pipeline`へ記録し、学習順・目的関数を変更しない。通常CLIは同期読み込み、pilot/Colabは2 workerの先読みを使用する。
+
 同じS2UT source/target frontend、units、seed、全recipe引数、最大更新数、早期停止、vocoder、checkpoint選択、推論設定を4条件で共通化する。変更点はmethodと転移係数のみ。trainとdevの対訳/音声path fingerprint、unit config、初期stateのhashを`experiment.json`へ保存する。
 
 ## Strong recipe
@@ -69,6 +71,8 @@ architecture、語彙、train/dev pair、backend、optimizer recipe、method/係
 `metrics.jsonl`に`train/main_loss, train/alignment_loss, train/total_loss, dev/main_loss, dev/alignment_loss, alignment/teacher_entropy, alignment/student_entropy, alignment/kl_teacher_student, guidance/beta, distillation/lambda`とarchitectureを保存する。devのmain lossは全条件でpriorを適用せず計算する。dev teacher artifactが存在する場合はKLも診断用に計算し、存在しなければ`dev/alignment_loss=null`とする。checkpoint選択へKL/total lossを使わない。
 
 strongでは重み適用後の補助lossを`train/auxiliary_source_letter, train/auxiliary_target_letter, train/auxiliary_decoder_target_ctc`へ保存する。KLとteacher entropyは更新内の全有効rowで集約し、student entropyは全非padding target tokenで集約する。
+
+`input/data_wait_seconds, input/optimization_seconds, input/loader_workers`で入力待ちと更新処理を記録する。CUDA更新の計測は終了同期を含み、validation/checkpoint時間は別。pilot summaryへ合算する。
 
 ## 評価と可視化
 

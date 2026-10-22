@@ -1,6 +1,6 @@
 # Validation record — 2026-10-22
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`python -m pytest -q`は**34 passed, 1 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。
+独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`python -m pytest -q`は**49 passed, 1 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
 
@@ -34,6 +34,12 @@ fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb
 - strongの3条件コマンドとbeta=0の後半区間を検査。コマンド失敗時の終了コード・ログ・所要時間を保存。
 - pilot集計で再開時のstep重複を扱い、条件間で異なるdev評価data/configの混在を拒否。専用notebookの構文と接続試験用JSONLを検証。
 - ローカルのGTX 1650でnvidia-smiのCSV採取とサンプラ終了を確認（GPU学習は行っていない）。
+- 先頭入力の消費と後続入力の取得が重なり、未完了の後続入力を待たずに先頭を使用できること、queue上限を確認。
+- `max_tokens`による部分消費でも順序を保持し、未消費の先読みをcheckpoint位置に含めない。
+- 5つのmethod/prior条件で、同期版・複数worker/cache版・worker数を変えたresumeのCPU parameter/RNGが一致。
+- native strongでもSpecAugmentと補助decoder dropoutを含め、同期・先読み/cache・resumeのCPU parameterが一致。
+- キャッシュ同時要求の重複生成防止、LRU容量制限、容量不足時の非保存、破損検知、元artifact hash保持、変更したsourceの拒否を確認。
+- dev payloadの読み出し前に最初の学習forwardへ進み、後続sampleのunit config不一致は消費時に停止することを確認。
 
 1件のskipは**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。実コーパスの前処理、本学習、実音声品質、ASR-BLEUによる手法比較、Colab上の実行は未検証。人工smokeやnative layerテストの成功を研究仮説の検証結果として扱わない。
 

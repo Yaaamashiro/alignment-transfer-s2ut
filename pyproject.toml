@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Controlled alignment transfer from text translation to fairseq S2UT"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.26,<3", "torch>=2.2,<2.8", "PyYAML>=6,<7", "soundfile>=0.12,<1", "scipy>=1.11,<2"]
+dependencies = ["numpy>=1.26,<3", "torch>=2.2,<2.8", "PyYAML>=6,<7", "soundfile>=0.12,<1", "scipy>=1.11,<2", "filelock==4.1.0"]
 
 [project.optional-dependencies]
 preprocess = ["transformers==4.44.2", "torchaudio==2.7.1", "joblib==1.4.2", "scikit-learn==1.5.2", "sentencepiece==0.2.0"]

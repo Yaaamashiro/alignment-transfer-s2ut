@@ -49,7 +49,7 @@ python -m alignment_transfer_s2ut.extract_units \
   --manifest outputs/manifest.jsonl --config configs/units/hubert_km100.yaml \
   --output outputs/units --device cuda
 
-# 6. 時刻spanを保ったteacher packetを生成。Fへの投影はS2UTのforward時
+# 6. 時刻spanを保ったteacher packetを生成。Fへの投影は学習時のCPU先読みで行う
 python -m alignment_transfer_s2ut.build_teacher_alignment \
   --manifest outputs/manifest.jsonl --mt-attention outputs/mt --alignment outputs/ctc \
   --units outputs/units --config configs/s2ut/fisher.yaml --output outputs/teacher
@@ -64,6 +64,8 @@ done
 ```
 
 全4条件で同じseed、data、unit、batch、optimizer、scheduler、更新数を指定する。[実験条件](EXPERIMENTS.md)に各引数・再開契約を記載する。`--layer -1`が最終層、`--heads 0 2`などで0始まりのheadを選択できます。
+
+学習と入力取得を重ねる場合は全条件へ`--loader-workers 2 --prefetch-batches 2 --cache-dir /content/alignment-transfer-cache --cache-gb 8 --pin-memory`を追加する。[STREAMING](STREAMING.md)にqueue上限・local cache・再開時の順序を記載する。
 
 ```bash
 python -m alignment_transfer_s2ut.compare_experiments \
