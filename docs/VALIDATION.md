@@ -1,11 +1,17 @@
 # Validation record — 2026-10-22
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`python -m pytest -q`は**54 passed, 1 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。
+独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**67 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
 
 確認した内容:
 
+- 別途学習した公式fairseq checkpointのrecipe/metadata/データhashを検証し、読み取り専用Baselineとして登録。snapshot ZIPのhash・member検査と、再開時のsnapshot固定を検証。
+- 新経路で公式Trainerの実optimizer更新を実行。転移モデルの初期重みは同じseedの公式モデルとbit一致し、beta=0の更新後parameterも公式Trainerとbit一致。
+- native optimizer/checkpointの保存・再開、完了runの再実行、teacher削除後のnative dev検証とstock SequenceGeneratorによるBaseline/転移モデルの共通推論を確認。
+- report-onlyの全dev unit main lossによるbest選択とvalidation前後のRNG保持を検証。FP16の確認済みoverflowだけを再試行する制御は人工scalerで同一batch・RNG・buffer復元を検査。
+- 元のfull train/dev・保存unit列のimportを検証し、prepared targetの変更・辞書やrecipeの改変・生成条件やcheckpointが異なる評価を検出。
+- 新Colabは登録BaselineからT2TT/teacher用backbone設定を生成。native FP16接続試験、full train/dev前処理、共通推論・評価の構文と既定値を検証。
 - native S2UT Baselineとlocal extensionのlogitが厳密一致。
 - beta=0がBaselineに厳密一致。uniform priorも丸め誤差内で一致。
 - biased priorが実際のcontext/outputを変更し、Cross-Attentionへ勾配が流れる。
@@ -45,6 +51,8 @@ fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb
 - native fairseq checkpointでもT2TT text生成/評価を実行。生成・評価の途中再開、変更した生成条件・dev data・改変した予測cacheの拒否を確認。
 - pilot集計でT2TT dev text評価を添付し、異なるteacher checkpoint・dev data・test評価の混入を拒否。wheelに新しい評価CLI/moduleを同梱し、両Colabの構文を確認。
 
-1件のskipは**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。実コーパスの前処理、本学習、T2TT dev text BLEU、実音声品質、ASR-BLEUによる手法比較、Colab上の実行は未検証。人工smokeやnative layerテストの成功を研究仮説の検証結果として扱わない。
+2件のskipは**native TrainerのFP16接続試験**と**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。pure-Python fairseq環境にはCythonのbatch sampler拡張がないため、ローカルでは実Trainerのmicrobatch更新までを検証し、CLIのepoch iterator全体は未実行。Colabは通常のLinux buildを使う。
+
+Drive上では`experiment-001`の`paper-fisher-v1` run、365000更新snapshot、対応するpreparedデータ・unitの保存先とJSONの学習設定を確認した。約1 GBの実checkpoint本体のローカル取得・登録、実コーパスの前処理、本学習、T2TT dev text BLEU、実音声品質、ASR-BLEUによる手法比較、Colab上の実行は未検証。人工smokeやnative Trainerテストの成功を研究仮説の検証結果として扱わない。
 
 ローカルで準備した検証環境は`outputs/native-venv/`。ここから`python -m pytest -q`、各CLIを実行できる。`outputs/`内のPython、依存package、取得したupstream source、checkpoint、音声、画像はGit対象外。

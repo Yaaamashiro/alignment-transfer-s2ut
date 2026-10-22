@@ -1,5 +1,7 @@
 # 実データ診断とStrong S2UT Pilot
 
+この少量pilotは独立trainer（`--trainer legacy`）による機能診断。既存benchmarkで学習したモデルを固定Baselineに使う比較は[BENCHMARK_COMPARISON](BENCHMARK_COMPARISON.md)と専用Colabを使用する。
+
 [Colabで開く](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/pilot.ipynb)
 
 実CTC・HuBERT・公式vocoderのCUDA接続確認、alignment品質診断、strongの3条件比較を行う。pilotには元のtrain/devだけを使い、最終testは手法・設定の確定後に別途評価する。

@@ -1,5 +1,7 @@
 # 利用ガイド
 
+既存benchmarkで学習したS2UTをBaselineに使う場合は[BENCHMARK_COMPARISON](BENCHMARK_COMPARISON.md)を使用する。以下のS2UT学習例は`--trainer legacy`を明示する独立trainerの診断用手順。
+
 各コマンドの実行環境は[README](../README.md#インストール)を参照。
 
 実データの診断とstrongの3条件pilotをまとめて実行する場合は、[専用Colabと手順](PILOT.md)を参照。固定したtrain/dev部分集合、CUDA接続試験、実行ログ、GPU使用率、dev評価を用意する。
@@ -56,7 +58,7 @@ python -m alignment_transfer_s2ut.build_teacher_alignment \
 
 # 7. 同一設定・同一初期化で4条件を実行
 for method in baseline distillation guidance annealed_guidance; do
-  python -m alignment_transfer_s2ut.train_s2ut \
+  python -m alignment_transfer_s2ut.train_s2ut --trainer legacy \
     --manifest outputs/manifest.jsonl --config configs/s2ut/fisher.yaml \
     --units outputs/units --teacher outputs/teacher --method "$method" \
     --output "outputs/$method" --device cuda --max-updates 2
@@ -111,15 +113,15 @@ python -m alignment_transfer_s2ut.diagnose_alignment \
 UPDATES=20000
 COMMON="--manifest outputs/manifest.jsonl --config configs/s2ut/fisher.yaml --units outputs/units --recipe strong --max-updates $UPDATES --validation-interval 1000 --save-interval-updates 1000 --device cuda"
 
-python -m alignment_transfer_s2ut.train_s2ut $COMMON \
+python -m alignment_transfer_s2ut.train_s2ut --trainer legacy $COMMON \
   --method baseline --output outputs/strong/baseline
 
-python -m alignment_transfer_s2ut.train_s2ut $COMMON \
+python -m alignment_transfer_s2ut.train_s2ut --trainer legacy $COMMON \
   --method annealed_guidance --prior-type monotonic --monotonic-sigma 0.1 \
   --source-mapping frontend --prior-smoothing 0.05 --anneal-steps 10000 \
   --output outputs/strong/annealed_monotonic
 
-python -m alignment_transfer_s2ut.train_s2ut $COMMON \
+python -m alignment_transfer_s2ut.train_s2ut --trainer legacy $COMMON \
   --method annealed_guidance --prior-type t2tt --teacher outputs/teacher \
   --source-mapping frontend --prior-smoothing 0.05 --anneal-steps 10000 \
   --output outputs/strong/annealed_t2tt

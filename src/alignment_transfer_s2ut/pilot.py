@@ -91,6 +91,7 @@ def commands(args):
     if min(args.batch_size, args.update_frequency, args.max_tokens, args.interval) < 1 or args.warmup_updates < 0:
         raise ValueError("invalid pilot batch, interval or warmup")
     shared = [sys.executable, "-m", "alignment_transfer_s2ut.train_s2ut", "--manifest", str(args.manifest),
+              "--trainer", "legacy",
               "--config", str(args.config), "--units", str(args.units), "--recipe", "strong",
               "--max-updates", str(args.max_updates), "--anneal-steps", str(args.anneal_steps),
               "--seed", str(args.seed), "--batch-size", str(args.batch_size),

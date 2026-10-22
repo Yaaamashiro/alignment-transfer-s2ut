@@ -26,7 +26,15 @@ def evaluate(args):
     signatures = {(p["checkpoint_hash"], p["vocoder_hash"], digest(p["inference_config"])) for p in predictions}
     if len(signatures) != 1:
         raise ValueError("mixed checkpoints, vocoders or inference configurations")
+    for row in rows:
+        prediction = by_id[row["pair_id"]]
+        if prediction["source_audio_hash"] != (row.get("ja_sha256") or file_hash(row["ja_audio"])):
+            raise ValueError("evaluation source audio differs from the fixed manifest")
+        if prediction.get("inference_beta") != 0:
+            raise ValueError("evaluation requires teacher-free predictions")
     contract = {"predictions_hash": file_hash(args.predictions), "manifest_hash": manifest_hash(rows),
+                "inference_config": predictions[0]["inference_config"], "vocoder_hash": predictions[0]["vocoder_hash"],
+                "backend": predictions[0]["backend"],
                 "asr_config_hash": file_hash(args.asr_config) if args.asr_config else None,
                 "unit_artifacts_hash": digest([file_hash(ArtifactStore(args.units).path(row["pair_id"]))
                                                for row in rows]) if args.units else None}
@@ -41,7 +49,10 @@ def evaluate(args):
     if args.units:
         store, errors, count = ArtifactStore(args.units), 0, 0
         for row in rows:
-            _, artifact = store.get(row["pair_id"], {"split": args.split})
+            expected = {"split": args.split}
+            if row.get("en_sha256"):
+                expected["en_audio_hash"] = row["en_sha256"]
+            _, artifact = store.get(row["pair_id"], expected)
             reference = artifact["reduced_units"].tolist()
             errors += edit_distance(reference, by_id[row["pair_id"]]["units"])
             count += len(reference)
@@ -57,6 +68,8 @@ def evaluate(args):
                        device=args.device)
         hypotheses = []
         for index, row in enumerate(rows):
+            if file_hash(by_id[row["pair_id"]]["en_audio"]) != by_id[row["pair_id"]]["generated_audio_hash"]:
+                raise ValueError("generated waveform changed before ASR evaluation")
             wave, rate = waveform(by_id[row["pair_id"]]["en_audio"])
             hypotheses.append(asr({"array": wave.numpy(), "sampling_rate": rate},
                                   generate_kwargs=cfg.get("generate_kwargs", {}))["text"])

@@ -112,8 +112,8 @@ def test_trainer_kl_global_rows_matches_large_batch(review_data, tmp_path, monke
         gradients.append([p.grad.detach().clone() for group in optimizer.param_groups for p in group["params"]])
         return original_step(optimizer, *args, **kwargs)
     monkeypatch.setattr(torch.optim.Adam, "step", capture_step)
-    invoke("train_s2ut", *common, "--batch-size", 2, "--update-frequency", 1, "--output", tmp_path / "large")
-    invoke("train_s2ut", *common, "--batch-size", 1, "--update-frequency", 2, "--output", tmp_path / "micro")
+    invoke("train_s2ut", "--trainer", "legacy", *common, "--batch-size", 2, "--update-frequency", 1, "--output", tmp_path / "large")
+    invoke("train_s2ut", "--trainer", "legacy", *common, "--batch-size", 1, "--update-frequency", 2, "--output", tmp_path / "micro")
     # Compare update gradients directly: Adam can amplify rounding in near-zero biases.
     for large, micro in zip(*gradients):
         torch.testing.assert_close(large, micro, atol=1e-6, rtol=2e-5)
@@ -124,7 +124,7 @@ def test_trainer_kl_global_rows_matches_large_batch(review_data, tmp_path, monke
 
 def test_monotonic_training_and_audit(review_data, tmp_path):
     root = review_data
-    invoke("train_s2ut", *_train_args(root), "--backend", "smoke", "--batch-size", 2, "--update-frequency", 1,
+    invoke("train_s2ut", "--trainer", "legacy", *_train_args(root), "--backend", "smoke", "--batch-size", 2, "--update-frequency", 1,
            "--prior-type", "monotonic", "--method", "annealed_guidance", "--output", tmp_path / "mono")
     saved = load_checkpoint(tmp_path / "mono/checkpoint_last.pt")
     assert saved["teacher_signature"] is None
@@ -158,9 +158,9 @@ def test_strong_baseline_resume_and_teacher_free_inference(review_data, tmp_path
     recipe_path.write_text(yaml.safe_dump(recipe), encoding="utf-8")
     common = [*_train_args(root), "--recipe", "strong", "--recipe-config", recipe_path,
               "--batch-size", 1, "--update-frequency", 2]
-    invoke("train_s2ut", *common, "--max-updates", 2, "--output", tmp_path / "full")
-    invoke("train_s2ut", *common, "--output", tmp_path / "resume")
-    invoke("train_s2ut", *common, "--max-updates", 2, "--output", tmp_path / "resume", "--resume")
+    invoke("train_s2ut", "--trainer", "legacy", *common, "--max-updates", 2, "--output", tmp_path / "full")
+    invoke("train_s2ut", "--trainer", "legacy", *common, "--output", tmp_path / "resume")
+    invoke("train_s2ut", "--trainer", "legacy", *common, "--max-updates", 2, "--output", tmp_path / "resume", "--resume")
     full = load_checkpoint(tmp_path / "full/checkpoint_last.pt")
     resumed = load_checkpoint(tmp_path / "resume/checkpoint_last.pt")
     assert "z" not in full["auxiliary"]["target_vocabulary"]
@@ -181,7 +181,7 @@ def test_strong_baseline_resume_and_teacher_free_inference(review_data, tmp_path
            "--output", tmp_path / "native-teacher")
     # Same strong recipe across T2TT/monotonic annealed controls; no recipe mixing.
     for prior in ("monotonic", "t2tt"):
-        invoke("train_s2ut", *common, "--max-updates", 2, "--method", "annealed_guidance", "--prior-type", prior,
+        invoke("train_s2ut", "--trainer", "legacy", *common, "--max-updates", 2, "--method", "annealed_guidance", "--prior-type", prior,
                "--teacher", tmp_path / "native-teacher", "--output", tmp_path / prior)
     from alignment_transfer_s2ut.compare_experiments import compare_experiments
     roots = [tmp_path / name for name in ("full", "monotonic", "t2tt")]

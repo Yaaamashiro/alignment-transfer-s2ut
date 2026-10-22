@@ -18,7 +18,7 @@ Drive上の音声・unit・teacher
 ## 設定
 
 ```bash
-python -m alignment_transfer_s2ut.train_s2ut \
+python -m alignment_transfer_s2ut.train_s2ut --trainer legacy \
   --manifest outputs/manifest.jsonl --config configs/s2ut/fisher.yaml \
   --units outputs/units --teacher outputs/teacher \
   --recipe strong --method annealed_guidance --max-updates 10000 --anneal-steps 5000 \

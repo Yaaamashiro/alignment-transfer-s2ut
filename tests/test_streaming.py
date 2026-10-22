@@ -147,7 +147,7 @@ def test_training_starts_before_loading_dev_payloads(review_data, tmp_path, monk
         return original_forward(self, *args, **kwargs)
     monkeypatch.setattr(ArtifactStore, "get", tracked_get)
     monkeypatch.setattr(SmokeModel, "forward", tracked_forward)
-    invoke("train_s2ut", "--manifest", review_data / "manifest.jsonl", "--config", review_data / "tiny.yaml",
+    invoke("train_s2ut", "--trainer", "legacy", "--manifest", review_data / "manifest.jsonl", "--config", review_data / "tiny.yaml",
            "--backend", "smoke", "--units", review_data / "units", "--loader-workers", 2,
            "--batch-size", 1, "--update-frequency", 1, "--max-updates", 1, "--output", tmp_path / "train")
     assert first_forward and "2" not in first_forward[0] and "3" not in first_forward[0]
@@ -162,7 +162,7 @@ def test_lazy_mixed_units_fail_when_consumed_without_skipping_updates(review_dat
     metadata["unit_config_hash"] = "different-config"
     store.put("1", metadata, arrays, overwrite=True)
     with pytest.raises(ValueError, match="provenance"):
-        invoke("train_s2ut", "--manifest", review_data / "manifest.jsonl", "--config", review_data / "tiny.yaml",
+        invoke("train_s2ut", "--trainer", "legacy", "--manifest", review_data / "manifest.jsonl", "--config", review_data / "tiny.yaml",
                "--backend", "smoke", "--units", units, "--loader-workers", 2, "--batch-size", 1,
                "--update-frequency", 1, "--max-updates", 2, "--output", tmp_path / "train")
     assert load_checkpoint(tmp_path / "train/checkpoint_last.pt")["step"] == 1
@@ -176,11 +176,11 @@ def test_streaming_training_matches_serial_and_resumes_with_other_workers(review
         "--backend", "smoke", "--units", review_data / "units", "--teacher", review_data / "teacher",
         "--method", method, "--prior-type", prior, "--batch-size", 2, "--max-tokens", 65,
         "--update-frequency", 2, "--warmup-updates", 0, "--anneal-steps", 1]
-    invoke("train_s2ut", *common, "--max-updates", 3, "--output", tmp_path / "serial")
+    invoke("train_s2ut", "--trainer", "legacy", *common, "--max-updates", 3, "--output", tmp_path / "serial")
     optimized = [*common, "--loader-workers", 2, "--prefetch-batches", 3, "--cache-dir", tmp_path / "cache"]
-    invoke("train_s2ut", *optimized, "--max-updates", 3, "--output", tmp_path / "full")
-    invoke("train_s2ut", *optimized, "--max-updates", 1, "--output", tmp_path / "resume")
-    invoke("train_s2ut", *optimized, "--loader-workers", 1, "--prefetch-batches", 1,
+    invoke("train_s2ut", "--trainer", "legacy", *optimized, "--max-updates", 3, "--output", tmp_path / "full")
+    invoke("train_s2ut", "--trainer", "legacy", *optimized, "--max-updates", 1, "--output", tmp_path / "resume")
+    invoke("train_s2ut", "--trainer", "legacy", *optimized, "--loader-workers", 1, "--prefetch-batches", 1,
            "--max-updates", 3, "--output", tmp_path / "resume", "--resume")
     states = [load_checkpoint(tmp_path / name / "checkpoint_last.pt") for name in ("serial", "full", "resume")]
     for key, value in states[0]["model"].items():
@@ -207,10 +207,10 @@ def test_native_strong_augmentation_stays_identical_with_prefetch_and_resume(rev
         "--units", review_data / "units", "--recipe", "strong", "--recipe-config", path,
         "--method", "annealed_guidance", "--prior-type", "monotonic", "--batch-size", 2,
         "--max-tokens", 65, "--update-frequency", 2, "--warmup-updates", 0]
-    invoke("train_s2ut", *common, "--max-updates", 3, "--output", tmp_path / "serial")
+    invoke("train_s2ut", "--trainer", "legacy", *common, "--max-updates", 3, "--output", tmp_path / "serial")
     optimized = [*common, "--loader-workers", 2, "--cache-dir", tmp_path / "cache"]
-    invoke("train_s2ut", *optimized, "--max-updates", 1, "--output", tmp_path / "resume")
-    invoke("train_s2ut", *optimized, "--max-updates", 3, "--output", tmp_path / "resume", "--resume")
+    invoke("train_s2ut", "--trainer", "legacy", *optimized, "--max-updates", 1, "--output", tmp_path / "resume")
+    invoke("train_s2ut", "--trainer", "legacy", *optimized, "--max-updates", 3, "--output", tmp_path / "resume", "--resume")
     first, second = [load_checkpoint(tmp_path / name / "checkpoint_last.pt") for name in ("serial", "resume")]
     for key in first["model"]:
         assert torch.equal(first["model"][key], second["model"][key]), key

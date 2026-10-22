@@ -46,7 +46,7 @@ def test_real_ctc_hubert_native_s2ut_vocoder_teacher_free(tmp_path, local_stream
     methods = [("baseline", "baseline", "t2tt"), ("annealed_monotonic", "annealed_guidance", "monotonic"),
                ("annealed_t2tt", "annealed_guidance", "t2tt")]
     for name, method, prior in methods:
-        invoke("train_s2ut", *common, "--units", tmp_path / "units", "--teacher", tmp_path / "teacher",
+        invoke("train_s2ut", "--trainer", "legacy", *common, "--units", tmp_path / "units", "--teacher", tmp_path / "teacher",
                "--recipe", "strong", "--method", method, "--prior-type", prior, "--anneal-steps", 1,
                "--cache-dir", local_stream_cache,
                "--output", tmp_path / name)

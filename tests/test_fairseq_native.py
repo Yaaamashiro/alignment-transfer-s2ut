@@ -98,7 +98,7 @@ def test_native_training_cli_and_visualization_with_synthetic_supervision(tmp_pa
            "--output", tmp_path / "teacher")
     methods = ["baseline", "distillation", "guidance", "annealed_guidance"]
     for method in methods:
-        invoke("train_s2ut", *common, "--units", tmp_path / "units", "--teacher", tmp_path / "teacher",
+        invoke("train_s2ut", "--trainer", "legacy", *common, "--units", tmp_path / "units", "--teacher", tmp_path / "teacher",
                "--method", method, "--anneal-steps", 1, "--output", tmp_path / method)
     assert compare_experiments([tmp_path / m for m in methods])["fair_comparison"]
     figure = invoke("visualize_attention", "--manifest", manifest, "--pair-id", "train",

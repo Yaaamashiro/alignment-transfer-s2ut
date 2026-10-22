@@ -1,12 +1,21 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 from .config import BackboneConfig, compare
 from .io import write_json
 
 
+class StageParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        values = list(sys.argv[1:] if args is None else args)
+        result = super().parse_args(values, namespace)
+        result.explicit_options = {value.split("=", 1)[0] for value in values if value.startswith("--")}
+        return result
+
+
 def parser_for(stage):
-    parser = argparse.ArgumentParser(prog="python -m alignment_transfer_s2ut." + stage)
+    parser = StageParser(prog="python -m alignment_transfer_s2ut." + stage)
     if stage not in {"compare_architectures", "fetch_assets", "smoke"}:
         parser.add_argument("--output", required=True)
     parser.add_argument("--overwrite", action="store_true")
@@ -59,6 +68,10 @@ def parser_for(stage):
         parser.add_argument("--prior-smoothing", type=float, default=0.05)
         parser.add_argument("--source-mapping", choices=["frontend", "uniform"], default="frontend")
         parser.add_argument("--monotonic-sigma", type=float, default=0.1)
+    if stage == "train_s2ut":
+        parser.add_argument("--trainer", choices=["fairseq", "legacy"], default="fairseq",
+                            help="native benchmark-matched training is the research default")
+        parser.add_argument("--baseline-record", help="registered separately trained native S2UT baseline")
     if stage in {"train_t2tt", "train_s2ut", "extract_t2tt_attention", "visualize_attention"}:
         parser.add_argument("--layer", type=int, default=None if stage == "visualize_attention" else -1)
         parser.add_argument("--heads", type=int, nargs="+")
@@ -103,6 +116,22 @@ def parser_for(stage):
 
 
 def run(stage, args):
+    if stage == "train_s2ut" and args.backend == "fairseq" and args.trainer == "fairseq":
+        if not args.baseline_record:
+            raise ValueError("native training requires --baseline-record; register the benchmark model first with "
+                             "python -m alignment_transfer_s2ut.benchmark register. "
+                             "The old standalone trainer requires explicit --trainer legacy.")
+        allowed = {"--baseline-record", "--trainer", "--backend", "--manifest", "--units", "--teacher", "--output",
+                   "--method", "--prior-type", "--beta", "--lambda-align", "--anneal-steps", "--prior-smoothing",
+                   "--resume", "--resume-if-exists"}
+        changed = args.explicit_options - allowed
+        if changed:
+            raise ValueError("scientific settings are bound to the saved baseline; unsupported overrides: " + ", ".join(sorted(changed)))
+        from .benchmark import make_plan, train_native
+        resume = args.resume or args.resume_if_exists and (Path(args.output) / "native-run.json").is_file()
+        plan = make_plan(args.baseline_record, args.output, args.method, args.prior_type, args.manifest, args.units,
+                         args.teacher, args.anneal_steps, args.beta, args.lambda_align, args.prior_smoothing)
+        return train_native(plan, args.output, resume)
     if getattr(args, "resume_if_exists", False):
         args.resume = (Path(args.output) / "checkpoint_last.pt").is_file()
     if getattr(args, "resume", False) and args.overwrite:

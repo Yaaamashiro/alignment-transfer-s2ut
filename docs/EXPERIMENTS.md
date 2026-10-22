@@ -1,5 +1,7 @@
 # Experiments
 
+既存benchmark Baselineとの本比較は[BENCHMARK_COMPARISON](BENCHMARK_COMPARISON.md)を使用する。学習・推論設定は登録checkpointから取得し、下表の既定値を上書きしない。以下は`--trainer legacy`を明示する独立trainerの実験仕様。
+
 ## 共通レシピ
 
 | 引数 | 既定値 |
