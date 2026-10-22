@@ -6,6 +6,16 @@ Colabの通常運用は[COLAB_RUNTIME](COLAB_RUNTIME.md)を参照。入出力・
 
 別のリポジトリで学習したS2UT checkpointをBaselineとして登録する。転移モデルは同じ保存設定・preparedデータから新規学習し、両者を共通の推論・評価経路へ渡す。Baselineの再学習や、その重みを使った継続学習は必須にしない。
 
+本比較の推奨条件は次のとおり。
+
+| 位置付け | Condition | Colabのスイッチ |
+|---|---|---|
+| 主比較 | S2UT Baseline（登録済みモデル） | 再学習せず使用 |
+| 主比較 | Annealed T2TT Guidance | `RUN_TRANSFER=True` |
+| 任意のcontrol | Annealed Monotonic Guidance | `RUN_MONOTONIC=True` |
+
+両スイッチの既定値はFalse。従来どおりteacher準備とT2TT側のplan確認まで行い、本学習を自動開始しない。両方Trueなら3条件を比較する。`RUN_MONOTONIC=True`・`RUN_TRANSFER=False`ではT2TT・CTC・teacher準備をスキップし、Monotonicだけを新規学習できる。完成済みT2TTがあれば評価へ再利用する。正式な条件名はAnnealed Monotonic Guidanceとし、native fairseq経路の実装名と区別する。
+
 ## 学習条件
 
 本比較は公式fairseq commit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`のTrainer、optimizer、scheduler、`speech_to_unit` criterion、multitask decoder、token-budget sampler、dataset/audio transformsを使う。独自PyTorch loopは`--trainer legacy`で明示する旧経路へ分離する。
@@ -79,6 +89,17 @@ python -m alignment_transfer_s2ut.benchmark plan \
 
 `train_s2ut`入口でも`--baseline-record`を指定できる。この場合、学習率・batch・更新数等をCLIで上書きする操作を拒否し、保存Baselineの条件を使用する。`--manifest/--units/--teacher`と転移係数は別途指定する。
 
+任意のcontrolであるAnnealed Monotonic Guidanceは、別のrun directoryに保存する。
+
+```bash
+python -m alignment_transfer_s2ut.benchmark train \
+  --baseline outputs/comparison/baseline.json --output outputs/comparison/annealed-monotonic \
+  --manifest outputs/comparison/manifest.jsonl --units outputs/comparison/units \
+  --method annealed_guidance --prior-type monotonic --anneal-steps 200000 --resume
+```
+
+Monotonicは音声時間からpriorを作り、`--teacher`を必要としない。T2TT側と同じBaseline登録・全train/dev・unit列・annealing終了を使用し、native fairseqの学習設定は変更しない。T2TT側は従来の`--teacher`付きコマンドを維持し、既定の`prior_type=t2tt`を使う。
+
 ## 5. 共通推論・評価・比較
 
 ```bash
@@ -99,6 +120,16 @@ python -m alignment_transfer_s2ut.benchmark compare \
 `dev-source.jsonl`は`prepare_inference_input --split dev`で作る。入力として受け付けるのは`pair_id/ja_audio/optional split`のみ。転移モデルの登録JSONでも同じ`benchmark infer`を呼ぶ。両モデルをstock S2UTとして読み込み、native fairseq SequenceGenerator（既定beam 10、max_len_a 1、max_len_b 200、length penalty 1、FP32推論）を共用する。生成時にtrain/dev/testのlabel TSVやteacherを参照しない。モデル構築用のprepared config・辞書は必要。
 
 `--vocoder-config`で同一vocoderを指定できる。両方の予測を共通`evaluate` CLIで測り、`benchmark compare --evaluations BASELINE_METRICS TRANSFER_METRICS`へ渡す。生成設定・manifest・unit reference・ASR設定・vocoderが違う評価や、別checkpointのスコアを混ぜた比較は拒否／差分として報告する。未知の差分を一致扱いしない。
+
+Colabでは実行した条件をBaseline → Annealed Monotonic Guidance → Annealed T2TT Guidanceの順で同じ推論・評価経路へ渡す。選択した条件のcheckpointが未完成なら比較を待つ。2条件／3条件のレポートは`ROOT/comparison/<条件の組み合わせ>/`へ分け、既存の2条件レポートに対するresumeと衝突させない。生成・評価cacheは各条件で継続利用する。
+
+最後に次の形式のdev結果表を表示する。UERは比率。ASR-BLEUには冒頭から`GENERATE_WAVEFORMS=True`・`ASR_BLEU=True`を指定し、未実行の値は「—」とする。
+
+| Condition | ASR-BLEU | UER |
+|---|---:|---:|
+| S2UT Baseline | — | — |
+| Annealed Monotonic Guidance（任意） | — | — |
+| Annealed T2TT Guidance | — | — |
 
 ## 範囲
 
