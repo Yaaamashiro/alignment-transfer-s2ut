@@ -2,6 +2,8 @@
 
 [MIT License](LICENSE) · [Google Colab](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/pipeline.ipynb) · [利用ガイド](docs/USAGE.md)
 
+実データでの短期比較は[Strong S2UT Pilot（Colab）](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/pilot.ipynb)を使用する。[実行手順](docs/PILOT.md)に、CUDA接続試験・alignment診断・3条件pilot・dev評価をまとめる。
+
 Text-to-Text Translation（T2TT）のCross-Attentionを、Speech-to-Unit Translation（S2UT）の学習に利用するアラインメント転移学習の研究実装。
 
 T2TTとS2UTのTransformer構成を統一し、入力・出力モダリティの違いとアラインメント転移の効果を比較する。日本語音声から英語の離散音声unitを生成し、unit vocoderで英語音声へ変換する。
@@ -116,6 +118,7 @@ python -m alignment_transfer_s2ut.infer \
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | T2TT / S2UTの共有構成とモダリティ固有部分 |
 | [ALIGNMENT](docs/ALIGNMENT.md) | CTC、unit timing、行列投影、artifact管理 |
 | [EXPERIMENTS](docs/EXPERIMENTS.md) | 共通レシピ、checkpoint選択、再開、ログ |
+| [PILOT](docs/PILOT.md) | 実データ診断、strongの3条件pilot、GPU/時間の記録 |
 | [DEVIATIONS](docs/DEVIATIONS.md) | 設計上の差異と実装範囲 |
 | [VALIDATION](docs/VALIDATION.md) | 検証環境とテスト結果 |
 

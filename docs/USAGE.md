@@ -2,6 +2,8 @@
 
 各コマンドの実行環境は[README](../README.md#インストール)を参照。
 
+実データの診断とstrongの3条件pilotをまとめて実行する場合は、[専用Colabと手順](PILOT.md)を参照。固定したtrain/dev部分集合、CUDA接続試験、実行ログ、GPU使用率、dev評価を用意する。
+
 ## 入力manifest
 
 入力は1行1pairのJSONLです。最低限`pair_id, split, ja_text, en_text, ja_audio, en_audio`を持ちます。`split`は`train/dev/test`。文字列はstripやUnicode normalizationを行わず保持します。既存コーパスの`ja_wav_16k/en_wav_16k`もimport時に受け付けます。

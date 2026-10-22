@@ -62,7 +62,7 @@ architecture、語彙、train/dev pair、backend、optimizer recipe、method/係
 
 `compare_experiments`はbaselineを含む2条件以上を受け付け、同じmethodでもprior-typeが異なる対照実験に対応する。recipe・補助語彙/SP model・初期重み・timing・平滑化・観測layer/headを照合し、同一methodのprior比較ではbeta scheduleなども照合する。T2TT teacher identityはT2TT priorのrun同士で照合する。単調priorはteacher identityを持たない。
 
-実モデルのGPU統合テストは`AT_S2UT_GPU_MANIFEST=/path/to/tiny-real-manifest.jsonl python -m pytest -m gpu -q`で実行する。少数のtrain/dev/testを含む実音声manifest、CUDA、固定CTC/HuBERT/vocoder取得環境が必要。通常テストでは実行もモデル取得もしない。
+実モデルのGPU統合テストは`AT_S2UT_GPU_MANIFEST=/path/to/tiny-real-manifest.jsonl python -m pytest -m gpu -q`で実行する。少数のtrain/devを含む実音声manifest、CUDA、固定CTC/HuBERT/vocoder取得環境が必要。strongのBaseline / Annealed Monotonic / Annealed T2TTを2更新ずつ学習し、teacherを削除してdev音声から公式vocoderで生成する。通常テストでは実行もモデル取得もしない。[専用pilot notebook](PILOT.md)は選択済みのtrain/devから接続試験用manifestも生成する。
 
 ## Logging
 

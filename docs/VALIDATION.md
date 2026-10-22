@@ -1,6 +1,6 @@
-# Validation record — 2026-10-21
+# Validation record — 2026-10-22
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`python -m pytest -q`は**28 passed, 1 skipped**（20.14秒）。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。
+独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`python -m pytest -q`は**34 passed, 1 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
 
@@ -29,6 +29,11 @@ fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb
 - alignment診断で元の文字数に対するcoverage、unit row率、raw/平滑化entropy、PNG/NPZを生成。
 - 既定strong構成（encoder 12 / decoder 6、dim 256、補助decoder各2層）でも人工音声・unitによるforward/backwardと有限勾配を確認。
 - wheelにstrong YAMLと追加moduleを同梱。ColabのPython構文・CLI引数を静的検証（Colab上での実行とは別）。
+- pilotのtrain/dev部分集合の再現性、元split保持、test音声の非読み出し、入力hash/seed/上限を変えたresumeの拒否を確認。
+- corpus aliasと旧Colab音声pathの移設を扱い、除外するtest rowにある既知のsplit leakageも検出。
+- strongの3条件コマンドとbeta=0の後半区間を検査。コマンド失敗時の終了コード・ログ・所要時間を保存。
+- pilot集計で再開時のstep重複を扱い、条件間で異なるdev評価data/configの混在を拒否。専用notebookの構文と接続試験用JSONLを検証。
+- ローカルのGTX 1650でnvidia-smiのCSV採取とサンプラ終了を確認（GPU学習は行っていない）。
 
 1件のskipは**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。実コーパスの前処理、本学習、実音声品質、ASR-BLEUによる手法比較、Colab上の実行は未検証。人工smokeやnative layerテストの成功を研究仮説の検証結果として扱わない。
 

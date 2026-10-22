@@ -7,7 +7,7 @@ import torch
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(
     not os.environ.get("AT_S2UT_GPU_MANIFEST") or not torch.cuda.is_available(),
-    reason="set AT_S2UT_GPU_MANIFEST to a small real train/dev/test manifest on a CUDA machine")]
+    reason="set AT_S2UT_GPU_MANIFEST to a small real train/dev manifest on a CUDA machine")]
 
 
 def test_real_ctc_hubert_native_s2ut_vocoder_teacher_free(tmp_path):
@@ -17,6 +17,8 @@ def test_real_ctc_hubert_native_s2ut_vocoder_teacher_free(tmp_path):
     root = Path(__file__).resolve().parents[1]
     manifest = tmp_path / "manifest.jsonl"
     invoke("prepare_manifest", "--input", os.environ["AT_S2UT_GPU_MANIFEST"], "--output", manifest)
+    rows = load_manifest(manifest)
+    assert {r["split"] for r in rows} >= {"train", "dev"}, "real train/dev audio is required"
     invoke("fetch_assets", "--config", root / "configs/units/hubert_km100.yaml")
     invoke("fetch_assets", "--config", root / "configs/s2ut/vocoder.yaml")
     common = ["--manifest", manifest, "--config", root / "configs/s2ut/fisher.yaml",
@@ -30,16 +32,19 @@ def test_real_ctc_hubert_native_s2ut_vocoder_teacher_free(tmp_path):
            "--device", "cuda", "--output", tmp_path / "units")
     invoke("build_teacher_alignment", "--manifest", manifest, "--mt-attention", tmp_path / "mt",
            "--alignment", tmp_path / "ctc", "--units", tmp_path / "units", "--output", tmp_path / "teacher")
-    methods = ["baseline", "distillation", "guidance", "annealed_guidance"]
-    for method in methods:
+    methods = [("baseline", "baseline", "t2tt"), ("annealed_monotonic", "annealed_guidance", "monotonic"),
+               ("annealed_t2tt", "annealed_guidance", "t2tt")]
+    for name, method, prior in methods:
         invoke("train_s2ut", *common, "--units", tmp_path / "units", "--teacher", tmp_path / "teacher",
-               "--method", method, "--output", tmp_path / method)
+               "--recipe", "strong", "--method", method, "--prior-type", prior, "--anneal-steps", 1,
+               "--output", tmp_path / name)
     for name in ("t2tt", "mt", "ctc", "teacher"):
         shutil.rmtree(tmp_path / name)
-    rows = load_manifest(manifest, "test")
+    rows = load_manifest(manifest, "dev")
     write_jsonl(tmp_path / "speech_only.jsonl", [{"pair_id": row["pair_id"], "ja_audio": row["ja_audio"]} for row in rows])
-    for method in methods:
-        result = invoke("infer", "--input", tmp_path / "speech_only.jsonl", "--checkpoint", tmp_path / method / "checkpoint_best.pt",
+    for name, _, _ in methods:
+        result = invoke("infer", "--input", tmp_path / "speech_only.jsonl", "--checkpoint", tmp_path / name / "checkpoint_best.pt",
                         "--vocoder-config", root / "configs/s2ut/vocoder.yaml", "--device", "cuda",
-                        "--max-units", 32, "--beam-size", 1, "--output", tmp_path / method / "predictions.jsonl")
+                        "--max-units", 32, "--beam-size", 1, "--output", tmp_path / name / "predictions.jsonl")
+        assert result
         assert all(Path(row["en_audio"]).is_file() for row in result)
