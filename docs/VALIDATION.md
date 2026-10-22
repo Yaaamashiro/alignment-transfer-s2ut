@@ -1,6 +1,6 @@
 # Validation record — 2026-10-22
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`python -m pytest -q`は**49 passed, 1 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。
+独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`python -m pytest -q`は**54 passed, 1 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
 
@@ -40,7 +40,11 @@ fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb
 - native strongでもSpecAugmentと補助decoder dropoutを含め、同期・先読み/cache・resumeのCPU parameterが一致。
 - キャッシュ同時要求の重複生成防止、LRU容量制限、容量不足時の非保存、破損検知、元artifact hash保持、変更したsourceの拒否を確認。
 - dev payloadの読み出し前に最初の学習forwardへ進み、後続sampleのunit config不一致は消費時に停止することを確認。
+- pilotのdev上限は関数・CLI・Colabとも200件であることを確認。
+- T2TTのsource-only自己回帰生成・EOS/出力上限・dev全件のcorpus BLEUを検証。既知の完全一致訳でBLEU=100となり、参照訳をdecoderへ渡さず、音声がなくても評価できる。
+- native fairseq checkpointでもT2TT text生成/評価を実行。生成・評価の途中再開、変更した生成条件・dev data・改変した予測cacheの拒否を確認。
+- pilot集計でT2TT dev text評価を添付し、異なるteacher checkpoint・dev data・test評価の混入を拒否。wheelに新しい評価CLI/moduleを同梱し、両Colabの構文を確認。
 
-1件のskipは**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。実コーパスの前処理、本学習、実音声品質、ASR-BLEUによる手法比較、Colab上の実行は未検証。人工smokeやnative layerテストの成功を研究仮説の検証結果として扱わない。
+1件のskipは**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。実コーパスの前処理、本学習、T2TT dev text BLEU、実音声品質、ASR-BLEUによる手法比較、Colab上の実行は未検証。人工smokeやnative layerテストの成功を研究仮説の検証結果として扱わない。
 
 ローカルで準備した検証環境は`outputs/native-venv/`。ここから`python -m pytest -q`、各CLIを実行できる。`outputs/`内のPython、依存package、取得したupstream source、checkpoint、音声、画像はGit対象外。

@@ -52,6 +52,17 @@ def test_pilot_selection_preserves_splits_resume_and_original_paths(tmp_path):
         prepare(source, tmp_path / "pilot", train_limit=3, dev_limit=2, seed=13, resume=True)
 
 
+def test_default_dev_limit_matches_function_cli_and_notebook(tmp_path, monkeypatch):
+    from alignment_transfer_s2ut import pilot
+    source = _source(tmp_path / "source")
+    result = prepare(source, tmp_path / "pilot")
+    assert result["selection_contract"]["dev_limit"] == 200
+    monkeypatch.setattr(sys, "argv", ["pilot", "prepare", "--input", str(source),
+                                    "--output", str(tmp_path / "cli-pilot")])
+    pilot.main()
+    assert read_json(tmp_path / "cli-pilot/selection.json")["selection_contract"]["dev_limit"] == 200
+
+
 def test_pilot_corpus_aliases_relocation_and_excluded_leakage(tmp_path):
     source = _source(tmp_path / "corpus", corpus=True)
     prepare(source, tmp_path / "pilot", corpus_root=source.parent, train_limit=2, dev_limit=1)
@@ -101,7 +112,7 @@ def test_pilot_report_handles_resumed_steps_and_rejects_mixed_evaluation(tmp_pat
     for index, (name, method, prior) in enumerate(CONDITIONS):
         folder = tmp_path / "runs" / name
         folder.mkdir(parents=True)
-        write_json(folder / "experiment.json", dict(method=method, transfer=dict(prior_type=prior),
+        write_json(folder / "experiment.json", dict(method=method, backend="fairseq", dev_hash="common", transfer=dict(prior_type=prior),
             teacher_signature={"checkpoint": "teacher"} if name == "annealed_t2tt" else None,
             planned_max_updates=2, recipe={"speech_recipe": {"name": "strong"}}))
         write_jsonl(folder / "metrics.jsonl", [
@@ -115,6 +126,20 @@ def test_pilot_report_handles_resumed_steps_and_rejects_mixed_evaluation(tmp_pat
     assert result["complete"] and result["fair_comparison"]["fair_comparison"]
     assert result["conditions"][0]["best_dev_step"] == 2
     assert result["conditions"][0]["recorded_seconds"] == 10
+    teacher_run = tmp_path / "runs/annealed_t2tt/experiment.json"
+    experiment = read_json(teacher_run)
+    experiment.update(backend="fairseq", dev_hash="common", teacher_signature={"mt_checkpoint_hash": "teacher"})
+    write_json(teacher_run, experiment, overwrite=True)
+    teacher_metrics = dict(split="dev", backend="fairseq", checkpoint_hash="teacher", text_bleu=12.,
+                           evaluation_contract={"manifest_hash": "common"})
+    write_json(tmp_path / "t2tt-dev.json", teacher_metrics)
+    attached = report(tmp_path / "runs", logs, tmp_path / "report.json", tmp_path / "t2tt-dev.json")
+    assert attached["t2tt_dev_evaluation"]["text_bleu"] == 12.
+    for replacement in ({"checkpoint_hash": "different-teacher"}, {"split": "test"},
+                        {"evaluation_contract": {"manifest_hash": "different-dev"}}):
+        write_json(tmp_path / "t2tt-dev.json", {**teacher_metrics, **replacement}, overwrite=True)
+        with pytest.raises(ValueError, match="teacher checkpoint and dev"):
+            report(tmp_path / "runs", logs, tmp_path / "report.json", tmp_path / "t2tt-dev.json")
     path = tmp_path / "runs/annealed_t2tt/dev-metrics.json"
     wrong = read_json(path)
     wrong["evaluation_contract"]["manifest_hash"] = "different"
@@ -133,8 +158,10 @@ def test_pilot_notebook_syntax_and_separate_update_budgets(tmp_path):
                       isinstance(node.value, ast.List) and all(isinstance(item, ast.Constant) for item in node.value.elts))}
     assert constants["T2TT_UPDATES"] == 20000 and constants["S2UT_UPDATES"] == 10000
     assert constants["ANNEAL_STEPS"] == 5000
+    assert constants["DEV_LIMIT"] == 200
     assert constants["CONDITIONS"] == [name for name, _, _ in CONDITIONS]
     assert "check=True" in source and "alignment-audit-" in source
+    assert "alignment_transfer_s2ut.evaluate_t2tt" in source and "--t2tt-evaluation" in source
     # Exercise the notebook's JSONL-writing expression, catching escaped-newline errors.
     call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call) and
                 isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and

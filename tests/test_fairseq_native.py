@@ -87,6 +87,9 @@ def test_native_training_cli_and_visualization_with_synthetic_supervision(tmp_pa
     common = ["--manifest", manifest, "--config", config, "--batch-size", 1,
               "--update-frequency", 1, "--max-updates", 2, "--warmup-updates", 0]
     invoke("train_t2tt", *common, "--output", tmp_path / "t2tt")
+    bleu = invoke("evaluate_t2tt", "--manifest", manifest, "--checkpoint", tmp_path / "t2tt/checkpoint_best.pt",
+                  "--beam-size", 2, "--max-chars", 8, "--output", tmp_path / "t2tt-dev-text.json")
+    assert bleu["backend"] == "fairseq" and bleu["samples"] == 1 and 0 <= bleu["text_bleu"] <= 100
     invoke("extract_t2tt_attention", "--manifest", manifest, "--checkpoint", tmp_path / "t2tt/checkpoint_best.pt",
            "--output", tmp_path / "mt")
     synthetic_frontends(manifest, tmp_path / "ctc", tmp_path / "units")

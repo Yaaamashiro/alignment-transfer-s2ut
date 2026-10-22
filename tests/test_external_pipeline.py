@@ -33,6 +33,8 @@ def test_real_ctc_hubert_native_s2ut_vocoder_teacher_free(tmp_path, local_stream
               "--device", "cuda", "--batch-size", 1, "--update-frequency", 1, "--max-updates", 2,
               "--loader-workers", 2, "--prefetch-batches", 2, "--pin-memory"]
     invoke("train_t2tt", *common, "--output", tmp_path / "t2tt")
+    invoke("evaluate_t2tt", "--manifest", manifest, "--checkpoint", tmp_path / "t2tt/checkpoint_best.pt",
+           "--device", "cuda", "--beam-size", 1, "--max-chars", 32, "--output", tmp_path / "t2tt-dev-text.json")
     invoke("extract_t2tt_attention", "--manifest", manifest, "--checkpoint", tmp_path / "t2tt/checkpoint_best.pt",
            "--device", "cuda", "--output", tmp_path / "mt")
     invoke("align_speech_text", "--manifest", manifest, "--config", root / "configs/alignment/ctc.yaml",

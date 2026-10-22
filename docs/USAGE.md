@@ -75,6 +75,21 @@ python -m alignment_transfer_s2ut.compare_experiments \
 
 共通設定・初期化hash・train/dev pair・unit設定・teacher identity・予定更新数が一致しなければ失敗します。翻訳スコアを比較する際はvocoderと推論設定も同一にする。
 
+## T2TT teacherの翻訳品質
+
+S2UTの本学習前に、同じT2TT checkpointでdevのtext BLEUを確認する。
+
+```bash
+python -m alignment_transfer_s2ut.evaluate_t2tt \
+  --manifest outputs/manifest.jsonl --checkpoint outputs/t2tt/checkpoint_best.pt \
+  --split dev --beam-size 5 --length-penalty 1 --max-chars 1000 \
+  --device cuda --output outputs/t2tt/dev-text-metrics.json --resume
+```
+
+日本語textから参照訳なしで英文を生成し、SacreBLEU 13aのcorpus BLEU・署名・EOS到達率・生成設定をJSONへ、予測文を隣の`dev-text-metrics-predictions.jsonl`へ保存する。音声・CTC・unitは読み出さない。文字tokenを英文へ戻して評価し、`max-chars`はEOSを含む出力step上限。途中再開では生成済みsampleを検証して再利用し、checkpoint・dev data・生成条件の変更を拒否する。
+
+dev lossで選択したteacherの診断値であり、最終test結果とは区別する。BLEUだけでalignment品質を保証せず、[pilot手順](PILOT.md)の可視化・聴取と併せて確認する。
+
 ## Alignment品質診断
 
 teacher生成後、学習前にdevまたはtrainの100〜500件を確認する。

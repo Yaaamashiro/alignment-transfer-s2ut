@@ -2,7 +2,7 @@
 
 [MIT License](LICENSE) · [Google Colab](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/pipeline.ipynb) · [利用ガイド](docs/USAGE.md)
 
-実データでの短期比較は[Strong S2UT Pilot（Colab）](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/pilot.ipynb)を使用する。[実行手順](docs/PILOT.md)に、CUDA接続試験・alignment診断・3条件pilot・dev評価をまとめる。
+実データでの短期比較は[Strong S2UT Pilot（Colab）](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/pilot.ipynb)を使用する。[実行手順](docs/PILOT.md)に、CUDA接続試験・T2TT dev text BLEU・alignment診断・3条件pilot・dev評価をまとめる。
 
 学習中の入力取得は[順序付きCPU先読み・ローカルキャッシュ](docs/STREAMING.md)に対応する。必要なbatchから学習を開始し、その間に次の入力を準備する。
 

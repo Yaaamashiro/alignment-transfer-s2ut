@@ -11,12 +11,12 @@ def parser_for(stage):
         parser.add_argument("--output", required=True)
     parser.add_argument("--overwrite", action="store_true")
     if stage in {"prepare_manifest", "train_t2tt", "train_s2ut", "extract_t2tt_attention",
-                 "align_speech_text", "extract_units", "build_teacher_alignment", "evaluate", "visualize_attention"}:
+                 "align_speech_text", "extract_units", "build_teacher_alignment", "evaluate", "evaluate_t2tt", "visualize_attention"}:
         parser.add_argument("--manifest", required=stage != "prepare_manifest")
-    if stage in {"prepare_manifest", "compare_architectures", "train_t2tt", "train_s2ut", "extract_t2tt_attention", "align_speech_text", "extract_units", "build_teacher_alignment", "infer", "evaluate"}:
+    if stage in {"prepare_manifest", "compare_architectures", "train_t2tt", "train_s2ut", "extract_t2tt_attention", "align_speech_text", "extract_units", "build_teacher_alignment", "infer", "evaluate", "evaluate_t2tt"}:
         parser.add_argument("--resume", action="store_true")
     if stage in {"train_t2tt", "train_s2ut", "extract_t2tt_attention", "align_speech_text", "extract_units",
-                 "infer", "evaluate", "visualize_attention"}:
+                 "infer", "evaluate", "evaluate_t2tt", "visualize_attention"}:
         parser.add_argument("--device", default="cpu")
     if stage in {"train_t2tt", "train_s2ut", "align_speech_text", "extract_units", "build_teacher_alignment", "fetch_assets"}:
         parser.add_argument("--config", required=stage in {"align_speech_text", "extract_units", "fetch_assets"})
@@ -62,7 +62,7 @@ def parser_for(stage):
     if stage in {"train_t2tt", "train_s2ut", "extract_t2tt_attention", "visualize_attention"}:
         parser.add_argument("--layer", type=int, default=None if stage == "visualize_attention" else -1)
         parser.add_argument("--heads", type=int, nargs="+")
-    if stage in {"infer", "extract_t2tt_attention", "visualize_attention"}:
+    if stage in {"infer", "extract_t2tt_attention", "evaluate_t2tt", "visualize_attention"}:
         parser.add_argument("--checkpoint", required=True)
     if stage == "build_teacher_alignment":
         parser.add_argument("--mt-attention", required=True)
@@ -87,6 +87,11 @@ def parser_for(stage):
         parser.add_argument("--split", choices=["dev", "test"], default="test")
         parser.add_argument("--units")
         parser.add_argument("--asr-config")
+    if stage == "evaluate_t2tt":
+        parser.add_argument("--split", choices=["dev", "test"], default="dev")
+        parser.add_argument("--beam-size", type=int, default=5)
+        parser.add_argument("--max-chars", type=int, default=1000)
+        parser.add_argument("--length-penalty", type=float, default=1.0)
     if stage == "visualize_attention":
         parser.add_argument("--pair-id", required=True)
         parser.add_argument("--teacher")
@@ -141,6 +146,9 @@ def run(stage, args):
     if stage == "evaluate":
         from .evaluation import evaluate
         return evaluate(args)
+    if stage == "evaluate_t2tt":
+        from .evaluation.text import evaluate_t2tt
+        return evaluate_t2tt(args)
     if stage == "visualize_attention":
         from .visualization.attention import visualize
         return visualize(args)

@@ -15,9 +15,10 @@ from .io import digest, file_hash, read_json, read_jsonl, write_json, write_json
 CONDITIONS = (("baseline", "baseline", "t2tt"),
               ("annealed_monotonic", "annealed_guidance", "monotonic"),
               ("annealed_t2tt", "annealed_guidance", "t2tt"))
+DEFAULT_DEV_LIMIT = 200
 
 
-def prepare(source, output, corpus_root=None, train_limit=10000, dev_limit=500, seed=1, resume=False):
+def prepare(source, output, corpus_root=None, train_limit=10000, dev_limit=DEFAULT_DEV_LIMIT, seed=1, resume=False):
     """Select original train/dev pairs before audio hashing; never re-split test."""
     if train_limit < 1 or dev_limit < 1:
         raise ValueError("positive train/dev limits required")
@@ -176,7 +177,7 @@ def run_logged(name, command, logs, monitor_gpu=False, env=None):
     return record
 
 
-def report(runs, logs, output):
+def report(runs, logs, output, t2tt_evaluation=None):
     from .compare_experiments import compare_experiments
     roots = [Path(runs) / name for name, _, _ in CONDITIONS]
     comparison = compare_experiments(roots)
@@ -225,6 +226,16 @@ def report(runs, logs, output):
     result = {"fair_comparison": comparison, "conditions": records,
               "complete": all(row["step"] >= row["planned_updates"] for row in records),
               "scope": "Pilot diagnostics on train/dev; not final test results."}
+    if t2tt_evaluation:
+        teacher = read_json(t2tt_evaluation)
+        experiment = read_json(Path(runs) / "annealed_t2tt" / "experiment.json")
+        if (teacher["split"] != "dev" or teacher["backend"] != experiment["backend"] or
+                teacher["checkpoint_hash"] != experiment["teacher_signature"]["mt_checkpoint_hash"] or
+                teacher["evaluation_contract"]["manifest_hash"] != experiment["dev_hash"]):
+            raise ValueError("T2TT evaluation must match the pilot teacher checkpoint and dev split")
+        if not math.isfinite(teacher["text_bleu"]):
+            raise ValueError("non-finite T2TT dev text BLEU")
+        result["t2tt_dev_evaluation"] = teacher
     write_json(output, result, overwrite=True)
     import matplotlib
     matplotlib.use("Agg")
@@ -249,7 +260,7 @@ def main():
     prepare_parser.add_argument("--output", required=True)
     prepare_parser.add_argument("--corpus-root")
     prepare_parser.add_argument("--train-limit", type=int, default=10000)
-    prepare_parser.add_argument("--dev-limit", type=int, default=500)
+    prepare_parser.add_argument("--dev-limit", type=int, default=DEFAULT_DEV_LIMIT)
     prepare_parser.add_argument("--seed", type=int, default=1)
     prepare_parser.add_argument("--resume", action="store_true")
     sub.add_parser("runtime")
@@ -272,13 +283,14 @@ def main():
     child = sub.add_parser("report")
     for field in ("runs", "logs", "output"):
         child.add_argument("--" + field, required=True)
+    child.add_argument("--t2tt-evaluation", help="dev text BLEU from the same T2TT teacher checkpoint")
     args = parser.parse_args()
     if args.action == "prepare":
         result = prepare(args.input, args.output, args.corpus_root, args.train_limit, args.dev_limit, args.seed, args.resume)
     elif args.action == "runtime":
         result = check_runtime()
     elif args.action == "report":
-        result = report(args.runs, args.logs, args.output)
+        result = report(args.runs, args.logs, args.output, args.t2tt_evaluation)
     elif args.action == "run":
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
         if not command:
