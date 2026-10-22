@@ -10,7 +10,7 @@ import sys
 import zipfile
 import torch
 import yaml
-from .io import atomic_write, digest, file_hash, read_json, write_json, read_jsonl, write_jsonl
+from .io import atomic_write, digest, file_hash, read_json, write_json, read_jsonl, write_jsonl, local_path
 from .progress import progress
 
 REVISION = "3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99"
@@ -93,7 +93,7 @@ def restore_snapshot(backup, output, resume=False):
 
 
 def tsv(path):
-    with Path(path).open(encoding="utf-8") as stream:
+    with local_path(path).open(encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream, delimiter="\t"))
     if not rows or any(not row.get("id") for row in rows) or len({r["id"] for r in rows}) != len(rows):
         raise ValueError("empty/duplicate prepared sample IDs: " + str(path))
@@ -108,7 +108,7 @@ def prepared_identity(root):
               for split in ("train", "dev", "test")]
     names += [f"{name}/dict.txt" for name in ("source_letter", "target_letter", "decoder_target_ctc")]
     values = {name: file_hash(root / name) for name in names}
-    multi = yaml.safe_load((root / "config_multitask.yaml").read_text(encoding="utf-8"))
+    multi = yaml.safe_load(local_path(root / "config_multitask.yaml").read_text(encoding="utf-8"))
     if set(multi) != {"source_letter", "target_letter", "decoder_target_ctc"}:
         raise ValueError("native benchmark comparison requires all three original auxiliary tasks")
     for name, settings in multi.items():
@@ -149,7 +149,7 @@ def scientific_config(config):
         value.pop(section, None)
     for section, fields in {
         "common": ("log_format", "log_interval", "log_file", "tensorboard_logdir", "wandb_project", "user_dir"),
-        "checkpoint": ("save_dir", "restore_file", "write_checkpoints_asynchronously"),
+        "checkpoint": ("save_dir", "restore_file", "write_checkpoints_asynchronously", "keep_interval_updates", "keep_last_epochs"),
         "dataset": ("num_workers", "data_buffer_size"),
         "task": ("data", "alignment_config"),
     }.items():
@@ -204,7 +204,7 @@ def artifact_contract(record, manifest, units, teacher, prior_type):
     from .data.manifest import load_manifest, manifest_hash
     from .io import ArtifactStore
     rows = load_manifest(manifest, check_audio=False)
-    feature = yaml.safe_load((Path(record["data"]) / "config.yaml").read_text(encoding="utf-8"))
+    feature = yaml.safe_load(local_path(Path(record["data"]) / "config.yaml").read_text(encoding="utf-8"))
     if (record["config"]["model"].get("conv_version", "s2t_transformer") != "s2t_transformer" or
             feature.get("use_audio_input", False) or feature.get("waveform_transforms") or feature.get("dataset_transforms") or
             feature.get("specaugment", {}).get("time_wrap_W", 0) != 0):
@@ -385,7 +385,8 @@ def train_native(plan, output, resume=False):
     write_json(marker, plan, overwrite=resume)
     cfg = native_config(plan["config"])
     progress("native fairseq training: fresh model or own-run resume")
-    with benchmark_extension.trainer_hooks(plan["contract_hash"], plan["selection_policy"]):
+    from .colab_runtime import native_inputs, benchmark_training
+    with native_inputs(), benchmark_training(), benchmark_extension.trainer_hooks(plan["contract_hash"], plan["selection_policy"]):
         distributed_utils.call_main(cfg, train.main)
     return {"checkpoint": str(last.resolve()), "updates": checkpoint_updates(load_native(last))}
 

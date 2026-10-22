@@ -260,7 +260,10 @@ def trainer_hooks(contract_hash, selection_policy=None):
                 # Native Trainer divides by total main tokens. This factor retains
                 # lambda * sum(KL) / all valid rows across accumulated microbatches.
                 self.criterion.alignment_scale = tokens / max(1, rows)
-            return completed_step(self, samples, lambda values: super(Trainer, self).train_step(values, raise_oom=True))
+            step = lambda values: super(Trainer, self).train_step(values, raise_oom=True)
+            if os.environ.get("S2ST_TRAIN_STAGING"):
+                return step(samples)  # The pinned benchmark runtime owns overflow retries.
+            return completed_step(self, samples, step)
 
         def valid_step(self, *args, **kwargs):
             result = super().valid_step(*args, **kwargs)
@@ -340,6 +343,9 @@ def trainer_hooks(contract_hash, selection_policy=None):
         if stop or loss is not None or end_of_epoch or due:
             # Best belongs to the unit-loss selector; native last/iterator saving is unchanged.
             checkpoint_utils.save_checkpoint(cfg.checkpoint, trainer, epoch_itr, None)
+            from ..colab_runtime import saved_checkpoint
+            saved_checkpoint(Path(cfg.checkpoint.save_dir).parent,
+                Path(cfg.checkpoint.save_dir) / "checkpoint_last.pt", update, force=loss is not None or stop)
         return [loss], stop
 
     def load(*args, **kwargs):

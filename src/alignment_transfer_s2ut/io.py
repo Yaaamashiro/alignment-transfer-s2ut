@@ -7,6 +7,17 @@ import tempfile
 import numpy as np
 
 
+def local_path(path):
+    if os.environ.get("S2ST_INPUT_MAP"):
+        from direct_s2st.drive_staging import local_path as resolve
+        target = resolve(path)
+        if (str(path).replace("\\", "/").startswith("/content/drive/") and target == Path(path)
+                and Path(path).suffix.lower() in (".wav", ".flac", ".npz", ".units")):
+            raise RuntimeError("Drive input was not staged locally: " + str(path))
+        return target
+    return Path(path)
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -14,7 +25,7 @@ def digest(value):
 
 def file_hash(path):
     h = hashlib.sha256()
-    with open(path, "rb") as f:
+    with open(local_path(path), "rb") as f:
         for block in iter(lambda: f.read(1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
@@ -43,11 +54,11 @@ def write_json(path, data, overwrite=False):
 
 
 def read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    return json.loads(local_path(path).read_text(encoding="utf-8"))
 
 
 def read_jsonl(path):
-    with open(path, encoding="utf-8") as stream:
+    with open(local_path(path), encoding="utf-8") as stream:
         return [json.loads(line) for line in stream if line.strip()]
 
 

@@ -75,4 +75,4 @@ def test_native_notebook_keeps_baseline_and_binds_backbone():
     assert "test_native_fp16_trainer_and_fp32_prior" in source
     assert "--finetune-from-model" not in source
     assert "--max-updates" not in source[source.index("TRANSFER_ARGS ="):]
-    assert "'compare', *records, '--output', Path(ROOT) / 'training-comparison.json', '--resume'" in source
+    assert "'compare', *records, '--output', Path(ROOT) / 'comparison/training-comparison.json', '--resume'" in source

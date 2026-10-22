@@ -1,5 +1,5 @@
 from pathlib import Path
-from ..io import read_jsonl, write_jsonl, digest, file_hash
+from ..io import read_jsonl, write_jsonl, digest, file_hash, local_path
 
 REQUIRED = ("pair_id", "split", "ja_text", "en_text", "ja_audio", "en_audio")
 
@@ -28,7 +28,7 @@ def validate(rows, check_audio=True):
             audio_contents[signature] = row["split"]
         if check_audio:
             for key in ("ja_audio", "en_audio"):
-                if not Path(row[key]).is_file():
+                if not local_path(row[key]).is_file():
                     raise FileNotFoundError(row[key])
     return rows
 

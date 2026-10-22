@@ -7,7 +7,7 @@ import numpy as np
 import soundfile as sf
 from .benchmark import tsv, benchmark_digest
 from .data.manifest import prepare_manifest, load_manifest, manifest_hash
-from .io import ArtifactStore, digest, file_hash, read_json, read_jsonl, write_jsonl
+from .io import ArtifactStore, digest, file_hash, read_json, read_jsonl, write_jsonl, local_path
 from .units.timing import reduce_units, frame_spans, run_spans
 from .progress import progress
 
@@ -101,6 +101,8 @@ def import_units(manifest, benchmark_units, prepared, output, resume=False):
                 if record["units_sha256"] != benchmark_digest(dict(original=original_units, reduced=reduced_units)):
                     raise ValueError("corrupt inline benchmark units")
             else:
+                if os.environ.get("S2ST_INPUT_MAP"):
+                    raise ValueError("Drive-safe import requires benchmark inline unit migration before GPU work")
                 original_units = list(map(int, Path(record["units_original_path"]).read_text().split()))
                 reduced_units = list(map(int, Path(record["units_reduced_path"]).read_text().split()))
             reduced, runs = reduce_units(original_units)
@@ -115,7 +117,7 @@ def import_units(manifest, benchmark_units, prepared, output, resume=False):
             if resume and store.path(pair).is_file():
                 store.get(pair, metadata)
             else:
-                info = sf.info(row["en_audio"])
+                info = sf.info(local_path(row["en_audio"]))
                 if info.samplerate != 16000 or info.channels != 1 or (info.frames - 400) // 320 + 1 != len(original_units):
                     raise ValueError("HuBERT frame count and target waveform disagree")
                 frames = frame_spans(len(original_units), 16000, info.duration,

@@ -2,6 +2,8 @@
 
 [Colabで開く](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/benchmark_comparison.ipynb)
 
+Colabの通常運用は[COLAB_RUNTIME](COLAB_RUNTIME.md)を参照。入出力・ZIP保存・復元・S2UT performance hooksは固定revisionのbenchmark実装を再利用し、ROOTはVMローカル、PERSISTENTはDriveへ分離する。
+
 別のリポジトリで学習したS2UT checkpointをBaselineとして登録する。転移モデルは同じ保存設定・preparedデータから新規学習し、両者を共通の推論・評価経路へ渡す。Baselineの再学習や、その重みを使った継続学習は必須にしない。
 
 ## 学習条件
@@ -100,6 +102,6 @@ python -m alignment_transfer_s2ut.benchmark compare \
 
 ## 範囲
 
-この経路はbenchmark repositoryのPython packageをruntime importせず、公式fairseqと保存artifactを使用する。原論文と同じスペイン語Fisher corpus／vocoder条件を再現する主張ではなく、ユーザーの既存日英Baselineと学習・評価条件を揃えるための機能。GPU・worker RNGや外部runtimeまで含めたbit単位の再現性は保証しない。既存の独立trainerによる機能診断は[旧pilot](PILOT.md)に残す。
+モデルと登録・比較CLIは公式fairseqと保存artifactを使用する。ColabのI/O・recovery・S2UT performanceは固定revisionのbenchmark packageを直接利用する。原論文と同じスペイン語Fisher corpus／vocoder条件を再現する主張ではなく、ユーザーの既存日英Baselineと学習・評価条件を揃えるための機能。GPU・worker RNGや外部runtimeまで含めたbit単位の再現性は保証しない。既存の独立trainerによる機能診断は[旧pilot](PILOT.md)に残す。
 
-benchmark固有のworker/cache自動調整とオンラインBLEU monitorは含めず、保存cfgのnative DataLoader worker数とprefetchを使う。`fair_comparison`は保存設定・データ・budget・選択規則、および指定された評価contractの照合結果。追加physical microbatch分割を使ったBaselineは登録時に拒否する。実checkpointとCUDAによる確認状況は[VALIDATION](VALIDATION.md)を参照。
+Colabではbenchmarkのcache・worker制御・overflow retry・勾配監査を共用する。checkpoint保持数はbenchmarkのローカル容量対策に従い、科学的比較から除外するI/O項目とする。オンラインBLEU monitorは現時点では移植せず、共通の事後評価を使用する。`fair_comparison`は保存設定・データ・budget・選択規則、および指定された評価contractの照合結果。追加physical microbatch分割を使ったBaselineは登録時に拒否する。実checkpointとCUDAによる確認状況は[VALIDATION](VALIDATION.md)を参照。

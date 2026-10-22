@@ -15,6 +15,12 @@ from .decode import load_vocoder
 
 
 def infer_native(args):
+    from ..colab_runtime import native_inputs
+    with native_inputs():
+        return _infer_native(args)
+
+
+def _infer_native(args):
     if args.units_only == bool(args.vocoder_config):
         raise ValueError("select --units-only or --vocoder-config")
     if args.beam_size < 1 or args.max_len_a < 0 or args.max_len_b < 1 or args.length_penalty < 0:

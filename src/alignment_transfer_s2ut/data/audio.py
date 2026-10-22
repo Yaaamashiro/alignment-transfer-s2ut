@@ -6,6 +6,8 @@ import torch
 
 
 def waveform(path, sample_rate=16000):
+    from ..io import local_path
+    path = local_path(path)
     audio, rate = sf.read(path, dtype="float32", always_2d=True)
     audio = audio.mean(-1)
     if rate != sample_rate:

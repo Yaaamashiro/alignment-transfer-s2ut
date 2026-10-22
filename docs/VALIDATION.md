@@ -1,11 +1,17 @@
 # Validation record — 2026-10-22
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**67 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
+独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**75 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
 
 確認した内容:
 
+- 固定revision `4361e55a99c7f4ea3a00c5c138f6820c34a07d06`のbenchmark runtimeを直接使用。実ZIP publisher・検証・復元を使い、pair処理の途中失敗→新VMを想定した復元→完了済みstageの再利用を検証。既存pairを後続増分packへ複製しない。
+- benchmarkのCPU WAV packを作成後、原本WAVを参照不能にしてもGPU側staging関数で復元可能。native fairseqの辞書・設定・TSV・音声も原本payloadを参照不能にした状態でローカルコピーから読み込めることを確認。
+- benchmarkの実常駐session/upload workerを通してT2TTを2更新し、ZIPへ保存。作業ディレクトリを失った状態から同じcheckpoint・optimizer・bestを復元し、完了済み更新を再学習しない。
+- Windowsでは開いているファイルのatomic replaceが拒否されるため、T2TTの常駐session統合試験は最終更新で1 snapshotを作成する設定を使用。native hook側で周期保存を別途検証する。Colab/Linux向けbenchmark実装にWindows用の変更は加えていない。
+- native S2UTにbenchmarkのperformance hooks・勾配監査を適用し、optimizer更新とsnapshot freeze protocolを検証。native contract・benchmark性能状態・optimizer・勾配監査を完全snapshotへ含める。
+- 壊れた増分ZIPと保存容量予算超過を拒否し、既存復旧点を保持。最後のupload失敗でローカルに残る完了markerを永続化済みと誤認せず、再実行時に再保存する。ColabのローカルROOT、Drive PERSISTENT、runtime pin、通常600秒間隔・1024GB予算を静的検証。
 - 別途学習した公式fairseq checkpointのrecipe/metadata/データhashを検証し、読み取り専用Baselineとして登録。snapshot ZIPのhash・member検査と、再開時のsnapshot固定を検証。
 - 新経路で公式Trainerの実optimizer更新を実行。転移モデルの初期重みは同じseedの公式モデルとbit一致し、beta=0の更新後parameterも公式Trainerとbit一致。
 - native optimizer/checkpointの保存・再開、完了runの再実行、teacher削除後のnative dev検証とstock SequenceGeneratorによるBaseline/転移モデルの共通推論を確認。

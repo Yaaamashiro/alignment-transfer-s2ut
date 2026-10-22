@@ -9,6 +9,7 @@ import pytest
 import soundfile as sf
 import torch
 import yaml
+from test_benchmark_colab import benchmark_runtime
 OmegaConf = pytest.importorskip("omegaconf").OmegaConf
 pytest.importorskip("fairseq")
 from alignment_transfer_s2ut import benchmark as b
@@ -217,6 +218,83 @@ def test_native_beta_zero_matches_stock_trainer_update(native_data):
         guided = train.Trainer(cfg, task, model, task.build_criterion(cfg.criterion))
         guided.train_step(samples)
         assert all(torch.equal(v, model.state_dict()[key]) for key, v in stock_model.state_dict().items())
+
+
+def test_native_benchmark_runtime_freezes_complete_training_state(native_data, benchmark_runtime, monkeypatch):
+    from fairseq import tasks, checkpoint_utils
+    from fairseq_cli import train
+    from alignment_transfer_s2ut.colab_runtime import benchmark_training, native_inputs
+    from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
+    root = native_data.root
+    stage = root / "pending"
+    stage.mkdir()
+    monkeypatch.setenv("S2ST_TRAIN_STAGING", str(stage))
+    monkeypatch.setenv("S2ST_TRAIN_OPTIMIZE", "1")
+    monkeypatch.setenv("S2ST_TRAIN_CACHE", str(root / "cache"))
+    monkeypatch.setenv("S2ST_TRAIN_CACHE_GB", "0")
+    monkeypatch.setenv("S2ST_BACKUP_MIN_SECONDS", "600")
+    monkeypatch.setenv("S2ST_TRAIN_READERS", "1")
+    monkeypatch.setenv("S2ST_TRAIN_ADAPTIVE_BATCH", "0")
+    plan = b.make_plan(root / "baseline.json", root / "runtime", "guidance", "t2tt",
+                       root / "manifest.jsonl", root / "units", root / "teacher", beta=0.)
+    write_json(root / "runtime/native-run.json", plan)
+    cfg = b.native_config(plan["config"])
+    iterator = Namespace(state_dict=lambda: {"epoch": 1, "iterations_in_epoch": 1},
+                         epoch=1, end_of_epoch=lambda: False)
+    with native_inputs(), benchmark_training(), trainer_hooks(plan["contract_hash"]):
+        task = tasks.setup_task(cfg.task)
+        task.load_dataset("train")
+        ds = task.dataset("train")
+        samples = [ds.collater([ds[i]]) for i in range(2)]
+        trainer = train.Trainer(cfg, task, task.build_model(cfg.model), task.build_criterion(cfg.criterion))
+        trainer.train_step(samples)
+        checkpoint_utils.save_checkpoint(cfg.checkpoint, trainer, iterator, None)
+        ready = list(stage.glob("*/ready.json"))
+        assert len(ready) == 1 and read_json(ready[0])["updates"] == 1
+        frozen = ready[0].parent / "files"
+        assert (frozen / "native-run.json").is_file()
+        saved = b.load_native(frozen / "checkpoints/checkpoint_last.pt")
+        assert saved["extra_state"]["alignment_contract_hash"] == plan["contract_hash"]
+        assert "s2st_performance" in saved["extra_state"] and saved["last_optimizer_state"]
+        from alignment_transfer_s2ut.colab_runtime import inspect_checkpoint
+        assert inspect_checkpoint(frozen / "checkpoints/checkpoint_last.pt", "s2ut") == 1
+        assert read_json(frozen / "gradient-audit-rank-0.json")["status"] == "PASS"
+
+
+def test_native_staged_metadata_and_audio_need_no_original_payload(native_data, benchmark_runtime):
+    from direct_s2st.drive_staging import register, active_map
+    from direct_s2st.preparation import file_stamp
+    from alignment_transfer_s2ut.colab_runtime import native_inputs
+    from fairseq import tasks
+    root = native_data.root
+    mapping = {}
+    data = root / "prepared"
+    for source in data.rglob("*"):
+        if source.is_file():
+            target = root / "staged" / source.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            register(mapping, source, target, file_stamp(source))
+    rows = load_manifest(root / "manifest.jsonl")
+    for row in rows:
+        for key in ("ja_audio", "en_audio"):
+            source = Path(row[key])
+            target = root / "staged-audio" / source.name
+            target.parent.mkdir(exist_ok=True)
+            shutil.copyfile(source, target)
+            register(mapping, source, target, file_stamp(source))
+            assert source.resolve().is_relative_to(root.resolve())
+            source.rename(source.with_suffix(".offline"))
+    assert data.resolve().is_relative_to(root.resolve())
+    data.rename(root / "prepared-offline")
+    with active_map(mapping, root / "mapping"), native_inputs():
+        assert b.prepared_identity(data) == native_data.record["prepared"]
+        task = tasks.setup_task(b.native_config(native_data.record["config"]).task)
+        task.load_dataset("train")
+        ds = task.dataset("train")
+        sample = ds.collater([ds[0]])
+        assert sample["net_input"]["src_tokens"].shape[-1] == 80
+        assert set(sample["multitask"]) == {"source_letter", "target_letter", "decoder_target_ctc"}
 
 
 def test_native_report_only_selection_and_full_dev(native_data, monkeypatch):

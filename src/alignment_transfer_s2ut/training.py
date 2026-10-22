@@ -462,6 +462,9 @@ def train(args, modality):
             with open(log_path, "a", encoding="utf-8") as stream:
                 stream.write(json.dumps(logs, ensure_ascii=False, allow_nan=False) + "\n")
                 stream.flush()
+            if last.is_file() and (step % args.save_interval_updates == 0 or step % args.validation_interval == 0 or step == args.max_updates):
+                from .colab_runtime import saved_checkpoint
+                saved_checkpoint(root, last, step, force=step % args.validation_interval == 0 or step == args.max_updates)
             progress("training: " + modality + "/" + method, step, args.max_updates)
     return {"checkpoint": str(last.resolve()), "step": step, "best_main_loss": best}
 

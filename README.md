@@ -6,6 +6,8 @@
 
 少量データでの機能診断には[Strong S2UT Pilot](docs/PILOT.md)を使用できる。独立trainerを使う旧経路で、[順序付きCPU先読み・キャッシュ](docs/STREAMING.md)に対応する。benchmark比較の入力並列読み込みはnative fairseq DataLoaderを使用する。
 
+比較用Colabは、benchmarkの固定revisionから入力ZIP staging・cache/worker制御・定期ZIP backup・復元処理を再利用する。作業はColabローカル、永続保存はDriveへ分離する。[通常運用と再開手順](docs/COLAB_RUNTIME.md)を参照。
+
 Text-to-Text Translation（T2TT）のCross-Attentionを、Speech-to-Unit Translation（S2UT）の学習に利用するアラインメント転移学習の研究実装。
 
 T2TTとS2UTのTransformer構成を統一し、入力・出力モダリティの違いとアラインメント転移の効果を比較する。日本語音声から英語の離散音声unitを生成し、unit vocoderで英語音声へ変換する。
@@ -113,6 +115,7 @@ python -m alignment_transfer_s2ut.benchmark infer \
 | 文書 | 内容 |
 |---|---|
 | [BENCHMARK_COMPARISON](docs/BENCHMARK_COMPARISON.md) | 既存Baselineの登録、native fairseq学習、共通推論・評価 |
+| [COLAB_RUNTIME](docs/COLAB_RUNTIME.md) | benchmarkの入出力・保存・再開処理の再利用 |
 | [USAGE](docs/USAGE.md) | 前処理・学習・推論・評価の実行手順 |
 | [METHOD](docs/METHOD.md) | アラインメント転移と4つの比較条件 |
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | T2TT / S2UTの共有構成とモダリティ固有部分 |
