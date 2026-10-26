@@ -93,9 +93,16 @@ def restore_snapshot(backup, output, resume=False):
 
 
 def tsv(path):
-    with local_path(path).open(encoding="utf-8") as stream:
-        rows = list(csv.DictReader(stream, delimiter="\t"))
-    if not rows or any(not row.get("id") for row in rows) or len({r["id"] for r in rows}) != len(rows):
+    with local_path(path).open(encoding="utf-8", newline="") as stream:
+        # Fairseq TSV fields are literal text, not CSV-quoted strings. Match
+        # the pinned benchmark reader, preserving quote characters in labels.
+        reader = csv.DictReader(stream, delimiter="\t", quotechar=None,
+                                doublequote=False, quoting=csv.QUOTE_NONE)
+        if not reader.fieldnames or reader.fieldnames[0] != "id" or len(set(reader.fieldnames)) != len(reader.fieldnames):
+            raise ValueError("invalid prepared TSV header: " + str(path))
+        rows = list(reader)
+    if (not rows or any(not row.get("id") or None in row or any(v is None for v in row.values()) for row in rows)
+            or len({r["id"] for r in rows}) != len(rows)):
         raise ValueError("empty/duplicate prepared sample IDs: " + str(path))
     return rows
 

@@ -45,8 +45,11 @@ def export_manifest(common, prepared, output, include_test=False, resume=False):
                 # labels. No Unicode normalization or new dictionary fitting.
                 normalized = re.sub(r"[ \t\r\n]+", " ", row[language + "_text"].strip(" \t\r\n"))
                 tokens = ["<space>" if c == " " else c for c in normalized]
-                if labels[language].get(row["pair_id"]) != tokens:
-                    raise ValueError("common text differs from the actual benchmark auxiliary labels")
+                actual = labels[language].get(row["pair_id"])
+                if actual != tokens:
+                    raise ValueError("common text differs from the actual benchmark auxiliary labels: "
+                                     f"split={split} pair_id={row['pair_id']} language={language} "
+                                     f"common_tokens={len(tokens)} label_tokens={None if actual is None else len(actual)}")
             result.append({key: row[key] for key in ("pair_id", "split", "ja_text", "en_text", "ja_audio", "en_audio",
                                                      "ja_sha256", "en_sha256") if key in row})
     staging = output.with_name(output.stem + "-input.jsonl")

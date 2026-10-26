@@ -1,5 +1,7 @@
 # Validation record — 2026-10-26
 
+Colabのfull-manifestで共通文章と補助文字labelの不一致が報告された。alignment側のTSV readerがCSVの引用符処理を有効にしていたため、引用符を含むliteral fairseq labelを変形し、閉じていない引用符では後続rowまで取り込む問題を再現した。固定benchmarkと同じ`QUOTE_NONE`へ合わせ、header・column数・空/重複IDの検査を維持した。引用符4種類のmanifest生成とresume、引用符によるrow連結、破損TSV、実際に変更された文章の拒否を検査し、全suiteは**127 passed, 3 skipped**。元データ・label・語彙・学習条件の書き換えや照合の無効化は行わない。実データの不一致がこの読込不具合だけに起因するかは、Colabでのliteral TSV照合または修正版の再実行で確認する。
+
 2026-10-26の全段階ログ統合後の再検証は**115 passed, 3 skipped**。隣接benchmark checkoutが別作業で更新されていたため、Colabが導入した固定runtimeをテストで優先するようfixtureを修正した。明示的な検証用sourceは`S2ST_BENCHMARK_TEST_ROOT`で指定でき、既存benchmark checkoutは変更しない。固定版sourceを別配置した全suiteと、環境からimportできる固定版を隣接checkoutより優先する保存・復元テストを実行した。モデル・学習条件・runtimeのpinは変更していない。
 
 Colabから報告されたCPU preflightではPython 3.10.22・依存metadata・fairseq provenance・compiled batch sampler・benchmark pinが成功し、matplotlibだけが失敗していた。Notebook kernel由来の`MPLBACKEND=module://matplotlib_inline.backend_inline`を別venvへ継承する同じエラーをローカルで再現し、3つのNotebookで`MPLBACKEND=Agg`を設定した。各Notebookの実際の設定を適用した新規subprocessでmatplotlibのimportとPNG保存を検証した。短い失敗コマンドで省略されていたpreflight JSONも、失敗時の末尾ログ表示で読めることを確認した。
