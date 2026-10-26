@@ -475,10 +475,25 @@ def file_tensor_hash(value):
 
 
 def extract_attention(args):
+    batch_size = getattr(args, "batch_size", 8)
+    max_tokens = getattr(args, "max_tokens", 4096)
+    max_cells = getattr(args, "max_attention_cells", 1000000)
+    if min(batch_size, max_tokens, max_cells) < 1:
+        raise ValueError("attention batch size, token budget and attention cell budget must be positive")
+    started = time.monotonic()
+    progress("T2TT attention: verify checkpoint once and load model")
+    checkpoint_stamp = stamp(args.checkpoint)
+    checkpoint_hash = file_hash(args.checkpoint)
     saved = load_checkpoint(args.checkpoint)
+    def unchanged_checkpoint():
+        if stamp(args.checkpoint) != checkpoint_stamp:
+            raise ValueError("T2TT checkpoint changed during attention extraction")
+    unchanged_checkpoint()
     if saved["modality"] != "text":
         raise ValueError("T2TT checkpoint required")
-    rows = load_manifest(args.manifest)
+    # This stage uses text only. Audio identity remains in manifest_hash, but
+    # no WAV payload or per-WAV filesystem probe is needed for extraction.
+    rows = load_manifest(args.manifest, check_audio=False)
     if saved["train_hash"] != manifest_hash([r for r in rows if r["split"] == "train"]):
         raise ValueError("T2TT training pairs differ from the S2UT train split")
     identity = manifest_hash(rows)
@@ -487,25 +502,91 @@ def extract_attention(args):
     model = checkpoint_model(saved, args.device).eval()
     if not -saved["backbone"]["decoder_layers"] <= args.layer < saved["backbone"]["decoder_layers"]:
         raise ValueError("alignment layer out of range")
-    if args.heads is not None and any(h < 0 or h >= saved["backbone"]["decoder_attention_heads"] for h in args.heads):
+    if args.heads is not None and (not args.heads or len(set(args.heads)) != len(args.heads) or
+            any(h < 0 or h >= saved["backbone"]["decoder_attention_heads"] for h in args.heads)):
         raise ValueError("alignment head out of range")
     store = ArtifactStore(args.output)
-    for index, row in enumerate(rows):
-        meta = {"stage": "t2tt_attention", "split": row["split"], "manifest_hash": identity,
-                "text_hash": digest([row["ja_text"], row["en_text"]]), "backend": saved["backend"],
-                "mt_checkpoint_hash": file_hash(args.checkpoint), "mt_architecture_hash": digest(saved["backbone"]),
+    # Immutable provenance must not reread a potentially GB-sized checkpoint
+    # or rehash whole vocabularies once per pair. Artifact metadata stays the
+    # same as the original extractor, so verified partial output is reusable.
+    common = {"stage": "t2tt_attention", "manifest_hash": identity, "backend": saved["backend"],
+                "mt_checkpoint_hash": checkpoint_hash, "mt_architecture_hash": digest(saved["backbone"]),
                 "tokenizer_hash": digest([source.fingerprint, target.fingerprint]), "layer": args.layer,
                 "heads": args.heads, "teacher_forcing": True, "training_split": "train"}
-        if args.resume and store.path(row["pair_id"]).exists():
-            store.get(row["pair_id"], meta)
-            continue
-        values = collate([row], "text", source, target, saved["backend"], None, 80, args.device)
+    completed = extracted = reused = forwards = 0
+    extraction_seconds = 0.
+    pending, source_length, target_length = [], 0, 0
+    last_report = time.monotonic()
+
+    def report(force=False):
+        nonlocal last_report
+        now = time.monotonic()
+        if force or now - last_report >= 1:
+            elapsed = now - started
+            # Rechecking thousands of cached packets must not inflate the
+            # displayed inference rate or produce an unrealistically tiny ETA.
+            rate = extracted / max(extraction_seconds, .001)
+            remaining = 0 if completed == len(rows) else (len(rows) - completed) / rate if rate else None
+            progress("T2TT attention", completed, len(rows), detail=(
+                f"new={extracted} reused={reused} elapsed={elapsed:.1f}s "
+                f"new_pairs_per_second={rate:.2f} eta_seconds={remaining:.0f}" if remaining is not None else
+                f"new={extracted} reused={reused} elapsed={elapsed:.1f}s eta_seconds=unknown"))
+            last_report = now
+
+    def flush():
+        nonlocal completed, extracted, forwards, source_length, target_length, extraction_seconds
+        if not pending:
+            return
+        batch_started = time.monotonic()
+        unchanged_checkpoint()
+        batch_rows = [row for row, _ in pending]
+        values = collate(batch_rows, "text", source, target, saved["backend"], None, 80, args.device)
         with torch.no_grad():
             _, raw, _, _ = model(*values[:3], layer=args.layer, heads=args.heads)
-        matrix = raw[0, :len(row["en_text"]), :len(row["ja_text"])].cpu().numpy()
-        # Dev/test codepoints unseen during train vocabulary fitting are not valid teacher tokens.
-        src_valid = np.asarray(source.encode(row["ja_text"])) != 3
-        tgt_valid = np.asarray(target.encode(row["en_text"])) != 3
-        matrix = matrix * tgt_valid[:, None] * src_valid[None, :]
-        store.put(row["pair_id"], meta, {"attention": matrix}, args.overwrite)
-        progress("T2TT attention", index + 1, len(rows))
+        # Transfer the batch once. Padding and EOS never enter per-pair output.
+        matrices = raw.detach().cpu().numpy()
+        unchanged_checkpoint()
+        forwards += 1
+        for index, (row, meta) in enumerate(pending):
+            matrix = matrices[index, :len(row["en_text"]), :len(row["ja_text"])]
+            # Held-out codepoints outside the train vocabulary remain invalid.
+            src_valid = np.asarray(source.encode(row["ja_text"])) != 3
+            tgt_valid = np.asarray(target.encode(row["en_text"])) != 3
+            matrix = matrix * tgt_valid[:, None] * src_valid[None, :]
+            store.put(row["pair_id"], meta, {"attention": matrix}, args.overwrite)
+            completed += 1
+            extracted += 1
+        pending.clear()
+        source_length = target_length = 0
+        extraction_seconds += time.monotonic() - batch_started
+        report()
+
+    progress("T2TT attention: extracting", detail=(f"device={args.device} batch_size={batch_size} "
+        f"max_tokens={max_tokens} max_attention_cells={max_cells}; FP32, checkpoint unchanged"))
+    for row in rows:
+        unchanged_checkpoint()
+        meta = {**common, "split": row["split"], "text_hash": digest([row["ja_text"], row["en_text"]])}
+        if args.resume and store.path(row["pair_id"]).exists():
+            store.get(row["pair_id"], meta)
+            completed += 1
+            reused += 1
+            report()
+            continue
+        src_len, tgt_len = len(row["ja_text"]), len(row["en_text"]) + 1
+        if src_len + tgt_len > max_tokens or src_len * tgt_len > max_cells:
+            raise ValueError("pair exceeds attention batch budget: " + row["pair_id"] +
+                             "; increase --max-tokens/--max-attention-cells")
+        count = len(pending) + 1
+        next_source, next_target = max(source_length, src_len), max(target_length, tgt_len)
+        if pending and (count > batch_size or count * (next_source + next_target) > max_tokens or
+                        count * next_source * next_target > max_cells):
+            flush()
+        pending.append((row, meta))
+        source_length, target_length = max(source_length, src_len), max(target_length, tgt_len)
+        if len(pending) == batch_size:
+            flush()
+    flush()
+    unchanged_checkpoint()
+    report(force=True)
+    return {"pairs": completed, "extracted": extracted, "reused": reused, "forwards": forwards,
+            "elapsed_seconds": time.monotonic() - started}

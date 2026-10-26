@@ -73,6 +73,18 @@ train/devの全pair・source pathをprepared TSVと照合する。音声内容ha
 
 Colabは登録Baselineの`backbone`から共通設定ファイルを生成し、T2TT・teacher作成・診断へ渡す。固定presetの寸法やdropoutを保存checkpointの設定と取り違えない。
 
+### Attention抽出の処理速度と再開
+
+6.2のAttention抽出は推論であり、T2TT/S2UTの学習batchとは別の設定を持つ。既定は最大8 pair/forward、padding後のsource+target token合計4096、`batch × target × source`のAttention要素数100万。各制約を満たす範囲でまとめ、FP32・teacher forcing・指定layer/head・未知文字mask・pairごとの保存形式を維持する。単体pairが予算を超える場合も黙って除外せず停止する。独立CLIでは`--batch-size`（1で単体推論）・`--max-tokens`・`--max-attention-cells`で制御できる。
+
+checkpoint全体のSHA256とtokenizer/architectureのhashは開始時に1回計算する。checkpointのpath・size・mtimeが処理途中で変化したら停止し、同じcheckpoint名で異なるモデルの結果を混在させない。音声は読み込まず、manifest内の音声identityをそのまま含める。
+
+進捗はおおむね1秒ごとと最後に表示する。分子はログ行数ではなく照合・保存済みpair数。`new`が新規抽出、`reused`がmetadata/payload照合済みの再利用、`new_pairs_per_second`が新規のforwardと保存にかかった速度。`eta_seconds`は残りをすべて新規抽出と仮定した目安で、初期化・再利用照合・Drive backup待ちを含む完了保証ではない。新規抽出前のETAはunknownとする。
+
+従来の1件ずつのextractorとmetadataは共通で、`--resume`は完成済みpairを再利用する。batch推論と単体推論の間に浮動小数点の微小差が出る場合はあるが、意味を変える精度切り替えや再学習は行わない。既存stageの復旧identityを維持するため、Colabの既定commandにはbatch optionを追加しない。既存backup付きのcommandへ新たにoptionを追加すると、従来どおり別commandとして停止する。
+
+旧版で6.1を完了して6.2を処理中の場合は、6.2を停止して子process終了を確認し、同じVM・ROOT・PERSISTENT・checkpoint・manifestでsourceだけを更新して6.2から再開する。取得済みデータや完成済みAttentionを削除しない。source更新後に旧T2TT runの6.1を再実行するとimplementation contractが異なるため拒否される。学習途中のrunを新sourceへ無条件に移す運用は行わない。
+
 ## 4. 転移モデルを新規学習
 
 ```bash

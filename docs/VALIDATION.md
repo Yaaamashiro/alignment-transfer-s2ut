@@ -1,4 +1,8 @@
-# Validation record — 2026-10-26
+# Validation record — 2026-10-27
+
+2026-10-27、Attention抽出がpairごとにcheckpoint全体と不変な語彙を再hashする問題を修正した。checkpoint SHA256は1回、forwardは最大8 pairずつとし、padding後のtoken/Attention要素数でbatchを制限する。公式fairseqとsmokeの可変長・空白・未知文字を含むデータで、旧単体抽出との数値一致（atol 2e-6 / rtol 2e-5）、旧metadataと保存済みpacketの再利用・既存file hash不変、checkpoint改変と混在packetの拒否、予算内batch、進捗と再利用表示を検査した。全suiteは**136 passed, 3 skipped**。3件はCUDA必須の2件とWindowsでは実行できないPOSIX process group中断試験。
+
+CPUのtiny人工モデル・64 MiBのoptimizer相当payloadを加えたcheckpoint・128 pairでは、旧版9.80秒（checkpoint SHA 128回）から修正版2.78秒（SHA 1回・16 forward）になった。Attention最大絶対差は5.96e-8。ファイルをOS cacheから読める人工条件での約3.52倍であり、実GPU・実teacher・実コーパスの速度予測として扱わない。Colabでの実速度とCUDAでのbatch結果は未検証。
 
 Colabのfull-manifestで共通文章と補助文字labelの不一致が報告された。alignment側のTSV readerがCSVの引用符処理を有効にしていたため、引用符を含むliteral fairseq labelを変形し、閉じていない引用符では後続rowまで取り込む問題を再現した。固定benchmarkと同じ`QUOTE_NONE`へ合わせ、header・column数・空/重複IDの検査を維持した。引用符4種類のmanifest生成とresume、引用符によるrow連結、破損TSV、実際に変更された文章の拒否を検査し、全suiteは**127 passed, 3 skipped**。元データ・label・語彙・学習条件の書き換えや照合の無効化は行わない。実データの不一致がこの読込不具合だけに起因するかは、Colabでのliteral TSV照合または修正版の再実行で確認する。
 
