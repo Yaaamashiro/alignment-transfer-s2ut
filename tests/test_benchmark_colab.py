@@ -1,5 +1,6 @@
 """Use the real benchmark archive/staging code; no alternate Drive implementation."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -14,10 +15,18 @@ from alignment_transfer_s2ut.io import digest, file_hash, read_json, write_json,
 
 @pytest.fixture
 def benchmark_runtime(monkeypatch):
-    sibling = Path(__file__).resolve().parents[2] / "ja-en-direct-s2st-benchmark/src"
-    if sibling.is_dir():
-        monkeypatch.syspath_prepend(str(sibling))
-        monkeypatch.setenv("PYTHONPATH", str(sibling) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    # Colab installs the immutable runtime separately. An unrelated sibling
+    # checkout may have advanced and must not shadow that installed version.
+    configured = os.environ.get("S2ST_BENCHMARK_TEST_ROOT")
+    source = (Path(configured) / "src" if configured else
+              Path(__file__).resolve().parents[2] / "ja-en-direct-s2st-benchmark/src")
+    if configured or importlib.util.find_spec("direct_s2st") is None:
+        if not source.is_dir():
+            if configured:
+                pytest.fail("S2ST_BENCHMARK_TEST_ROOT must contain the pinned benchmark src directory")
+        else:
+            monkeypatch.syspath_prepend(str(source))
+            monkeypatch.setenv("PYTHONPATH", str(source) + os.pathsep + os.environ.get("PYTHONPATH", ""))
     pytest.importorskip("direct_s2st")
     c.runtime.cache_clear()
     value = c.runtime()

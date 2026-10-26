@@ -1,4 +1,6 @@
-# Validation record — 2026-10-23
+# Validation record — 2026-10-26
+
+2026-10-26の実行前再検証でも**96 passed, 2 skipped**。隣接benchmark checkoutが別作業で更新されていたため、Colabが導入した固定runtimeをテストで優先するようfixtureを修正した。明示的な検証用sourceは`S2ST_BENCHMARK_TEST_ROOT`で指定でき、既存benchmark checkoutは変更しない。固定版sourceを別配置した全suiteと、環境からimportできる固定版を隣接checkoutより優先する保存・復元テストを実行した。モデル・学習条件・runtimeのpinは変更していない。
 
 独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**96 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
 
