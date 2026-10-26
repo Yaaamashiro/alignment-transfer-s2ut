@@ -6,6 +6,8 @@ Colabから報告されたCPU preflightではPython 3.10.22・依存metadata・f
 
 ColabのCPU test報告（95 passed / 1 failed）から、command引数をファイルとして調べる`identity_for`が長い`python -c`コードに対してLinuxの`ENAMETOOLONG`を受け取る問題を確認した。ファイルになり得ないこの場合だけを処理し、文字列全体はcommand identityへ引き続き含める。外部ファイルのhash照合とアクセス権エラーの停止は維持する。Linuxの例外を明示的に発生させる回帰テスト、権限エラー検査、実ZIPの中断復元を含む8件のruntimeテストと全suiteを検証した。
 
+入力stagingの表示経路を修正し、関連するNotebook/CLIテスト**27 passed**。benchmarkがstderrへ出す進捗をNotebookから逐次表示してローカルへflushし、stdout JSONは別ファイルとして保持する。子processが終わる前に画面表示されたことを同期markerで検証し、childの非zero終了・ログ保存・中断後のchild終了も確認した。stagingそのもののalgorithm・pack配置・checksum・再利用条件は変更しない。NotebookのschemaとPython構文も確認した。
+
 独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**102 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。

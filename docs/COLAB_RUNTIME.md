@@ -36,6 +36,8 @@ GPUランタイムを選び、同じコードrevision・ROOT・PERSISTENT・学�
 
 GPUで原本のWAVからZIPを作らない。benchmarkが作ったtrain/devの日英WAV packがあれば再利用する。不足する場合だけ、CPUランタイムで`PREPARE_AUDIO_PACKS=True`にして入力準備セルまで実行する。同じbenchmark関数で原本を一度読み、完成済みpackを再利用する。準備後はGPUへ切り替え、Falseへ戻して通常実行する。testの音声packは比較の前処理に要求しない。
 
+「3. 入力の準備」はGPUランタイムでも転送・検証・展開を行う段階で、GPU学習は開始しない。benchmarkの進捗（stderr）をNotebookのPythonから明示的に表示し、`ROOT/execution/stage-inputs-<時刻>.log`へ逐次保存する。機械用JSON（stdout）は別の`.stdout.log`に保持し、処理完了後に読み込む。`status=running`は生存通知であり、前進は`checked`・`zip`等の増加で確認する。中断時はこのセルが起動した子processを終了し、同時実行を残さない。既存の検証済みlocal packとDrive原本は保持し、再実行ではbenchmarkの完了markerとhash検査で再利用する。
+
 ## alignment固有の薄いadapter
 
 元の音声・TSV・辞書の論理pathはデータ識別として保持し、物理的な読み込みだけを検証済みローカルコピーへ向ける。native fairseqでは辞書・multitask設定内の物理pathとTSV読み込みをscoped adapterで解決する。学習targetや文字辞書・補助lossを再構築しない。未stagingのDrive音声・unit payloadへ黙ってfallbackしない。unit importはbenchmarkのinline unit形式を要求する。
