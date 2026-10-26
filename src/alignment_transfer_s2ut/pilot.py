@@ -1,6 +1,6 @@
 """Prepare and record a strong Baseline / Monotonic / T2TT pilot."""
 import argparse
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timezone
 import json
 import math
@@ -122,6 +122,7 @@ def run_logged(name, command, logs, monitor_gpu=False, env=None):
     started, clock = datetime.now(timezone.utc).isoformat(), time.perf_counter()
     monitor, gpu_stream, process = None, None, None
     gpu_error, code, failure = None, None, None
+    recent = deque(maxlen=200)
     try:
         if monitor_gpu:
             gpu_stream = gpu.open("w", encoding="utf-8")
@@ -136,6 +137,7 @@ def run_logged(name, command, logs, monitor_gpu=False, env=None):
             last_echo, last_line, last_printed = 0.0, "", ""
             for line in process.stdout:
                 stream.write(line)
+                recent.append(line[-4096:])
                 last_line = line
                 # Keep Colab output responsive without retaining every training update.
                 if time.monotonic() - last_echo >= 5:
@@ -174,6 +176,10 @@ def run_logged(name, command, logs, monitor_gpu=False, env=None):
                   "gpu_monitor_error": gpu_error}
         write_json(root / (key + ".json"), record)
     if code:
+        # Short commands may finish between progress echoes. Always expose the
+        # failure details (including preflight JSON) while retaining full logs.
+        print(f"\nCommand failed (exit {code}); full log: {output.resolve()}", flush=True)
+        print("".join(recent)[-32768:], end="", flush=True)
         raise subprocess.CalledProcessError(code, command)
     return record
 

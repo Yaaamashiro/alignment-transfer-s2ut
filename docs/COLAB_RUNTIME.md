@@ -15,6 +15,8 @@ python -m alignment_transfer_s2ut.environment --native --benchmark --cuda
 
 比較ノートブックも前処理より先にこの環境検査を実行する。Python 3.10、依存metadata、主要ライブラリのimport、公式fairseqのrevision、コンパイル済みbatch samplerの実行、benchmarkのrevision、CUDA接続を検査し、不足時は停止する。外部モデルの取得・実音声処理はこの検査に含まれない。
 
+CLI subprocessの図はファイルへ出力するため、Notebookの設定セルで`MPLBACKEND=Agg`を指定する。Colab kernelの`module://matplotlib_inline.backend_inline`を別venvへ引き継ぐと、matplotlibのimportが失敗する場合がある。既に開いているNotebookでこのエラーが出た場合は、`import os; os.environ["MPLBACKEND"] = "Agg"`を実行して環境検査セルから再開する。コマンド失敗時は画面にも末尾のログを表示し、全文は`ROOT/execution/`へ保存する。
+
 | 項目 | 使用するbenchmarkの実装 |
 |---|---|
 | 音声ZIP・SHA256・ローカル展開・論理path mapping | `drive_staging.stage_audio` / `active_map` |

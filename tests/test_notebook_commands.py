@@ -3,6 +3,7 @@ import argparse
 import ast
 import importlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -69,3 +70,22 @@ def test_standalone_commands_stop_on_failure_and_preserve_path_arguments():
     with pytest.raises(subprocess.CalledProcessError):
         namespace["execute"]("python", "--output", "/tmp/path with spaces", 2)
     assert calls == [["python", "--output", "/tmp/path with spaces", "2"]]
+
+
+@pytest.mark.parametrize("notebook", ["benchmark_comparison", "pilot", "pipeline"])
+def test_notebook_overrides_colab_inline_backend_for_cli_subprocesses(tmp_path, monkeypatch, notebook):
+    path = Path(__file__).resolve().parents[1] / f"notebooks/colab/{notebook}.ipynb"
+    source = "\n".join("".join(cell["source"]) for cell in json.loads(path.read_text(encoding="utf-8"))["cells"]
+                       if cell["cell_type"] == "code")
+    setting = next(node for node in ast.parse(source).body if isinstance(node, ast.Assign) and
+                   isinstance(node.targets[0], ast.Subscript) and
+                   ast.unparse(node.targets[0]) == "os.environ['MPLBACKEND']")
+    monkeypatch.setenv("MPLBACKEND", "module://matplotlib_inline.backend_inline")
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "matplotlib"))
+    exec(compile(ast.Module(body=[setting], type_ignores=[]), notebook, "exec"), {"os": os})
+    assert os.environ["MPLBACKEND"] == "Agg"
+    output = tmp_path / "plot.png"
+    command = [sys.executable, "-c", "import matplotlib.pyplot as p,sys; p.plot([0,1]); p.savefig(sys.argv[1])", str(output)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes().startswith(b"\x89PNG")

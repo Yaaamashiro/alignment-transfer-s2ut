@@ -1,8 +1,10 @@
 # Validation record — 2026-10-26
 
-2026-10-26の実行前再検証でも**96 passed, 2 skipped**。隣接benchmark checkoutが別作業で更新されていたため、Colabが導入した固定runtimeをテストで優先するようfixtureを修正した。明示的な検証用sourceは`S2ST_BENCHMARK_TEST_ROOT`で指定でき、既存benchmark checkoutは変更しない。固定版sourceを別配置した全suiteと、環境からimportできる固定版を隣接checkoutより優先する保存・復元テストを実行した。モデル・学習条件・runtimeのpinは変更していない。
+2026-10-26のColab backend修正後の再検証は**100 passed, 2 skipped**。隣接benchmark checkoutが別作業で更新されていたため、Colabが導入した固定runtimeをテストで優先するようfixtureを修正した。明示的な検証用sourceは`S2ST_BENCHMARK_TEST_ROOT`で指定でき、既存benchmark checkoutは変更しない。固定版sourceを別配置した全suiteと、環境からimportできる固定版を隣接checkoutより優先する保存・復元テストを実行した。モデル・学習条件・runtimeのpinは変更していない。
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**96 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
+Colabから報告されたCPU preflightではPython 3.10.22・依存metadata・fairseq provenance・compiled batch sampler・benchmark pinが成功し、matplotlibだけが失敗していた。Notebook kernel由来の`MPLBACKEND=module://matplotlib_inline.backend_inline`を別venvへ継承する同じエラーをローカルで再現し、3つのNotebookで`MPLBACKEND=Agg`を設定した。各Notebookの実際の設定を適用した新規subprocessでmatplotlibのimportとPNG保存を検証した。短い失敗コマンドで省略されていたpreflight JSONも、失敗時の末尾ログ表示で読めることを確認した。
+
+独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**100 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
 
@@ -10,7 +12,7 @@ fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb
 
 依存関係は`pip check`に加え、新しい`environment` CLIでpreprocess/evaluation/dev extrasのバージョンとimportを検査する。CUDA・benchmarkの固定revision・native batch samplerは明示オプションで必須にできる。ローカルの通常preflightは成功し、`--native`では未buildの`fairseq.data.data_utils_fast`を検出して終了コード1になることを確認した。このWindows環境から本番native学習を開始できるという意味ではない。
 
-ローカル環境のPyYAML 6.0.3・Cython 3.3.0・setuptools 84.2.0は、ColabのPyYAML 6.0.2・Cython 3.2.9・setuptools<81と異なる。benchmarkはテストfixtureから固定sourceを読み込んでおり、ローカルのpackage metadataへ導入していない。従って`pip check`の成功はColabの依存環境全体の再現を証明しない。Linuxでの通常fairseq buildとColabのbootstrapは別途検証が必要。古いOmegaConfのmetadataに対するpipのdeprecationと、upstream fairseqのimportlib/autocast deprecationは残っているが、今回のテストではエラーではない。
+ローカル環境のPyYAML 6.0.3・Cython 3.3.0・setuptools 84.2.0は、ColabのPyYAML 6.0.2・Cython 3.2.9・setuptools<81と異なる。benchmarkはテストfixtureから固定sourceを読み込んでおり、ローカルのpackage metadataへ導入していない。従って`pip check`の成功はColabの依存環境全体の再現を証明しない。ColabからのCPU preflight報告ではcompiled batch samplerまで成功しているが、Linuxでのnative CLI epoch iterator全体・実GPU更新・外部モデル込みの実行は引き続き別途検証が必要。古いOmegaConfのmetadataに対するpipのdeprecationと、upstream fairseqのimportlib/autocast deprecationは残っているが、今回のテストではエラーではない。
 
 確認した内容:
 

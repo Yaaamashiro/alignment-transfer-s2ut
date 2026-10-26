@@ -106,6 +106,20 @@ def test_pilot_runner_records_failures_and_preserves_each_attempt(tmp_path):
     assert failed["gpu_csv"] is None
 
 
+def test_fast_failure_displays_preflight_details_despite_progress_throttling(tmp_path, monkeypatch, capsys):
+    from alignment_transfer_s2ut import pilot
+    monkeypatch.setattr(pilot.time, "monotonic", lambda: 1.)
+    script = "import json,sys; print(json.dumps({'checks': {'dependencies': {'ok': False, 'detail': 'version mismatch'}}}, indent=2)); sys.exit(1)"
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        run_logged("environment", [sys.executable, "-c", script], tmp_path)
+    assert error.value.returncode == 1
+    visible = capsys.readouterr().out
+    assert '"dependencies"' in visible and '"ok": false' in visible
+    assert "version mismatch" in visible and "full log:" in visible
+    record = next(read_json(path) for path in tmp_path.glob("*.json"))
+    assert "version mismatch" in Path(record["log"]).read_text(encoding="utf-8")
+
+
 def test_pilot_report_handles_resumed_steps_and_rejects_mixed_evaluation(tmp_path):
     logs = tmp_path / "execution"
     logs.mkdir()
