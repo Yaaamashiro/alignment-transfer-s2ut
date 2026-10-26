@@ -35,8 +35,8 @@ def attention_data(tmp_path):
     return rows, manifest
 
 
-def save_checkpoint(root, rows, backend):
-    config = BackboneConfig(**TINY_CONFIG["backbone"])
+def save_checkpoint(root, rows, backend, config=None):
+    config = config or BackboneConfig(**TINY_CONFIG["backbone"])
     source, target = [CharacterTokenizer.fit(rows, field) for field in ("ja_text", "en_text")]
     t.seed_all(7)
     model = t.build_model(config, "text", source.vocabulary, target.vocabulary, backend)
@@ -53,7 +53,7 @@ def arguments(manifest, checkpoint, output, *extra):
         "--manifest", str(manifest), "--checkpoint", str(checkpoint), "--output", str(output), *map(str, extra)])
 
 
-def legacy_packets(rows, saved, checkpoint, heads=(0,), device="cpu"):
+def legacy_packets(rows, saved, checkpoint, heads=(0,), device="cpu", layer=-1):
     source, target = [CharacterTokenizer(saved[name + "_vocabulary"]) for name in ("source", "target")]
     model = t.checkpoint_model(saved, device).eval()
     heads = None if heads is None else list(heads)
@@ -61,17 +61,54 @@ def legacy_packets(rows, saved, checkpoint, heads=(0,), device="cpu"):
     for row in rows:
         values = t.collate([row], "text", source, target, saved["backend"], None, 80, device)
         with torch.no_grad():
-            _, raw, _, _ = model(*values[:3], layer=-1, heads=heads)
+            _, raw, _, _ = model(*values[:3], layer=layer, heads=heads)
         matrix = raw[0, :len(row["en_text"]), :len(row["ja_text"])].cpu().numpy()
         matrix = matrix * (np.asarray(target.encode(row["en_text"])) != 3)[:, None] * (
             np.asarray(source.encode(row["ja_text"])) != 3)[None, :]
         meta = dict(stage="t2tt_attention", split=row["split"], manifest_hash=manifest_hash(rows),
             text_hash=digest([row["ja_text"], row["en_text"]]), backend=saved["backend"],
             mt_checkpoint_hash=file_hash(checkpoint), mt_architecture_hash=digest(saved["backbone"]),
-            tokenizer_hash=digest([source.fingerprint, target.fingerprint]), layer=-1, heads=heads,
+            tokenizer_hash=digest([source.fingerprint, target.fingerprint]), layer=layer, heads=heads,
             teacher_forcing=True, training_split="train")
         packets[row["pair_id"]] = meta, matrix
     return packets
+
+
+@pytest.mark.parametrize("backend", ["smoke", "fairseq"])
+@pytest.mark.parametrize("layer", [0, -1])
+def test_random_lengths_and_nonfinal_decoder_layer_match_unbatched(tmp_path, backend, layer):
+    if backend == "fairseq" and importlib.util.find_spec("fairseq") is None:
+        pytest.skip("pinned fairseq not installed")
+    torch.set_num_threads(1)
+    rng = np.random.default_rng(20261027)
+    rows = []
+    for index in range(40):
+        ja = "".join(rng.choice(list("あいう漢字😀 "), size=int(rng.integers(1, 97)))) + str(index)
+        en = "".join(rng.choice(list('abcXYZ "'), size=int(rng.integers(1, 81)))) + str(index)
+        if index == 0:
+            ja += "0123456789"
+            en += "0123456789"
+        if index >= 32:
+            ja += "ぬ"
+            en += "Ω"
+        rows.append(dict(pair_id=str(index), split="train" if index < 32 else "dev", ja_text=ja, en_text=en,
+                         ja_audio=str(tmp_path / f"ja-{index}.wav"), en_audio=str(tmp_path / f"en-{index}.wav")))
+    manifest = tmp_path / "manifest.jsonl"
+    write_jsonl(manifest, rows)
+    values = dict(TINY_CONFIG["backbone"], encoder_layers=2, decoder_layers=2)
+    checkpoint, saved = save_checkpoint(tmp_path, rows, backend, BackboneConfig(**values))
+    heads = [1] if layer == 0 else None
+    reference = legacy_packets(rows, saved, checkpoint, heads=heads, layer=layer)
+    args = arguments(manifest, checkpoint, tmp_path / "attention", "--layer", layer,
+                     "--max-tokens", 512, "--max-attention-cells", 24000,
+                     *([] if heads is None else ["--heads", *heads]))
+    result = t.extract_attention(args)
+    assert result["pairs"] == 40 and result["forwards"] < 40
+    store = ArtifactStore(args.output)
+    for pair, (expected_meta, matrix) in reference.items():
+        _, packet = store.get(pair, expected_meta)
+        assert packet["attention"].shape == matrix.shape
+        np.testing.assert_allclose(packet["attention"], matrix, atol=2e-6, rtol=2e-5)
 
 
 @pytest.mark.parametrize("backend", ["smoke", "fairseq"])
