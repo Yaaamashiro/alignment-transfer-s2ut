@@ -174,7 +174,7 @@ def test_pilot_notebook_syntax_and_separate_update_budgets(tmp_path):
     assert constants["ANNEAL_STEPS"] == 5000
     assert constants["DEV_LIMIT"] == 200
     assert constants["CONDITIONS"] == [name for name, _, _ in CONDITIONS]
-    assert "check=True" in source and "alignment-audit-" in source
+    assert "raise subprocess.CalledProcessError" in source and "alignment-audit-" in source
     assert "alignment_transfer_s2ut.evaluate_t2tt" in source and "--t2tt-evaluation" in source
     # Exercise the notebook's JSONL-writing expression, catching escaped-newline errors.
     call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call) and

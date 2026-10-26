@@ -43,7 +43,7 @@ def test_standalone_commands_parse_and_preserve_all_five_conditions():
         RUNS="/tmp/output with spaces/strong", PYTHON="python", UPDATES=2,
         ANNEAL_STEPS=10000, RECIPE="strong", execute=lambda *args: calls.append(list(map(str, args))))
     for source in pipeline_cells():
-        if "execute(" in source and "git" not in source:
+        if "execute(" in source and "git" not in source and "def execute(" not in source:
             exec(source, namespace)
     for command in calls:
         assert command[1] == "-m"
@@ -60,13 +60,13 @@ def test_standalone_commands_parse_and_preserve_all_five_conditions():
 
 def test_standalone_commands_stop_on_failure_and_preserve_path_arguments():
     setup = next(source for source in pipeline_cells() if "def execute(" in source)
-    helper = next(node for node in ast.parse(setup).body if isinstance(node, ast.FunctionDef))
+    helper = next(node for node in ast.parse(setup).body if isinstance(node, ast.FunctionDef) and node.name == "execute")
     calls = []
-    def run(args, check):
+    def run(args, logs, **kwargs):
         calls.append(args)
-        assert check is True
+        assert kwargs["capture_json"] is False
         raise subprocess.CalledProcessError(7, args)
-    namespace = dict(subprocess=SimpleNamespace(run=run))
+    namespace = dict(run_process=run, LOGS="local-logs", Path=Path)
     exec(compile(ast.Module(body=[helper], type_ignores=[]), "notebook-execute", "exec"), namespace)
     with pytest.raises(subprocess.CalledProcessError):
         namespace["execute"]("python", "--output", "/tmp/path with spaces", 2)
@@ -92,12 +92,16 @@ def test_notebook_overrides_colab_inline_backend_for_cli_subprocesses(tmp_path, 
     assert output.read_bytes().startswith(b"\x89PNG")
 
 
-def staging_helper(tmp_path, print_function=print, subprocess_module=subprocess):
+def staging_helper(tmp_path, print_function=print):
     path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
-    source = next("".join(cell["source"]) for cell in json.loads(path.read_text(encoding="utf-8"))["cells"]
+    cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
+    common = next("".join(cell["source"]) for cell in cells if "process-logging" in cell.get("metadata", {}).get("tags", []))
+    source = next("".join(cell["source"]) for cell in cells
                   if cell["cell_type"] == "code" and "def stage_inputs_live(" in "".join(cell["source"]))
     function = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef))
-    namespace = dict(LOGS=tmp_path, time=time, subprocess=subprocess_module, json=json, print=print_function)
+    namespace = dict(print=print_function)
+    exec(common, namespace)
+    namespace["LOGS"] = tmp_path
     exec(compile(ast.Module(body=[function], type_ignores=[]), "notebook-input-staging", "exec"), namespace)
     return namespace["stage_inputs_live"]
 
@@ -124,8 +128,9 @@ print(json.dumps({'input_map':'local-map.json','files':128}))
 """
     result = staging_helper(tmp_path, display)([sys.executable, "-c", script, str(acknowledged), str(finished)])
     assert result == dict(input_map="local-map.json", files=128)
-    assert any("PID:" in line for line in visible)
-    progress_log = next(p for p in tmp_path.glob("stage-inputs-*.log") if not p.name.endswith(".stdout.log"))
+    assert any("pid=" in line for line in visible)
+    record = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+    progress_log = Path(record["log"])
     assert "[progress] copying audio" in progress_log.read_text(encoding="utf-8")
     assert json.loads(next(tmp_path.glob("*.stdout.log")).read_text(encoding="utf-8")) == result
 
@@ -137,21 +142,37 @@ def test_input_staging_retains_error_log_and_fails_on_child_error(tmp_path, caps
     assert error.value.returncode == 7
     assert "copy checksum mismatch" in capsys.readouterr().out
     assert any("copy checksum mismatch" in p.read_text(encoding="utf-8")
-               for p in tmp_path.glob("stage-inputs-*.log"))
+               for p in tmp_path.glob("*.log"))
 
 
 def test_input_staging_interrupt_stops_only_its_child(tmp_path):
     children = []
+    original = subprocess.Popen
     def launch(*args, **kwargs):
-        child = subprocess.Popen(*args, **kwargs)
+        child = original(*args, **kwargs)
         children.append(child)
         return child
     def display(*args, **kwargs):
         if args == ("ready\n",):
             raise KeyboardInterrupt
-    proxy = SimpleNamespace(Popen=launch, PIPE=subprocess.PIPE,
-        TimeoutExpired=subprocess.TimeoutExpired, CalledProcessError=subprocess.CalledProcessError)
     script = "import sys,time; print('ready',file=sys.stderr,flush=True); time.sleep(60)"
-    with pytest.raises(KeyboardInterrupt):
-        staging_helper(tmp_path, display, proxy)([sys.executable, "-c", script])
+    with patch.object(subprocess, "Popen", launch), pytest.raises(KeyboardInterrupt):
+        staging_helper(tmp_path, display)([sys.executable, "-c", script])
     assert len(children) == 1 and children[0].poll() is not None
+
+
+@pytest.mark.parametrize("name", ["benchmark_comparison", "pilot", "pipeline"])
+def test_every_notebook_command_uses_the_canonical_logger(name):
+    root = Path(__file__).resolve().parents[1]
+    notebook = json.loads((root / f"notebooks/colab/{name}.ipynb").read_text(encoding="utf-8"))
+    canonical = ast.parse((root / "src/alignment_transfer_s2ut/process_logging.py").read_text(encoding="utf-8"))
+    expected = {n.name: ast.dump(n) for n in canonical.body if isinstance(n, ast.FunctionDef)}
+    common = next(c for c in notebook["cells"] if "process-logging" in c.get("metadata", {}).get("tags", []))
+    actual = {n.name: ast.dump(n) for n in ast.parse("".join(common["source"])).body if isinstance(n, ast.FunctionDef)}
+    assert all(actual[key] == value for key, value in expected.items())
+    for cell in notebook["cells"]:
+        if cell["cell_type"] != "code" or cell is common:
+            continue
+        for node in ast.walk(ast.parse("".join(cell["source"]))):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                assert not (isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"), ast.unparse(node)

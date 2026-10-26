@@ -1,6 +1,6 @@
 # Validation record — 2026-10-26
 
-2026-10-26のColab backend・長いコマンド引数の修正後の再検証は**102 passed, 2 skipped**。隣接benchmark checkoutが別作業で更新されていたため、Colabが導入した固定runtimeをテストで優先するようfixtureを修正した。明示的な検証用sourceは`S2ST_BENCHMARK_TEST_ROOT`で指定でき、既存benchmark checkoutは変更しない。固定版sourceを別配置した全suiteと、環境からimportできる固定版を隣接checkoutより優先する保存・復元テストを実行した。モデル・学習条件・runtimeのpinは変更していない。
+2026-10-26の全段階ログ統合後の再検証は**115 passed, 3 skipped**。隣接benchmark checkoutが別作業で更新されていたため、Colabが導入した固定runtimeをテストで優先するようfixtureを修正した。明示的な検証用sourceは`S2ST_BENCHMARK_TEST_ROOT`で指定でき、既存benchmark checkoutは変更しない。固定版sourceを別配置した全suiteと、環境からimportできる固定版を隣接checkoutより優先する保存・復元テストを実行した。モデル・学習条件・runtimeのpinは変更していない。
 
 Colabから報告されたCPU preflightではPython 3.10.22・依存metadata・fairseq provenance・compiled batch sampler・benchmark pinが成功し、matplotlibだけが失敗していた。Notebook kernel由来の`MPLBACKEND=module://matplotlib_inline.backend_inline`を別venvへ継承する同じエラーをローカルで再現し、3つのNotebookで`MPLBACKEND=Agg`を設定した。各Notebookの実際の設定を適用した新規subprocessでmatplotlibのimportとPNG保存を検証した。短い失敗コマンドで省略されていたpreflight JSONも、失敗時の末尾ログ表示で読めることを確認した。
 
@@ -8,7 +8,11 @@ ColabのCPU test報告（95 passed / 1 failed）から、command引数をファ�
 
 入力stagingの表示経路を修正し、関連するNotebook/CLIテスト**27 passed**。benchmarkがstderrへ出す進捗をNotebookから逐次表示してローカルへflushし、stdout JSONは別ファイルとして保持する。子processが終わる前に画面表示されたことを同期markerで検証し、childの非zero終了・ログ保存・中断後のchild終了も確認した。stagingそのもののalgorithm・pack配置・checksum・再利用条件は変更しない。NotebookのschemaとPython構文も確認した。
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**102 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
+環境構築・検査・JSON取得・入力準備・前処理・学習・推論・評価を共通の標準ライブラリloggerへ統合した。3つのNotebookでgit/uv/pipを含めた直接subprocess呼び出しの残存を検出し、インストール前に埋め込む関数が共通sourceとAST一致することを検査した。無出力の子processが終了する前に生存通知と実行中metadataを読めること、速い途中行も画面とファイルへ保存されること、JSON stdoutの分離、起動失敗・異常終了・不正JSON・中断終了を確認した。既存のGPU CSV監視とbenchmarkのZIP/runtimeは維持する。
+
+WindowsではPOSIXのprocess groupを実行できないため、入れ子のobserverがgroupを分離しない設定を検査し、実際のgroup中断試験はskipした。3件のskipはこのPOSIX中断試験とCUDA必須の2件。CPUでのnative Trainerの数値一致・checkpoint再開・実benchmarkによる保存/復元は全suite内で成功した。Notebookのschema/Python/HTML変換、文書リンク、wheel buildと共通loggerを含む全Python moduleの同梱も確認した。
+
+独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**115 passed, 3 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
 
@@ -75,7 +79,7 @@ fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb
 - native fairseq checkpointでもT2TT text生成/評価を実行。生成・評価の途中再開、変更した生成条件・dev data・改変した予測cacheの拒否を確認。
 - pilot集計でT2TT dev text評価を添付し、異なるteacher checkpoint・dev data・test評価の混入を拒否。wheelに新しい評価CLI/moduleを同梱し、両Colabの構文を確認。
 
-2件のskipは**native TrainerのFP16接続試験**と**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。pure-Python fairseq環境にはCythonのbatch sampler拡張がないため、ローカルでは実Trainerのmicrobatch更新までを検証し、CLIのepoch iterator全体は未実行。Colabは通常のLinux buildを使う。
+CUDAに関する2件のskipは**native TrainerのFP16接続試験**と**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。加えてWindowsではPOSIXの入れ子process group中断試験をskipする。pure-Python fairseq環境にはCythonのbatch sampler拡張がないため、ローカルでは実Trainerのmicrobatch更新までを検証し、CLIのepoch iterator全体は未実行。Colabは通常のLinux buildを使う。
 
 Drive上では`experiment-001`の`paper-fisher-v1` run、365000更新snapshot、対応するpreparedデータ・unitの保存先とJSONの学習設定を確認した。約1 GBの実checkpoint本体のローカル取得・登録、実コーパスの前処理、本学習、T2TT dev text BLEU、実音声品質、ASR-BLEUによる手法比較、Colab上の実行は未検証。人工smokeやnative Trainerテストの成功を研究仮説の検証結果として扱わない。
 

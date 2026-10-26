@@ -1,5 +1,7 @@
 # Colabの入出力・保存・再開
 
+全段階の画面表示・実行記録・無出力時の生存通知は[共通ログ仕様](LOGGING.md)を参照。
+
 比較用の`benchmark_comparison.ipynb`は、動作実績のあるbenchmarkの実装を固定revisionで直接利用する。新たな学習レシピやDrive保存方式を独立に作り直さない。
 
 参照元は[ja-en-direct-s2st-benchmark / 4361e55](https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark/tree/4361e55a99c7f4ea3a00c5c138f6820c34a07d06)。Colabが別のローカルcheckoutへ取得・editable installし、起動時にrevisionとtracked sourceの変更を検査する。benchmark checkoutや元データの編集は行わない。
@@ -36,7 +38,7 @@ GPUランタイムを選び、同じコードrevision・ROOT・PERSISTENT・学�
 
 GPUで原本のWAVからZIPを作らない。benchmarkが作ったtrain/devの日英WAV packがあれば再利用する。不足する場合だけ、CPUランタイムで`PREPARE_AUDIO_PACKS=True`にして入力準備セルまで実行する。同じbenchmark関数で原本を一度読み、完成済みpackを再利用する。準備後はGPUへ切り替え、Falseへ戻して通常実行する。testの音声packは比較の前処理に要求しない。
 
-「3. 入力の準備」はGPUランタイムでも転送・検証・展開を行う段階で、GPU学習は開始しない。benchmarkの進捗（stderr）をNotebookのPythonから明示的に表示し、`ROOT/execution/stage-inputs-<時刻>.log`へ逐次保存する。機械用JSON（stdout）は別の`.stdout.log`に保持し、処理完了後に読み込む。`status=running`は生存通知であり、前進は`checked`・`zip`等の増加で確認する。中断時はこのセルが起動した子processを終了し、同時実行を残さない。既存の検証済みlocal packとDrive原本は保持し、再実行ではbenchmarkの完了markerとhash検査で再利用する。
+「3. 入力の準備」はGPUランタイムでも転送・検証・展開を行う段階で、GPU学習は開始しない。benchmarkの進捗（stderr）をNotebookのPythonから明示的に表示し、`ROOT/execution/*.log`（開始時に実際の保存先を表示）へ逐次保存する。機械用JSON（stdout）は別の`.stdout.log`に保持し、処理完了後に読み込む。`status=running`は生存通知であり、前進は`checked`・`zip`等の増加で確認する。中断時はこのセルが起動した子processを終了し、同時実行を残さない。既存の検証済みlocal packとDrive原本は保持し、再実行ではbenchmarkの完了markerとhash検査で再利用する。
 
 ## alignment固有の薄いadapter
 

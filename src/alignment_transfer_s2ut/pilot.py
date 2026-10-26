@@ -1,7 +1,6 @@
 """Prepare and record a strong Baseline / Monotonic / T2TT pilot."""
 import argparse
-from collections import Counter, deque
-from datetime import datetime, timezone
+from collections import Counter
 import json
 import math
 from pathlib import Path
@@ -114,15 +113,18 @@ def commands(args):
 
 
 def run_logged(name, command, logs, monitor_gpu=False, env=None):
-    """Fail on command errors, persist every attempt, and stop our GPU sampler."""
+    """Use the same streaming logger as Colab; retain the existing GPU sampler."""
+    from .process_logging import run_process
     root = Path(logs)
     root.mkdir(parents=True, exist_ok=True)
-    key = digest(name)[:12] + "-" + str(time.time_ns())
-    output, gpu = root / (key + ".log"), root / (key + "-gpu.csv")
-    started, clock = datetime.now(timezone.utc).isoformat(), time.perf_counter()
-    monitor, gpu_stream, process = None, None, None
-    gpu_error, code, failure = None, None, None
-    recent = deque(maxlen=200)
+    gpu = root / (digest(name)[:12] + "-" + str(time.time_ns()) + "-gpu.csv")
+    monitor = gpu_stream = None
+    gpu_error = None
+    def monitor_info():
+        code = monitor.poll() if monitor is not None else None
+        error = "nvidia-smi sampler exited: " + str(code) if code not in (None, 0) else gpu_error
+        return {"gpu_csv": str(gpu.resolve()) if monitor is not None else None,
+                "gpu_monitor_error": error}
     try:
         if monitor_gpu:
             gpu_stream = gpu.open("w", encoding="utf-8")
@@ -131,57 +133,18 @@ def run_logged(name, command, logs, monitor_gpu=False, env=None):
                     "--format=csv,nounits", "--loop=5"], stdout=gpu_stream, stderr=subprocess.DEVNULL)
             except OSError as error:
                 gpu_error = str(error)
-        with output.open("w", encoding="utf-8") as stream:
-            process = subprocess.Popen(list(map(str, command)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", bufsize=1, env=env)
-            last_echo, last_line, last_printed = 0.0, "", ""
-            for line in process.stdout:
-                stream.write(line)
-                recent.append(line[-4096:])
-                last_line = line
-                # Keep Colab output responsive without retaining every training update.
-                if time.monotonic() - last_echo >= 5:
-                    print(line, end="", flush=True)
-                    last_printed = line
-                    stream.flush()
-                    last_echo = time.monotonic()
-            code = process.wait()
-            if last_line != last_printed:
-                print(last_line, end="", flush=True)
-    except BaseException as error:
-        failure = type(error).__name__ + ": " + str(error)
-        raise
+        result = run_process(command, root, name=name, env=env, extra_record=monitor_info)
+        return result.record
     finally:
-        monitor_exit = monitor.poll() if monitor is not None else None
-        for child in (process, monitor):
-            if child is not None and child.poll() is None:
-                child.terminate()
-                try:
-                    child.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    child.kill()
-                    child.wait()
-        if gpu_stream:
+        if monitor is not None and monitor.poll() is None:
+            monitor.terminate()
+            try:
+                monitor.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                monitor.kill()
+                monitor.wait()
+        if gpu_stream is not None:
             gpu_stream.close()
-        if process is not None and process.stdout is not None:
-            process.stdout.close()
-        if monitor_exit is not None and monitor_exit != 0:
-            gpu_error = "nvidia-smi sampler exited: " + str(monitor_exit)
-        record = {"name": name, "command": list(map(str, command)), "started_utc": started,
-                  "host_utc_offset_seconds": int(datetime.now().astimezone().utcoffset().total_seconds()),
-                  "elapsed_seconds": time.perf_counter() - clock, "returncode": code,
-                  "status": "succeeded" if code == 0 else "failed_or_interrupted",
-                  "exception": failure,
-                  "log": str(output.resolve()), "gpu_csv": str(gpu.resolve()) if monitor is not None else None,
-                  "gpu_monitor_error": gpu_error}
-        write_json(root / (key + ".json"), record)
-    if code:
-        # Short commands may finish between progress echoes. Always expose the
-        # failure details (including preflight JSON) while retaining full logs.
-        print(f"\nCommand failed (exit {code}); full log: {output.resolve()}", flush=True)
-        print("".join(recent)[-32768:], end="", flush=True)
-        raise subprocess.CalledProcessError(code, command)
-    return record
 
 
 def report(runs, logs, output, t2tt_evaluation=None):

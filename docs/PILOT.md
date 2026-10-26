@@ -79,7 +79,7 @@ T2TTのtext BLEUはteacher forcingを使わない自己回帰生成によるcorp
 | `t2tt/dev-text-metrics.json`, `t2tt/dev-text-metrics-predictions.jsonl` | T2TT単体のdev text BLEU・署名・EOS到達率・生成設定と予測文 |
 | `alignment-audit-train/`, `alignment-audit-dev/` | summary JSON・sample別JSONL・heatmap PNG/NPZ |
 | `runs/{condition}/` | checkpoint・学習metrics・dev予測と評価 |
-| `execution/` | 試行ごとのコマンド、終了状態、所要秒数、完全ログ、GPU使用率CSV |
+| `LOGS`（ColabではVMローカル） | 試行ごとのコマンド、終了状態、所要秒数、完全ログ、GPU使用率CSV。[共通ログ仕様](LOGGING.md) |
 | `pilot-plan.json` | 共通設定と3条件の実行コマンド |
 | `fair-comparison.json` | recipe・初期化・データ・転移条件の比較検査 |
 | `pilot-summary.json`, `pilot-summary.png` | 最良dev loss・更新数・beta・dev評価・記録時間・T2TT dev text評価とdev loss曲線 |

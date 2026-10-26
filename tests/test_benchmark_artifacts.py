@@ -93,19 +93,23 @@ def notebook_cell(prefix):
 def test_optional_monotonic_training_wiring(tmp_path, t2tt, monotonic):
     import json
     from types import SimpleNamespace
-    calls, plans = [], []
+    calls, plans, notices = [], [], []
     def capture(name, module, *arguments, **kwargs):
         validate_command(module, arguments)
         calls.append((name, module, *arguments))
     def plan(command, **kwargs):
         plans.append(command)
         return json.dumps(dict(training_budget=300000, initialization="fresh", selection_policy={}))
+    def execute_json(*command, **kwargs):
+        validate_command(command[2], command[3:])
+        return json.loads(plan(command))
     (tmp_path / "text-evaluation").mkdir()
     write_json(tmp_path / "text-evaluation/dev-text.json", {"text_bleu": 1.})
     namespace = dict(Path=Path, json=json, ROOT=str(tmp_path), RUN_TRANSFER=t2tt, RUN_MONOTONIC=monotonic,
         BASELINE=tmp_path / "baseline.json", MANIFEST=tmp_path / "manifest.jsonl", PYTHON="python",
         BACKBONE_CONFIG=tmp_path / "backbone.json", T2TT_UPDATES=20000, ANNEAL_STEPS=200000,
-        subprocess=SimpleNamespace(check_output=plan), run=capture)
+        subprocess=SimpleNamespace(check_output=plan), run=capture, execute_json=execute_json,
+        LOGS=tmp_path / "execution", log_event=lambda *a, **kw: notices.append(a))
     exec(notebook_cell("# Preserve primary preparation"), namespace)
     exec(notebook_cell("TRANSFER ="), namespace)
     assert any(a[1] == "alignment_transfer_s2ut.train_t2tt" for a in calls) == (t2tt or not monotonic)
@@ -119,6 +123,9 @@ def test_optional_monotonic_training_wiring(tmp_path, t2tt, monotonic):
         assert args[args.index(field) + 1] == original[original.index(field) + 1]
     assert "--teacher" in namespace["TRANSFER_ARGS"]
     assert len(plans) == int(monotonic) + int(t2tt or not monotonic)
+    assert any(a[:2] == ("annealed-monotonic", "skipped") for a in notices) == (not monotonic)
+    assert any(a[:2] == ("t2tt-teacher", "skipped") for a in notices) == (monotonic and not t2tt)
+    assert any(a[:2] == ("s2ut-training", "skipped") for a in notices) == (not monotonic and not t2tt)
 
 
 @pytest.mark.parametrize("monotonic,t2tt,ready_t2tt,ready_monotonic,expected", [
@@ -157,7 +164,8 @@ def test_optional_control_uses_common_evaluation_and_table(tmp_path, monkeypatch
     namespace = dict(Path=Path, json=json, ROOT=str(tmp_path), RUN_TRANSFER=t2tt, RUN_MONOTONIC=monotonic,
         BASELINE=tmp_path / "baseline.json", MANIFEST=tmp_path / "manifest.jsonl",
         TRANSFER=tmp_path / "annealed-t2tt", MONOTONIC=tmp_path / "annealed-monotonic",
-        GENERATE_WAVEFORMS=asr, ASR_BLEU=asr, run=run)
+        GENERATE_WAVEFORMS=asr, ASR_BLEU=asr, run=run,
+        LOGS=tmp_path / "execution", log_event=lambda *a, **kw: None)
     exec(notebook_cell("from IPython.display"), namespace)
     inference = [a for a in calls if a[1:3] == ("alignment_transfer_s2ut.benchmark", "infer")]
     assert [a[0].removesuffix("-infer") for a in inference] == expected

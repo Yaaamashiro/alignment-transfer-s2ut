@@ -88,6 +88,7 @@ standalone前処理の入力は1行1pairのJSONL。`pair_id`を全stageで保持
 |---|---|
 | [BENCHMARK_COMPARISON](docs/BENCHMARK_COMPARISON.md) | Baseline登録・native学習・共通評価 |
 | [COLAB_RUNTIME](docs/COLAB_RUNTIME.md) | 入出力・ZIP保存・切断後の再開 |
+| [LOGGING](docs/LOGGING.md) | 全段階の進捗・生存通知・実行ログ |
 | [USAGE](docs/USAGE.md) | standalone前処理・学習・推論のCLI |
 | [METHOD](docs/METHOD.md) / [ARCHITECTURE](docs/ARCHITECTURE.md) | 手法とモデル構成 |
 | [ALIGNMENT](docs/ALIGNMENT.md) | CTC・unit timing・投影・品質診断 |
