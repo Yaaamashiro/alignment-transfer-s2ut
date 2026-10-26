@@ -92,7 +92,7 @@ standalone前処理の入力は1行1pairのJSONL。`pair_id`を全stageで保持
 | [USAGE](docs/USAGE.md) | standalone前処理・学習・推論のCLI |
 | [METHOD](docs/METHOD.md) / [ARCHITECTURE](docs/ARCHITECTURE.md) | 手法とモデル構成 |
 | [ALIGNMENT](docs/ALIGNMENT.md) | CTC・unit timing・投影・品質診断 |
-| [EXPERIMENTS](docs/EXPERIMENTS.md) / [STREAMING](docs/STREAMING.md) | レシピ・実験管理・入力の並列化 |
+| [EXPERIMENTS](docs/EXPERIMENTS.md) / [STREAMING](docs/STREAMING.md) | 独立trainerのレシピ・実験管理・入力先読み |
 | [PILOT](docs/PILOT.md) | 少量実データの診断手順 |
 | [DEVIATIONS](docs/DEVIATIONS.md) / [VALIDATION](docs/VALIDATION.md) | 実装範囲・差異・検証結果 |
 

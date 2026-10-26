@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import numpy as np
 import pytest
 from alignment_transfer_s2ut.config import BackboneConfig, compare
@@ -62,3 +63,48 @@ def test_artifact_resume_after_external_checksum_write_interrupted(tmp_path):
     metadata, arrays = store.get("pair", {"split": "train"})
     assert metadata["payload_hash"]
     np.testing.assert_array_equal(arrays["array"], np.eye(2))
+    assert not store.path("pair").with_suffix(".sha256.json").exists()  # Reads never mutate input stores.
+
+
+def test_output_resume_restores_missing_receipt_without_rewriting_payload(tmp_path):
+    from alignment_transfer_s2ut.io import file_hash, read_json
+    store = ArtifactStore(tmp_path)
+    store.put("pair", {"split": "train"}, {"array": np.eye(2)})
+    path = store.path("pair")
+    checksum, modified = file_hash(path), path.stat().st_mtime_ns
+    receipt = path.with_suffix(".sha256.json")
+    receipt.unlink()
+    meta, arrays = store.verify_for_resume("pair", {"split": "train"})
+    assert read_json(receipt) == {"sha256": checksum}
+    assert file_hash(path) == checksum and path.stat().st_mtime_ns == modified
+    np.testing.assert_array_equal(arrays["array"], np.eye(2))
+    with pytest.raises(ValueError, match="provenance"):
+        store.verify_for_resume("pair", {"split": "dev"})
+    receipt.unlink()
+    with pytest.raises(ValueError, match="provenance"):
+        store.verify_for_resume("pair", {"split": "dev"})
+    assert not receipt.exists()
+    # A missing receipt does not authorize signing a modified internal payload.
+    np.savez(path, metadata=np.array(json.dumps(meta)), array=np.zeros((2, 2)))
+    with pytest.raises(ValueError, match="payload hash"):
+        store.verify_for_resume("pair", {"split": "train"})
+    assert not receipt.exists()
+
+
+def test_output_resume_does_not_sign_concurrently_changed_payload(tmp_path, monkeypatch):
+    from alignment_transfer_s2ut import io
+    store = ArtifactStore(tmp_path)
+    store.put("pair", {"split": "train"}, {"array": np.eye(2)})
+    path = store.path("pair")
+    receipt = path.with_suffix(".sha256.json")
+    receipt.unlink()
+    original = io.file_hash
+    def changed(path):
+        checksum = original(path)
+        with path.open("ab") as stream:
+            stream.write(b"changed")
+        return checksum
+    monkeypatch.setattr(io, "file_hash", changed)
+    with pytest.raises(ValueError, match="changed during resume"):
+        store.verify_for_resume("pair", {"split": "train"})
+    assert not receipt.exists()

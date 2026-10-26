@@ -25,7 +25,7 @@ def provenance(row, stage, config, manifest):
 
 def existing(store, row, expected, resume):
     if resume and store.path(row["pair_id"]).exists():
-        store.get(row["pair_id"], expected)
+        store.verify_for_resume(row["pair_id"], expected)
         return True
     return False
 
@@ -93,7 +93,7 @@ def align_speech_text(manifest, output, config_path, device="cpu", resume=False,
             meta = provenance(row, "ctc_alignment", config, identity)
             meta.update(language=language, original_pair_id=row["pair_id"])
             if resume and store.path(key).exists():
-                store.get(key, meta)
+                store.verify_for_resume(key, meta)
                 continue
             text, labels, indices = row[language + "_text"], [], []
             masked = []

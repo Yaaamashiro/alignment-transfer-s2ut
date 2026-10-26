@@ -183,3 +183,50 @@ def test_failed_final_upload_is_not_reported_as_durable_completion(tmp_path, ben
     monkeypatch.setattr(benchmark_runtime, "publish_packed", publisher)
     assert not c.stage_session(command, work, backup).get("reused", False)
     assert len(list(backup.glob("*/snapshot.json"))) == 1
+
+
+def test_successful_stage_cannot_publish_completion_with_unreceipted_npz(tmp_path, benchmark_runtime):
+    work, backup = tmp_path / "work", tmp_path / "drive"
+    code = """import sys,numpy as np
+from alignment_transfer_s2ut.io import ArtifactStore
+s=ArtifactStore(sys.argv[1])
+s.put('pair', {'stage':'test'}, {'array':np.ones(3)})
+s.path('pair').with_suffix('.sha256.json').unlink()
+"""
+    command = [sys.executable, "-c", code, str(work)]
+    with pytest.raises(ValueError, match="missing artifact checksum"):
+        c.stage_session(command, work, backup)
+    assert not list(backup.glob("*/snapshot.json"))
+
+
+def test_failed_stage_retains_only_receipted_pairs_and_can_finish_on_resume(tmp_path, benchmark_runtime, monkeypatch):
+    from alignment_transfer_s2ut.io import ArtifactStore
+    work, backup = tmp_path / "work", tmp_path / "drive"
+    code = """import os,sys,numpy as np
+from alignment_transfer_s2ut.io import ArtifactStore
+s=ArtifactStore(sys.argv[1])
+for pair in ['complete','partial']:
+ if s.path(pair).is_file(): s.verify_for_resume(pair, {'stage':'test'})
+ else: s.put(pair, {'stage':'test'}, {'array':np.ones(3)})
+if os.environ.get('TEST_INTERRUPT')=='1':
+ s.path('partial').with_suffix('.sha256.json').unlink()
+ raise SystemExit(7)
+"""
+    command = [sys.executable, "-c", code, str(work)]
+    monkeypatch.setenv("TEST_INTERRUPT", "1")
+    with pytest.raises(subprocess.CalledProcessError):
+        c.stage_session(command, work, backup)
+    store = ArtifactStore(work)
+    original = store.hash("partial")
+    first = read_json(next(backup.glob("*/snapshot.json")))
+    assert store.path("partial").name not in first["files"]
+    assert "stage-complete.json" not in first["files"]
+    monkeypatch.setenv("TEST_INTERRUPT", "0")
+    assert c.stage_session(command, work, backup)["status"] == "COMPLETE"
+    assert store.hash("partial") == original
+    all_files = {name for marker in backup.glob("*/snapshot.json") for name in read_json(marker)["files"]}
+    assert store.path("partial").name in all_files
+    assert store.path("partial").with_suffix(".sha256.json").name in all_files
+    work.rename(tmp_path / "lost-vm")
+    assert c.stage_session(command, work, backup)["reused"]
+    assert store.hash("partial") == original

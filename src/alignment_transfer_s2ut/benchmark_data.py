@@ -118,7 +118,7 @@ def import_units(manifest, benchmark_units, prepared, output, resume=False):
                         "ja_audio_hash": row["ja_sha256"], "en_audio_hash": row["en_sha256"],
                         "text_hash": digest([row["ja_text"], row["en_text"]]), "benchmark_import": True}
             if resume and store.path(pair).is_file():
-                store.get(pair, metadata)
+                store.verify_for_resume(pair, metadata)
             else:
                 info = sf.info(local_path(row["en_audio"]))
                 if info.samplerate != 16000 or info.channels != 1 or (info.frames - 400) // 320 + 1 != len(original_units):

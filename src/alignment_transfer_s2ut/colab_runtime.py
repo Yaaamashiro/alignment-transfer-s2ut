@@ -245,6 +245,10 @@ def stage_session(command, work, backup, interval=600):
     bench = runtime()
     work, backup = session_paths(work, backup)
     identity = identity_for(command, work)
+    pair_outputs = any(module in command for module in (
+        "alignment_transfer_s2ut.extract_t2tt_attention", "alignment_transfer_s2ut.align_speech_text",
+        "alignment_transfer_s2ut.extract_units", "alignment_transfer_s2ut.build_teacher_alignment")) or any(
+        list(command[i:i + 2]) == ["alignment_transfer_s2ut.benchmark_data", "units"] for i in range(len(command) - 1))
     receipts = sorted(backup.glob("*/snapshot.json"))
     versions, stamps, generation = {}, {}, 0
     for marker in receipts:
@@ -272,13 +276,17 @@ def stage_session(command, work, backup, interval=600):
         generation = max(generation, state["updates"])
     complete = work / "stage-complete.json"
     if complete.is_file():
-        if (read_json(complete).get("identity") == digest(identity) and
+        state = read_json(complete)
+        if (state.get("identity") == digest(identity) and
+                (not pair_outputs or state.get("artifact_receipts_verified") is True) and
                 versions.get("stage-complete.json") == file_hash(complete)):
             return {"status": "COMPLETE", "reused": True}
+        if pair_outputs and state.get("artifact_receipts_verified") is not True:
+            progress("stage resume: revalidate legacy pair outputs before trusting completion")
         # A failed upload may leave a local success marker. It is not proof of
         # durable progress. Resume/verify the stage and publish it again.
         complete.unlink()
-    def publish(final=False):
+    def publish(final=False, require_complete=False):
         nonlocal generation
         changed = []
         output = Path(command[command.index("--output") + 1]).resolve() if "--output" in command else work
@@ -294,6 +302,8 @@ def stage_session(command, work, backup, interval=600):
             if file_output and path != output and path != complete and not name.startswith(output.stem + "-"):
                 continue
             if path.suffix == ".npz" and not path.with_suffix(".sha256.json").is_file():
+                if require_complete:
+                    raise ValueError("missing artifact checksum at successful stage completion: " + name)
                 continue
             stat = path.stat()
             stamp = (stat.st_size, stat.st_mtime_ns)
@@ -331,8 +341,8 @@ def stage_session(command, work, backup, interval=600):
                 last = time.monotonic()
             time.sleep(.25)
         if process.returncode == 0:
-            write_json(complete, {"identity": digest(identity)}, overwrite=True)
-        publish(final=True)
+            write_json(complete, {"identity": digest(identity), "artifact_receipts_verified": True}, overwrite=True)
+        publish(final=True, require_complete=process.returncode == 0)
         if process.returncode:
             raise subprocess.CalledProcessError(process.returncode, command)
     finally:

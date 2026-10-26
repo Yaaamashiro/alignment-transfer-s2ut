@@ -109,6 +109,28 @@ class ArtifactStore:
             raise ValueError("non-finite artifact")
         return meta, arrays
 
+    def verify_for_resume(self, pair_id, expected=None):
+        """Verify an owned stage output and finish an interrupted receipt write.
+
+        Keep get() read-only for input artifacts. Only producers resuming their
+        own output directory may publish this missing external checksum.
+        """
+        path = self.path(pair_id)
+        receipt = path.with_suffix(".sha256.json")
+        missing = not receipt.exists()
+        before = path.stat() if missing else None
+        result = self.get(pair_id, expected)
+        if missing:
+            checksum = file_hash(path)
+            after = path.stat()
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if any(getattr(before, key) != getattr(after, key) for key in fields):
+                raise ValueError("artifact changed during resume verification: " + pair_id)
+            write_json(receipt, {"sha256": checksum})
+            from .progress import progress
+            progress("artifact resume: restored checksum", detail=pair_id)
+        return result
+
     @staticmethod
     def payload_hash(metadata, arrays):
         metadata = {k: v for k, v in metadata.items() if k != "payload_hash"}

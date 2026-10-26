@@ -1,5 +1,11 @@
 # Validation record — 2026-10-27
 
+2026-10-27の横断再点検は**150 passed, 4 skipped**。Attentionの全head平均・単一head・複数head、可変長padding・未知文字mask、単体抽出との数値一致、batch size 1の厳密一致、書き込み途中の中断と再利用、token/Attention予算超過の停止を確認した。ColabのCUDA接続試験へ単体/batch Attentionの一致検査を追加したが、ローカルのPyTorchはCPU buildのため実行していない。skipはCUDA必須の3件とPOSIX process group中断試験の1件。
+
+NPZ保存後・外部checksum保存前の切断で、旧publisherがNPZを含まない完了ZIPを作る問題を再現して修正した。各前処理producerは内部payloadとmetadataを検証した出力だけに不足checksumを補い、元NPZのhash・mtimeを変えない。読込専用`get()`は入力を書き換えない。正常終了時に未完了NPZを残したstageの公開を拒否し、失敗時は完成pairだけを保存する。実benchmark ZIPを使い、旧完了ZIPから1 pairが漏れた新VM復元→不足分の作成→新しい増分ZIPからの再復元も成功した。既存Baseline・元コーパス・benchmark sourceは変更していない。
+
+依存metadata/importのenvironment検査と`pip check`、22 CLIのhelp、3 Notebookのschema/Python構文/HTML変換、Markdownのローカルリンク、wheel buildと全Python sourceの同梱を確認した。STREAMING文書が独立trainer向けであることを明記し、本比較の事前ZIP取得と区別した。モデル・学習条件・precision・checkpoint選択・benchmark runtimeのpinは変更しない。今回の結果も実Colab/GPUでの全コーパス完走や翻訳品質を保証するものではない。
+
 2026-10-27、Attention抽出がpairごとにcheckpoint全体と不変な語彙を再hashする問題を修正した。checkpoint SHA256は1回、forwardは最大8 pairずつとし、padding後のtoken/Attention要素数でbatchを制限する。公式fairseqとsmokeの可変長・空白・未知文字を含むデータで、旧単体抽出との数値一致（atol 2e-6 / rtol 2e-5）、旧metadataと保存済みpacketの再利用・既存file hash不変、checkpoint改変と混在packetの拒否、予算内batch、進捗と再利用表示を検査した。全suiteは**136 passed, 3 skipped**。3件はCUDA必須の2件とWindowsでは実行できないPOSIX process group中断試験。
 
 CPUのtiny人工モデル・64 MiBのoptimizer相当payloadを加えたcheckpoint・128 pairでは、旧版9.80秒（checkpoint SHA 128回）から修正版2.78秒（SHA 1回・16 forward）になった。Attention最大絶対差は5.96e-8。ファイルをOS cacheから読める人工条件での約3.52倍であり、実GPU・実teacher・実コーパスの速度予測として扱わない。Colabでの実速度とCUDAでのbatch結果は未検証。
@@ -85,7 +91,7 @@ fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb
 - native fairseq checkpointでもT2TT text生成/評価を実行。生成・評価の途中再開、変更した生成条件・dev data・改変した予測cacheの拒否を確認。
 - pilot集計でT2TT dev text評価を添付し、異なるteacher checkpoint・dev data・test評価の混入を拒否。wheelに新しい評価CLI/moduleを同梱し、両Colabの構文を確認。
 
-CUDAに関する2件のskipは**native TrainerのFP16接続試験**と**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。加えてWindowsではPOSIXの入れ子process group中断試験をskipする。pure-Python fairseq環境にはCythonのbatch sampler拡張がないため、ローカルでは実Trainerのmicrobatch更新までを検証し、CLIのepoch iterator全体は未実行。Colabは通常のLinux buildを使う。
+現在のCUDAに関する3件のskipは**native TrainerのFP16接続試験**、**T2TT Attentionの単体/batch一致試験**、**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。加えてWindowsではPOSIXの入れ子process group中断試験をskipする。pure-Python fairseq環境にはCythonのbatch sampler拡張がないため、ローカルでは実Trainerのmicrobatch更新までを検証し、CLIのepoch iterator全体は未実行。Colabは通常のLinux buildを使う。
 
 Drive上では`experiment-001`の`paper-fisher-v1` run、365000更新snapshot、対応するpreparedデータ・unitの保存先とJSONの学習設定を確認した。約1 GBの実checkpoint本体のローカル取得・登録、実コーパスの前処理、本学習、T2TT dev text BLEU、実音声品質、ASR-BLEUによる手法比較、Colab上の実行は未検証。人工smokeやnative Trainerテストの成功を研究仮説の検証結果として扱わない。
 

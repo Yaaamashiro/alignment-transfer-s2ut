@@ -567,7 +567,7 @@ def extract_attention(args):
         unchanged_checkpoint()
         meta = {**common, "split": row["split"], "text_hash": digest([row["ja_text"], row["en_text"]])}
         if args.resume and store.path(row["pair_id"]).exists():
-            store.get(row["pair_id"], meta)
+            store.verify_for_resume(row["pair_id"], meta)
             completed += 1
             reused += 1
             report()

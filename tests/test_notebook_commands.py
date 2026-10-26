@@ -73,6 +73,42 @@ def test_standalone_commands_stop_on_failure_and_preserve_path_arguments():
     assert calls == [["python", "--output", "/tmp/path with spaces", "2"]]
 
 
+def test_comparison_attention_and_ctc_keep_existing_resume_commands(tmp_path):
+    path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    source = next("".join(cell["source"]) for cell in notebook["cells"]
+                  if cell["cell_type"] == "code" and "run('attention'," in "".join(cell["source"]))
+    calls = []
+    def run(name, module, *arguments, **kwargs):
+        values = list(map(str, arguments))
+        validate_command(module, values)
+        assert kwargs == {"gpu": True}
+        calls.append((name, module, values))
+    namespace = dict(RUN_TRANSFER=True, RUN_MONOTONIC=False, ROOT=str(tmp_path),
+                     MANIFEST=tmp_path / "manifest.jsonl", Path=Path, run=run)
+    exec(source, namespace)
+    assert [call[0] for call in calls] == ["attention", "ctc"]
+    assert all("--resume" in call[2] for call in calls)
+    assert "--batch-size" not in calls[0][2] and "--max-tokens" not in calls[0][2]
+    from alignment_transfer_s2ut.cli import parser_for
+    args = parser_for("extract_t2tt_attention").parse_args(calls[0][2])
+    assert args.batch_size == 8 and args.layer == -1 and args.heads is None
+    assert args.output == str(tmp_path / "mt")
+
+
+def test_comparison_cuda_preflight_includes_batched_attention(tmp_path):
+    path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    source = next("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code" and
+                  "'tests/test_benchmark_native.py::test_native_fp16_trainer_and_fp32_prior'" in "".join(cell["source"]))
+    calls = []
+    exec(source, dict(PREPARE_AUDIO_PACKS=False, PYTHON="python", REPO=tmp_path,
+                      execute=lambda *a, **kw: calls.append((a, kw))))
+    assert len(calls) == 1
+    assert calls[0][0][:3] == ("python", "-m", "pytest")
+    assert "tests/test_attention_extraction.py::test_batched_native_attention_matches_single_pair_on_cuda" in calls[0][0]
+
+
 @pytest.mark.parametrize("notebook", ["benchmark_comparison", "pilot", "pipeline"])
 def test_notebook_overrides_colab_inline_backend_for_cli_subprocesses(tmp_path, monkeypatch, notebook):
     path = Path(__file__).resolve().parents[1] / f"notebooks/colab/{notebook}.ipynb"

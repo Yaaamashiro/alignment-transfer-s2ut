@@ -1,5 +1,7 @@
 # 学習入力の先読みとローカルキャッシュ
 
+この文書は`--trainer legacy`の独立trainerとT2TTの入力先読みを対象とする。`benchmark_comparison.ipynb`のS2UTは[benchmark runtime](COLAB_RUNTIME.md)を使用し、必要な入力ZIPを先に取得・展開してから学習する。その経路では以下の`--loader-workers`等でDrive取得を学習中へ遅延させることはできない。
+
 必要な入力から読み出し、現在のbatchを学習している間にCPU workerが次の入力を準備する。全データをVMへコピーしてから学習を始める手順は不要。
 
 ```text
