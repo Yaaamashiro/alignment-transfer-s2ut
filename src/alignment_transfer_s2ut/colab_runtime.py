@@ -1,6 +1,7 @@
 """Adapters to the benchmark's pinned Drive staging and recovery implementation."""
 import argparse
 from contextlib import contextmanager
+import errno
 import importlib
 from functools import lru_cache
 import json
@@ -174,7 +175,16 @@ def identity_for(command, output):
     files = {}
     for item in command:
         path = Path(item)
-        if path.is_file() and not path.resolve().is_relative_to(output):
+        try:
+            is_file = path.is_file()
+        except OSError as error:
+            # Arguments can be inline code or other long text. Linux raises
+            # ENAMETOOLONG here, while some platforms return False. The entire
+            # argument remains bound by identity['command']; it is not a file.
+            if error.errno != errno.ENAMETOOLONG:
+                raise
+            is_file = False
+        if is_file and not path.resolve().is_relative_to(output):
             files[str(path.resolve())] = file_hash(path)
     return {"command": list(map(str, command)), "inputs": files, "work": str(output),
             "benchmark_revision": BENCHMARK_REVISION}

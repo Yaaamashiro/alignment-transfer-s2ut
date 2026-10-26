@@ -1,6 +1,7 @@
 """Use the real benchmark archive/staging code; no alternate Drive implementation."""
 import json
 import importlib.util
+import errno
 import os
 from pathlib import Path
 import subprocess
@@ -33,6 +34,35 @@ def benchmark_runtime(monkeypatch):
     monkeypatch.setenv("S2ST_BACKUP_MAX_GB", "1")
     yield value
     c.runtime.cache_clear()
+
+
+def test_command_identity_binds_long_text_and_external_file_inputs(tmp_path, monkeypatch):
+    code = "print('inline code')\n" * 100
+    config = tmp_path / "config.json"
+    write_json(config, {"seed": 1})
+    work = tmp_path / "work"
+    write_json(work / "result.json", {"complete": True})
+    original = Path.is_file
+    def is_file(path):
+        if str(path) == code:
+            raise OSError(errno.ENAMETOOLONG, "File name too long")
+        return original(path)
+    monkeypatch.setattr(Path, "is_file", is_file)
+    command = [sys.executable, "-c", code, str(config), str(work / "result.json")]
+    identity = c.identity_for(command, work)
+    assert identity["command"] == command
+    assert identity["inputs"][str(config.resolve())] == file_hash(config)
+    assert str((work / "result.json").resolve()) not in identity["inputs"]
+    changed = c.identity_for([*command[:2], code + "# changed", *command[3:]], work)
+    assert digest(changed) != digest(identity)
+
+
+def test_command_identity_does_not_hide_file_access_errors(tmp_path, monkeypatch):
+    def denied(path):
+        raise PermissionError(errno.EACCES, "Permission denied")
+    monkeypatch.setattr(Path, "is_file", denied)
+    with pytest.raises(PermissionError):
+        c.identity_for(["config.json"], tmp_path / "work")
 
 
 def test_stage_backup_recovers_partial_pairs_and_skips_completed_stage(tmp_path, benchmark_runtime, monkeypatch):

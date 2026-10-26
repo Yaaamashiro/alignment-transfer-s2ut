@@ -1,10 +1,12 @@
 # Validation record — 2026-10-26
 
-2026-10-26のColab backend修正後の再検証は**100 passed, 2 skipped**。隣接benchmark checkoutが別作業で更新されていたため、Colabが導入した固定runtimeをテストで優先するようfixtureを修正した。明示的な検証用sourceは`S2ST_BENCHMARK_TEST_ROOT`で指定でき、既存benchmark checkoutは変更しない。固定版sourceを別配置した全suiteと、環境からimportできる固定版を隣接checkoutより優先する保存・復元テストを実行した。モデル・学習条件・runtimeのpinは変更していない。
+2026-10-26のColab backend・長いコマンド引数の修正後の再検証は**102 passed, 2 skipped**。隣接benchmark checkoutが別作業で更新されていたため、Colabが導入した固定runtimeをテストで優先するようfixtureを修正した。明示的な検証用sourceは`S2ST_BENCHMARK_TEST_ROOT`で指定でき、既存benchmark checkoutは変更しない。固定版sourceを別配置した全suiteと、環境からimportできる固定版を隣接checkoutより優先する保存・復元テストを実行した。モデル・学習条件・runtimeのpinは変更していない。
 
 Colabから報告されたCPU preflightではPython 3.10.22・依存metadata・fairseq provenance・compiled batch sampler・benchmark pinが成功し、matplotlibだけが失敗していた。Notebook kernel由来の`MPLBACKEND=module://matplotlib_inline.backend_inline`を別venvへ継承する同じエラーをローカルで再現し、3つのNotebookで`MPLBACKEND=Agg`を設定した。各Notebookの実際の設定を適用した新規subprocessでmatplotlibのimportとPNG保存を検証した。短い失敗コマンドで省略されていたpreflight JSONも、失敗時の末尾ログ表示で読めることを確認した。
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**100 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
+ColabのCPU test報告（95 passed / 1 failed）から、command引数をファイルとして調べる`identity_for`が長い`python -c`コードに対してLinuxの`ENAMETOOLONG`を受け取る問題を確認した。ファイルになり得ないこの場合だけを処理し、文字列全体はcommand identityへ引き続き含める。外部ファイルのhash照合とアクセス権エラーの停止は維持する。Linuxの例外を明示的に発生させる回帰テスト、権限エラー検査、実ZIPの中断復元を含む8件のruntimeテストと全suiteを検証した。
+
+独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**102 passed, 2 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
 
 fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
 
