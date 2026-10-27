@@ -1,5 +1,9 @@
 # Validation record — 2026-10-27
 
+保存済み8C 300件によるT2TT外部テキスト評価を追加し、全suiteは **170 passed, 4 skipped**（114.29秒）。追加16件では固定ID集合・決定的な順序・重複/欠落/改変の拒否、referenceを変えてもsource-only生成入力・設定が不変であること、native/benchmark正規化corpus BLEUの再計算、既存の正規化規則、UNK集計、完了済み・途中cacheの再利用と改変検出、best checkpoint以外や異なるdev生成設定の拒否を検査した。実際の固定benchmark ZIP publisher/restorerで、100件生成後の失敗→VM消失→残り200件だけ生成→完了後のVM消失→再生成なしの復元も成功。ニューラル計算はこの外部評価の統合試験ではstubを使い、既存generator自体の実モデル検証は従来のdev評価テストが引き続き通過している。
+
+Notebook 6.1.1のCLI配線・独立stage名・dev値の読込・10例表示を検査し、schema/Python構文/HTML変換も成功。`pip check`、新CLIのhelp、56ローカルMarkdownリンク、wheel buildと全Python source同梱の照合も成功した。既存のT2TT/S2UT学習・Attention・CTC・Baseline登録・runtimeのPython source、benchmark revision pinは変更していない。4 skipは従来のCUDA 3件とPOSIX 1件。**実Driveの保存済み300件・学習済みT2TTを使うGPU評価は未実行であり、実際のFLEURS BLEU値は報告しない。**
+
 同日の再点検は**154 passed, 4 skipped**。固定seedで長さ・空白・引用符・Unicode・未知文字の異なる40 pairを作り、2層decoderの途中層/最終層について、smokeと公式fairseqの4条件で単体/batch Attentionの一致を追加検証した。既存の保存・復元・中断・hash・native学習の検査も再実行し、新たな不具合は見つからなかった。`pip check`とenvironment検査、22 CLI、3 Notebookのschema/Python/HTML、53ローカルリンク、wheel内の全Python sourceの一致も成功。実行コードとNotebookの固定revision `107605f4f5bd7b53722d73ced3fa5a76560e7a9d`は変更せず、追加テストと本記録だけを更新した。CUDAの3件とPOSIXの1件は引き続きローカルでは未実行であり、実Colabの全コーパス完走を確認したという意味ではない。
 
 2026-10-27の横断再点検は**150 passed, 4 skipped**。Attentionの全head平均・単一head・複数head、可変長padding・未知文字mask、単体抽出との数値一致、batch size 1の厳密一致、書き込み途中の中断と再利用、token/Attention予算超過の停止を確認した。ColabのCUDA接続試験へ単体/batch Attentionの一致検査を追加したが、ローカルのPyTorchはCPU buildのため実行していない。skipはCUDA必須の3件とPOSIX process group中断試験の1件。

@@ -11,3 +11,4 @@
 9. **Offline smoke:** 人工CTC emission、人工KM100 sequence、tiny PyTorchモデル、テスト音vocoderを使用する。外部モデルの再現・音声品質・研究仮説の検証とは別物。smoke checkpointはmetadataで区別し、本番teacherとの混合とsmokeのASR-BLEUを拒否する。
 10. **実験未実行:** 本学習、実コーパスのCTC/HuBERT処理、公式vocoderによる音声品質評価、複数seedの翻訳性能比較は別途GPU環境で実行する。CLI実装やCPUテスト成功だけで研究効果を主張しない。
 11. **Runtimeと比較判定:** native経路は単一processの保存レシピに対応する。追加physical microbatch分割・旧early-stop policyは拒否する。ColabのZIP staging・保存/復元・常駐学習・cache/worker制御・overflow retry・勾配監査は[固定revisionのbenchmark実装](COLAB_RUNTIME.md)を共用する。alignment固有のpair artifact増分保存と読み込みpath解決だけをadapterとして追加する。オンラインBLEU monitorは未統合で共通の事後評価を使う。`fair_comparison`は保存された科学的設定・データ・完了budget・選択規則・指定された評価条件の照合結果であり、元runとのGPU演算・worker RNG・環境全体のbit一致や原論文スコアの再現を保証しない。
+12. **外部テキスト評価:** T2TTの[保存済み8C外部評価](EXTERNAL_TEXT_EVALUATION.md)は、固定benchmarkのidentity digestとEnglish BLEUだけを追加adapterからimportする。新しいdataset loader・モデル・学習経路は取り込まない。保存済み300件の日英テキストとIDを照合し、音声の検証・取得は行わない。正規化BLEUは既存metricを直接再利用するが、T2TTテキスト出力の得点には音声生成・ASRの誤りが含まれない。

@@ -103,4 +103,11 @@ def test_reference_imports_are_limited_to_runtime_adapters():
             isinstance(node, ast.ImportFrom) and (node.module or "").startswith("direct_s2st") or
             isinstance(node, ast.Import) and any(name.name.startswith("direct_s2st") for name in node.names)]
         if references:
-            assert path.name in {"colab_runtime.py", "io.py"}
+            if path.name == "evaluate_t2tt_external.py":
+                # The external-text adapter may reuse only the pinned metric
+                # and saved identity digest, never benchmark models/datasets.
+                assert all(isinstance(node, ast.ImportFrom) for node in references)
+                assert {(node.module, tuple(n.name for n in node.names)) for node in references} == {
+                    ("direct_s2st.evaluation", ("bleu",)), ("direct_s2st.journal", ("digest",))}
+            else:
+                assert path.name in {"colab_runtime.py", "io.py"}
