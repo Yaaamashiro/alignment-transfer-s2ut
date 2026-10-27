@@ -103,7 +103,13 @@ def test_reference_imports_are_limited_to_runtime_adapters():
             isinstance(node, ast.ImportFrom) and (node.module or "").startswith("direct_s2st") or
             isinstance(node, ast.Import) and any(name.name.startswith("direct_s2st") for name in node.names)]
         if references:
-            if path.name == "evaluate_t2tt_external.py":
+            if path.name == "t2tt_extension.py":
+                assert all(isinstance(node, ast.ImportFrom) for node in references)
+                assert {(node.module, tuple(n.name for n in node.names)) for node in references} == {
+                    ("direct_s2st", ("recovery",)), ("direct_s2st.session_runtime", ("run_continuous",)),
+                    ("direct_s2st.recovery", ("freeze_files",)),
+                    ("direct_s2st.translatotron2.monitor", ("absolute_update_limit",))}
+            elif path.name == "evaluate_t2tt_external.py":
                 # The external-text adapter may reuse only the pinned metric
                 # and saved identity digest, never benchmark models/datasets.
                 assert all(isinstance(node, ast.ImportFrom) for node in references)

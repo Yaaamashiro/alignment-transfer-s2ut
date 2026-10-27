@@ -339,13 +339,24 @@ e.evaluate(args)
 
 
 @pytest.mark.parametrize("has_dev", [True, False])
-def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev(evidence, evaluation, monkeypatch, has_dev):
+@pytest.mark.parametrize("extended", [False, True])
+def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev(evidence, evaluation, monkeypatch, has_dev, extended):
     import json
     import sys
     import types
     from unittest.mock import patch
-    from test_notebook_commands import validate_command
+    from test_notebook_commands import validate_command, comparison_paths
     args, _ = evaluation
+    settings = comparison_paths(evidence.base, extended)
+    if extended:
+        settings["T2TT_CHECKPOINT"].parent.mkdir()
+        args.checkpoint.rename(settings["T2TT_CHECKPOINT"])
+        settings["T2TT_DEV_OUTPUT"].parent.mkdir(parents=True, exist_ok=True)
+        args.dev_evaluation.rename(settings["T2TT_DEV_OUTPUT"])
+        args.dev_evaluation.with_name(args.dev_evaluation.stem + "-predictions.jsonl").rename(
+            settings["T2TT_DEV_OUTPUT"].with_name(settings["T2TT_DEV_OUTPUT"].stem + "-predictions.jsonl"))
+        args.checkpoint, args.dev_evaluation, args.output = (
+            settings["T2TT_CHECKPOINT"], settings["T2TT_DEV_OUTPUT"], settings["T2TT_EXTERNAL_OUTPUT"])
     if not has_dev:
         args.dev_evaluation.unlink()
         args.dev_evaluation.with_name(args.dev_evaluation.stem + "-predictions.jsonl").unlink()
@@ -358,19 +369,25 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
     display_module = types.ModuleType("IPython.display")
     display_module.display = lambda frame: displays.append(frame)
     def prepare(*command, **kwargs):
+        if command[2] == "alignment_transfer_s2ut.t2tt_extension":
+            validate_command(command[2], command[3:])
+            calls.append("status")
+            return dict(completed_updates=200000)
         assert command[:3] == ("python", "-m", "alignment_transfer_s2ut.evaluate_t2tt_external")
         validate_command(command[2], command[3:])
         if command[3] == "restore-inputs":
             calls.append("restore")
-            return external.restore_inputs(evidence.base / "t2tt", evidence.base / "drive/stages/t2tt", 20000,
-                evidence.base / "drive/stages/t2tt-dev", args.dev_evaluation)
+            values = list(map(str, command))
+            return external.restore_inputs(values[values.index("--work") + 1], values[values.index("--backup") + 1],
+                int(values[values.index("--expected-updates") + 1]), values[values.index("--dev-backup") + 1],
+                values[values.index("--dev-output") + 1])
         if command[3] == "prepare":
             return external.prepare_fixed_set(evidence.benchmark, args.fixed_set)
         assert command[3] == "verify" and kwargs["name"] == "verify-external-text"
         calls.append("verify")
         return external.evaluate(args, completed_only=True)
     def run(name, module, *arguments, **kwargs):
-        assert name == "t2tt-flores-fleurs" and kwargs == {"gpu": True}
+        assert name == settings["T2TT_EXTERNAL_STAGE"] and kwargs == {"gpu": True}
         validate_command(module, arguments)
         assert str(args.output) == str(arguments[arguments.index("--output") + 1])
         calls.append(name)
@@ -379,12 +396,13 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
                      PERSISTENT=str(evidence.base / "drive"), T2TT_UPDATES=20000,
                      PYTHON="python", LOGS=evidence.base / "logs", execute_json=prepare, run=run,
                      log_event=lambda *a: skips.append(a))
+    namespace.update(settings)
     with patch.dict(sys.modules, {"pandas": pandas, "IPython": types.ModuleType("IPython"),
                                  "IPython.display": display_module}):
         exec(source, namespace)
         assert not calls and skips[0][1] == "skipped"
         exec(source.replace("RUN_EXTERNAL_TEXT = False", "RUN_EXTERNAL_TEXT = True"), namespace)
-    assert calls == ["restore", "t2tt-flores-fleurs", "verify"]
+    assert calls == ["restore", *(["status"] if extended else []), settings["T2TT_EXTERNAL_STAGE"], "verify"]
     if has_dev:
         assert displays[0][0]["native text BLEU"] == 3.14
     else:

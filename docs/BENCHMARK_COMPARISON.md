@@ -14,7 +14,7 @@ Colabの通常運用は[COLAB_RUNTIME](COLAB_RUNTIME.md)を参照。入出力・
 | 主比較 | Annealed T2TT Guidance | `RUN_TRANSFER=True` |
 | 任意のcontrol | Annealed Monotonic Guidance | `RUN_MONOTONIC=True` |
 
-両スイッチの既定値はFalse。従来どおりteacher準備とT2TT側のplan確認まで行い、本学習を自動開始しない。両方Trueなら3条件を比較する。`RUN_MONOTONIC=True`・`RUN_TRANSFER=False`ではT2TT・CTC・teacher準備をスキップし、Monotonicだけを新規学習できる。完成済みT2TTがあれば評価へ再利用する。正式な条件名はAnnealed Monotonic Guidanceとし、native fairseq経路の実装名と区別する。
+両S2UTスイッチの既定値はFalse。T2TT側は既定で保存済み20kを200kへ継続し、評価確認後にteacher準備へ進む。S2UT本学習は自動開始しない。[T2TT延長の手順](T2TT_EXTENSION.md)。両方Trueなら3条件を比較する。`RUN_MONOTONIC=True`・`RUN_TRANSFER=False`ではT2TT・CTC・teacher準備をスキップし、Monotonicだけを新規学習できる。完成済みT2TTがあれば評価へ再利用する。正式な条件名はAnnealed Monotonic Guidanceとし、native fairseq経路の実装名と区別する。
 
 ## 学習条件
 
@@ -70,6 +70,8 @@ python -m alignment_transfer_s2ut.benchmark_data units \
 train/devの全pair・source pathをprepared TSVと照合する。音声内容hashを固定し、保存済みHuBERT原系列からrun spanを構築する。再計算したunitで学習targetを置き換えず、importしたreduced列がnative TSVのtargetと厳密一致することを検査する。testは既定でexportしない。
 
 同じmanifestでT2TT学習、dev text BLEU、Attention抽出、CTC、teacher packet作成、alignment診断を実行する。Colabに一連のコマンドをまとめる。少量pilotのteacherや異なるtrain部分集合を本比較へ混ぜない。
+
+Notebookの既定は `RUN_T2TT_EXTENSION=True`・`USE_EXTENDED_T2TT=True`。`T2TT_CHECKPOINT` をdev・外部BLEU・Attentionの単一参照元とし、200kのteacher/artifact/転移runを20kと別stageへ保存する。6.1a→6.1b→6.1c→6.1dで学習・翻訳品質・曲線を確認し、`RUN_TEACHER_ARTIFACTS=True`で6.2を実行する。S2UT側の保存レシピ・学習予算・fresh initializationは変更しない。
 
 Colabは登録Baselineの`backbone`から共通設定ファイルを生成し、T2TT・teacher作成・診断へ渡す。固定presetの寸法やdropoutを保存checkpointの設定と取り違えない。
 

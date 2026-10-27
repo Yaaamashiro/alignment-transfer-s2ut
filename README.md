@@ -30,9 +30,12 @@ Alignment Distillation・固定係数のGuidanceにも対応する。モデル�
 1. [benchmark比較ノートブック](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/benchmark_comparison.ipynb)をGPUランタイムで開く。
 2. 既存実験の`BENCHMARK`・`RUN_NAME`と、今回の`ROOT`（VMローカル）・`PERSISTENT`（Drive）を設定する。
 3. `RUN_TRANSFER=True`で主比較を実行する。3条件を比較する場合は`RUN_MONOTONIC=True`も指定する。
-4. 上から順に環境検査・データ準備・学習・dev評価を実行する。
+4. 上から環境検査・データ準備を実行し、6.1aで保存済み20k T2TTを独立stageへ200kまで延長する。
+5. 6.1bのdev・6.1cの固定FLEURS/FLORES・6.1dの曲線と翻訳例を確認し、`RUN_TEACHER_ARTIFACTS=True`で6.2へ進む。
 
-両学習スイッチがFalseの既定では、**T2TT学習・teacher準備とplan確認まで**を行う。S2UT本学習は開始しない。ASR-BLEUを測る場合は、最初から`GENERATE_WAVEFORMS=True`と`ASR_BLEU=True`を指定する。
+S2UTの両学習スイッチがFalseでも、既定の`RUN_T2TT_EXTENSION=True`では**T2TT 20k→200k延長**を実行する。Attentionは評価確認後の明示スイッチまで停止し、S2UT本学習は開始しない。延長の元データ・architecture・optimizer・LR/warmup・batch・RNG・best選択を保ち、20kをread-onlyで保持する。[延長と再開の手順](docs/T2TT_EXTENSION.md)
+
+200kを評価するだけなら`RUN_T2TT_EXTENSION=False`、`USE_EXTENDED_T2TT=True`。20kを選ぶ場合は`USE_EXTENDED_T2TT=False`にし、直下の保存先セルも再実行する。ASR-BLEUを測る場合は、最初から`GENERATE_WAVEFORMS=True`と`ASR_BLEU=True`を指定する。
 
 音声ZIPが未準備なら、CPUで`PREPARE_AUDIO_PACKS=True`にして入力準備まで実行し、GPUへ切り替えてFalseへ戻す。作業・checkpoint・pair artifactはVMへ保存し、固定revisionのbenchmark runtimeで検証付きZIPをDriveへ保存する。切断後は同じコードrevision・設定・保存先で上から再実行する。[保存・再開の詳細](docs/COLAB_RUNTIME.md)
 
@@ -74,7 +77,7 @@ smokeは人工データで4条件の学習からteacher削除後の推論まで�
 
 ### T2TTの外部評価
 
-比較ノートブックの **6.1.1 FLEURS/FLORES external text BLEU** で、学習済み `checkpoint_best.pt` を以前のCascade/S2UTと同じ保存済み8C 300件で評価できる。VMにbestがなければ完了済みT2TT ZIPから復元し、保存済みdev結果もあれば復元する。`RUN_EXTERNAL_TEXT=True` にすると、devと同じnative BLEU、benchmark正規化BLEU、未知文字率、生成例を表示する。再学習・新しい300件の選択・音声取得は行わない。[固定セットの確認・保存・再開](docs/EXTERNAL_TEXT_EVALUATION.md)
+比較ノートブックの **6.1c FLEURS/FLORES external text BLEU** で、選択中の `T2TT_CHECKPOINT` を以前のCascade/S2UTと同じ保存済み8C 300件で評価できる。VMにbestがなければ完了済みT2TT ZIPから復元し、保存済みdev結果もあれば復元する。`RUN_EXTERNAL_TEXT=True` にすると、devと同じnative BLEU、benchmark正規化BLEU、未知文字率、生成例を表示する。外部評価セルは再学習・新しい300件の選択・音声取得を行わない。[固定セットの確認・保存・再開](docs/EXTERNAL_TEXT_EVALUATION.md)
 
 ## CLIとデータ
 
@@ -93,6 +96,7 @@ standalone前処理の入力は1行1pairのJSONL。`pair_id`を全stageで保持
 | [BENCHMARK_COMPARISON](docs/BENCHMARK_COMPARISON.md) | Baseline登録・native学習・共通評価 |
 | [COLAB_RUNTIME](docs/COLAB_RUNTIME.md) | 入出力・ZIP保存・切断後の再開 |
 | [EXTERNAL_TEXT_EVALUATION](docs/EXTERNAL_TEXT_EVALUATION.md) | 保存済み8C 300件によるT2TT外部BLEU・未知文字診断 |
+| [T2TT_EXTENSION](docs/T2TT_EXTENSION.md) | verified 20k→200k継続・lineage・容量制御・評価確認gate |
 | [LOGGING](docs/LOGGING.md) | 全段階の進捗・生存通知・実行ログ |
 | [USAGE](docs/USAGE.md) | standalone前処理・学習・推論のCLI |
 | [METHOD](docs/METHOD.md) / [ARCHITECTURE](docs/ARCHITECTURE.md) | 手法とモデル構成 |

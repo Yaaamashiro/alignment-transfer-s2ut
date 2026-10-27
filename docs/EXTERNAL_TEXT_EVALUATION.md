@@ -4,11 +4,11 @@
 
 ## Notebookで実行
 
-`notebooks/colab/benchmark_comparison.ipynb` の **6.1.1 FLEURS/FLORES external text BLEU** を実行する。
+`notebooks/colab/benchmark_comparison.ipynb` の **6.1c FLEURS/FLORES external text BLEU** を実行する。
 
-1. 既存の環境・Drive接続・`run(...)` helperを準備する。6.1の学習を再実行する必要はない。
-2. `ROOT`・`PERSISTENT`・`T2TT_UPDATES` を学習時と同じ値にする。VMにbest checkpointがなければ、6.1.1が `PERSISTENT/stages/t2tt` の学習完了済みZIPから復元する。
-3. 6.1.1セルの `RUN_EXTERNAL_TEXT=True` にする。保存済み8Cが複数ある場合だけ `SOURCE_8C` に既存identityのフォルダ名を指定する。
+1. 既存の環境・Drive接続・`run(...)` helperを準備する。6.1aの学習を再実行する必要はない。
+2. `ROOT`・`PERSISTENT` とT2TTの選択を設定する。`USE_EXTENDED_T2TT=True`では200k完了済みbestを使い、Falseでは既存20k bestを使う。VMにbestがなければ、選択したstageの完了済みZIPから復元する。
+3. 6.1cセルの `RUN_EXTERNAL_TEXT=True` にする。保存済み8Cが複数ある場合だけ `SOURCE_8C` に既存identityのフォルダ名を指定する。
 4. このセルを実行する。固定300件の照合、生成、採点、ZIP保存、得点・固定seedの10例の表示まで行う。
 
 最初に `restore-inputs` が固定benchmarkの `latest/restore` でZIP・member checksumを検証する。保存先・T2TT stage・固定benchmark revision・設定した更新予算の完了を照合し、**保存済み `checkpoint_best.pt` だけを評価に使用**する。既存のローカルbestは差し替えず、不完全なローカル学習ディレクトリは元runtimeの `.interrupted-*` 保持で残す。保存済みmodelがない・ZIPが壊れている・学習が未完了・bestが含まれない場合、学習やlast checkpointへの代替を行わず停止する。音声・元manifestの復元は不要。
@@ -75,7 +75,7 @@ PERSISTENT/stages/t2tt-flores-fleurs/<snapshot>/
 
 CLIで出力名を変えた場合も、metrics・prediction・cacheの全派生パスについて既存dev評価・prediction/cache・checkpoint・8C入力との重複を拒否する。たとえば `dev-text.jsonl` は、拡張子が異なっても既存devと同じprediction名になるため使えない。
 
-同じVMなら6.1.1を再実行する。新しいVMなら同じrevision・パス・設定でセクション1・2の環境とDrive接続を準備後、6.1.1を実行する。必要なbestと保存済みdev結果は冒頭で復元する。devの有無とハッシュも再開契約に含む。検証済みcacheを再利用し、完了済み評価は生成しない。CLI単体の再開でも契約・predictionハッシュ・corpus BLEUの再計算を照合する。最後のZIP保存以降にVMから失われた生成分は再計算する。
+同じVMなら6.1cを再実行する。新しいVMなら同じrevision・パス・設定でセクション1・2の環境とDrive接続を準備後、6.1cを実行する。必要なbestと保存済みdev結果は冒頭で復元する。devの有無とハッシュも再開契約に含む。検証済みcacheを再利用し、完了済み評価は生成しない。CLI単体の再開でも契約・predictionハッシュ・corpus BLEUの再計算を照合する。最後のZIP保存以降にVMから失われた生成分は再計算する。
 
 既存学習の再開契約は全Pythonソースを束縛している。**未完了のT2TT/S2UT学習を、新しい評価コードへ更新したまま再開しない**。学習を元のrevisionで完了してから評価コードを使う。完成済みcheckpointの読込・外部評価には再学習は不要。
 
@@ -101,4 +101,8 @@ python -m alignment_transfer_s2ut.evaluate_t2tt_external evaluate \
   --device cuda --resume
 ```
 
-Colabでは上のCLIを直接起動せず6.1.1の共通logger・stage wrapper経由で実行する。
+Colabでは上のCLIを直接起動せず6.1cの共通logger・stage wrapper経由で実行する。
+
+## 200k teacherの評価
+
+`USE_EXTENDED_T2TT=True` は `T2TT_CHECKPOINT` を `ROOT/t2tt-200k/checkpoint_best.pt` に設定する。devは `text-evaluation/t2tt-200k/dev-text.json`、外部結果は `text-evaluation/t2tt-200k/flores-fleurs/`、Drive stageは `t2tt-dev-200k`・`t2tt-flores-fleurs-200k` に分離する。固定8C packetは20kと共用し、サンプルの再選択は行わない。Falseなら従来の20k保存先を使う。切替後は設定直下の保存先セルも再実行する。[延長・確認・Attentionへの実行順](T2TT_EXTENSION.md)

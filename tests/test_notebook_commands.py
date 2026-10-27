@@ -37,6 +37,16 @@ def pipeline_cells():
             if cell["cell_type"] == "code"]
 
 
+def comparison_paths(root, extended=False):
+    path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    source = "".join(next(c for c in notebook["cells"] if c.get("id") == "t2tt-active-paths")["source"])
+    namespace = dict(Path=Path, ROOT=str(root), USE_EXTENDED_T2TT=extended,
+                     T2TT_BASE_UPDATES=20000, T2TT_TARGET_UPDATES=200000)
+    exec(source, namespace)
+    return {k: v for k, v in namespace.items() if k != "__builtins__"}
+
+
 def test_standalone_commands_parse_and_preserve_all_five_conditions():
     calls = []
     namespace = dict(ROOT="/tmp/output with spaces", CORPUS="/tmp/corpus with spaces",
@@ -77,7 +87,7 @@ def test_comparison_attention_and_ctc_keep_existing_resume_commands(tmp_path):
     path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
     notebook = json.loads(path.read_text(encoding="utf-8"))
     source = next("".join(cell["source"]) for cell in notebook["cells"]
-                  if cell["cell_type"] == "code" and "run('attention'," in "".join(cell["source"]))
+                  if cell["cell_type"] == "code" and "run(T2TT_ATTENTION_STAGE," in "".join(cell["source"]))
     calls = []
     def run(name, module, *arguments, **kwargs):
         values = list(map(str, arguments))
@@ -86,6 +96,7 @@ def test_comparison_attention_and_ctc_keep_existing_resume_commands(tmp_path):
         calls.append((name, module, values))
     namespace = dict(RUN_TRANSFER=True, RUN_MONOTONIC=False, ROOT=str(tmp_path),
                      MANIFEST=tmp_path / "manifest.jsonl", Path=Path, run=run)
+    namespace.update(comparison_paths(tmp_path))
     exec(source, namespace)
     assert [call[0] for call in calls] == ["attention", "ctc"]
     assert all("--resume" in call[2] for call in calls)

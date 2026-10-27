@@ -1,4 +1,10 @@
-# Validation record — 2026-10-27
+# Validation record — 2026-10-28
+
+verified T2TT 20k→200kの独立stage延長を追加し、全suiteは **225 passed, 4 skipped**（310.39秒）。縮小した実学習と固定benchmarkの実ZIPで、last/best・Adam・epoch/cursor・best loss/bad validations・各RNGの継承、連続学習とのbit一致、source work/backupの全ファイル不変、途中target snapshotからのVM消失後の再開を検証した。公式fairseq小型モデルでも更新後parameterが連続学習と一致した。破損・欠落・異なるrevision/step/manifest/config/recipeの拒否、metricsの連続性、best選択の継承を確認した。
+
+checkpointのimplementation hashと一致する旧Git source（703b7e8）を実際にexportして学習・延長し、元trainer自身のcontract検証を通した。hashの書換えやmodel/trainerの変更は行っていない。validationとDrive保存間隔の分離、最新2個＋milestone保持、検証済みupload後だけの整理、削除失敗の非致命性も確認した。Windowsで進捗readerとatomic replaceが競合した場合に限る短い再試行を追加し、他のcheckpoint書込失敗はそのまま伝播することを検査した。
+
+Notebookは20k/200k両モードのdev・外部評価・Attention・teacher・S2UT保存先と共通checkpoint変数、評価前のAttention停止、完了済み200kの評価専用実行、Monotonic-onlyの互換性を検証した。全Notebookのschema/Python構文/HTML変換、CLI help、`pip check`、wheel内の全Python source同梱を確認した。既存training/CLI/colab runtimeとbenchmark pinは変更していない。4 skipはCUDA 3件とWindows上のPOSIX process group 1件。実際の20k checkpointによるGPU延長・200k学習結果・dev/FLEURS BLEUは未実行・未測定であり、ここでの数値はテスト結果だけである。
 
 新しいVMの6.1.1で `t2tt/checkpoint_best.pt` が欠落していたため、外部評価セルへ保存済み入力の復元を追加した。**189 passed, 4 skipped**（136.14秒）。`restore-inputs` は固定benchmarkの `latest/restore` で既存ZIPを検証し、同じrun path・T2TT stage・完了済み予算・bestの存在を確認して復元する。trainerやgeneratorは起動せず、best欠落をlastで代用しない。元manifest/音声の再取得も不要。devは同じcheckpointの完了済み最終packからmetrics/predictionだけを検証してVMへ復元し、外部評価の親フォルダや異なるローカル結果を置き換えない。
 

@@ -110,7 +110,10 @@ def test_optional_monotonic_training_wiring(tmp_path, t2tt, monotonic):
         BACKBONE_CONFIG=tmp_path / "backbone.json", T2TT_UPDATES=20000, ANNEAL_STEPS=200000,
         subprocess=SimpleNamespace(check_output=plan), run=capture, execute_json=execute_json,
         LOGS=tmp_path / "execution", log_event=lambda *a, **kw: notices.append(a))
-    exec(notebook_cell("# Preserve primary preparation"), namespace)
+    from test_notebook_commands import comparison_paths
+    namespace.update(comparison_paths(tmp_path))
+    namespace["RUN_T2TT_EXTENSION"] = False
+    exec(notebook_cell("# 20k source"), namespace)
     exec(notebook_cell("TRANSFER ="), namespace)
     assert any(a[1] == "alignment_transfer_s2ut.train_t2tt" for a in calls) == (t2tt or not monotonic)
     training = {a[0]: list(a[3:]) for a in calls if a[1] == "alignment_transfer_s2ut.benchmark"}
@@ -124,7 +127,7 @@ def test_optional_monotonic_training_wiring(tmp_path, t2tt, monotonic):
     assert "--teacher" in namespace["TRANSFER_ARGS"]
     assert len(plans) == int(monotonic) + int(t2tt or not monotonic)
     assert any(a[:2] == ("annealed-monotonic", "skipped") for a in notices) == (not monotonic)
-    assert any(a[:2] == ("t2tt-teacher", "skipped") for a in notices) == (monotonic and not t2tt)
+    assert any(a[:2] == ("t2tt-base", "skipped") for a in notices) == (monotonic and not t2tt)
     assert any(a[:2] == ("s2ut-training", "skipped") for a in notices) == (not monotonic and not t2tt)
 
 
@@ -166,6 +169,8 @@ def test_optional_control_uses_common_evaluation_and_table(tmp_path, monkeypatch
         TRANSFER=tmp_path / "annealed-t2tt", MONOTONIC=tmp_path / "annealed-monotonic",
         GENERATE_WAVEFORMS=asr, ASR_BLEU=asr, run=run,
         LOGS=tmp_path / "execution", log_event=lambda *a, **kw: None)
+    from test_notebook_commands import comparison_paths
+    namespace.update(comparison_paths(tmp_path))
     exec(notebook_cell("from IPython.display"), namespace)
     inference = [a for a in calls if a[1:3] == ("alignment_transfer_s2ut.benchmark", "infer")]
     assert [a[0].removesuffix("-infer") for a in inference] == expected
