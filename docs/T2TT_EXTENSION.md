@@ -119,3 +119,7 @@ python -m alignment_transfer_s2ut.t2tt_extension report \
 ```
 
 reportはtrain/main_loss・dev/main_loss・train/learning_rateをoptimizer updateに対して描く。20k比較欄はVM上にある従来の保存JSONから読み、欠落した値は空欄とする。得点をハードコードしない。
+
+## CPU継続試験の実行条件
+
+縮小モデルの完全一致試験では、基準を学習するpytest processと、延長を学習する新しいPython processのCPUスレッド数をともに1へ揃える。`torch.set_num_threads(1)` は子processへ継承されないため、試験fixture内だけで `OMP_NUM_THREADS=1`・`MKL_NUM_THREADS=1` も設定し、終了時に元へ戻す。比較には引き続き `torch.equal` を使用する。本番のT2TT/S2UT学習・Notebook全体のスレッド数は変更しない。

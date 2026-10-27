@@ -1,5 +1,11 @@
 # Validation record — 2026-10-28
 
+Colabの環境検査セル[10]では依存/CUDA検査が成功した後、延長学習のCPU完全一致試験3件が失敗した（223 passed）。fixtureが親processだけを `torch.set_num_threads(1)` にしており、新しい学習processに同じスレッド設定を渡していなかった。ローカルでも外部環境を `OMP_NUM_THREADS=2`・`MKL_NUM_THREADS=2` にするとsmoke/fairseqの2件で再現し、smokeのmodel parameter差は最大約3.53e-8だった。学習contractは一致していた。
+
+試験fixtureに限定して親と子のCPUスレッド数を1へ揃え、終了時に元の設定へ戻すよう修正した。新しい子processの実スレッド数も回帰試験で検査する。意図的に外部環境を2スレッドにしたまま、関連 **26 passed**（159.00秒）。`torch.equal`によるmodel/optimizer/RNGの完全一致検査は維持した。本番training/runtime/Notebookのスレッド設定・checkpoint・scientific contractは変更していない。
+
+同じ2スレッドの外部環境でColabと同じ `pytest -m 'not gpu'` を全実行し、**226 passed, 1 skipped, 3 deselected**（315.19秒）。skipはWindows上のPOSIX process group、deselectedはCUDA対象3件。これはローカルCPUでの再検証であり、修正後のColab/L4での結果はまだ取得していない。
+
 verified T2TT 20k→200kの独立stage延長を追加し、全suiteは **225 passed, 4 skipped**（310.39秒）。縮小した実学習と固定benchmarkの実ZIPで、last/best・Adam・epoch/cursor・best loss/bad validations・各RNGの継承、連続学習とのbit一致、source work/backupの全ファイル不変、途中target snapshotからのVM消失後の再開を検証した。公式fairseq小型モデルでも更新後parameterが連続学習と一致した。破損・欠落・異なるrevision/step/manifest/config/recipeの拒否、metricsの連続性、best選択の継承を確認した。
 
 checkpointのimplementation hashと一致する旧Git source（703b7e8）を実際にexportして学習・延長し、元trainer自身のcontract検証を通した。hashの書換えやmodel/trainerの変更は行っていない。validationとDrive保存間隔の分離、最新2個＋milestone保持、検証済みupload後だけの整理、削除失敗の非致命性も確認した。Windowsで進捗readerとatomic replaceが競合した場合に限る短い再試行を追加し、他のcheckpoint書込失敗はそのまま伝播することを検査した。

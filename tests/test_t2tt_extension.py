@@ -18,8 +18,14 @@ from test_benchmark_colab import benchmark_runtime
 
 
 @pytest.fixture
-def source_run(tmp_path_factory, benchmark_runtime, monkeypatch):
+def source_run(tmp_path_factory, benchmark_runtime, monkeypatch, request):
+    # In-process reference and fresh CLI workers must use the same CPU reduction
+    # order. torch.set_num_threads alone does not configure spawned interpreters.
+    previous_threads = torch.get_num_threads()
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("MKL_NUM_THREADS", "1")
     torch.set_num_threads(1)
+    request.addfinalizer(lambda: torch.set_num_threads(previous_threads))
     root = tmp_path_factory.mktemp("ext")
     manifest, config = root / "manifest.jsonl", root / "backbone.yaml"
     write_jsonl(manifest, [dict(pair_id=str(i), split="train" if i < 3 else "dev", ja_text="日本語" + str(i),
@@ -62,6 +68,16 @@ def equal_state(a, b):
             equal_state(x, y)
     else:
         assert a == b
+
+
+def test_reference_and_fresh_worker_use_identical_cpu_threads(source_run):
+    from alignment_transfer_s2ut.process_logging import run_process
+    result = run_process([sys.executable, "-c",
+        "import json,os,torch; print(json.dumps(dict(threads=torch.get_num_threads(), "
+        "omp=os.environ.get('OMP_NUM_THREADS'), mkl=os.environ.get('MKL_NUM_THREADS'))))"],
+        source_run["root"] / "test-logs", name="test-cpu-thread-policy", capture_json=True)
+    assert json.loads(result.stdout) == dict(threads=torch.get_num_threads(), omp="1", mkl="1")
+    assert torch.get_num_threads() == 1
 
 
 def test_verified_seed_continuation_is_identical_to_uninterrupted_training(source_run):
