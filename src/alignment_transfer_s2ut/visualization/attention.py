@@ -81,20 +81,20 @@ def visualize(args):
     if values is None:
         values = collate(selected, "speech", None, None, saved["backend"], units, cfg.input_feat_per_channel,
                          args.device, saved["recipe"].get("speech_recipe"))
-    builder = prior_builder(selected, teacher, units, cfg, manifest_hash(rows), saved["backend"], args.device,
-                            values[1], transfer.get("source_mapping", "uniform"), prior_type,
-                            transfer.get("monotonic_sigma", .1), all_layers=all_layers,
-                            teacher_signature=transfer.get("artifacts",{}).get("teacher_signature",saved.get("teacher_signature")))
     layer = args.layer if args.layer is not None else transfer.get("layer", -1)
     if not -cfg.decoder_layers <= layer < cfg.decoder_layers:
         raise ValueError("visualization layer out of range")
     heads = args.heads if args.heads is not None else transfer.get("heads")
+    builder = prior_builder(selected, teacher, units, cfg, manifest_hash(rows), saved["backend"], args.device,
+                            values[1], transfer.get("source_mapping", "uniform"), prior_type,
+                            transfer.get("monotonic_sigma", .1), all_layers=all_layers, layer=layer,
+                            teacher_signature=transfer.get("artifacts",{}).get("teacher_signature",saved.get("teacher_signature")))
     with torch.no_grad():
         _, raw, guided, prior = model(*values[:3], builder, args.beta, layer, heads,
                                       transfer.get("prior_smoothing", 0),all_layers=all_layers)
     _, packet = (teacher if prior_type == "t2tt" else units).get(row["pair_id"])
     count = len(packet["reduced_units"])
-    teacher_matrix = packet["mt_attention_layers"][layer] if all_layers and prior_type=="t2tt" else packet.get("mt_attention")
+    teacher_matrix = packet["mt_attention_layers"][layer] if prior_type=="t2tt" and "mt_attention_layers" in packet else packet.get("mt_attention")
     if all_layers:
         raw,guided,prior=[v[:,layer] for v in (raw,guided,prior)]
     matrices = {"t2tt" if prior_type == "t2tt" else "monotonic": teacher_matrix if prior_type == "t2tt" else

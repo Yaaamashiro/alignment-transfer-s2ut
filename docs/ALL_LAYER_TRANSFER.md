@@ -21,6 +21,30 @@
 
 旧single-layer Attention/teacherはsingle-layer modeで使用できる。旧metadataに`all_layers`がない場合もsingleとみなす。all-layer modeへ使うと再抽出を要求する明示エラーになる。scope・layer indices・headsをteacher signatureと学習contractへ反映し、異なる設定へのresumeを拒否する。
 
+全層teacherをsingle-layer modeで使う場合も、`--layer N`に対応する`mt_attention_layers[N]`を選ぶ。暗黙の最終層利用は既定`layer=-1`の場合だけ。legacy学習と可視化で同じ選択を使い、元teacherファイルは変更しない。native経路のsingle-layerは従来どおり最終層に固定する。
+
+native benchmarkはteacher/studentとも全head平均を使う。`heads != None`が記録されたteacherはplan時に拒否し、`--heads`を省略した再抽出を要求する。head ablationを行うlegacy経路の選択機能は維持する。
+
+## Scope ablationの比較
+
+通常の比較はscopeを固定する。層の範囲を独立変数として変える場合だけ、比較コマンドへ`--allow-scope-ablation`を指定する。比較結果に独立変数と各条件のscopeを記録する。
+
+```bash
+python -m alignment_transfer_s2ut.compare_experiments \
+  outputs/baseline outputs/single-distillation outputs/all-distillation \
+  --allow-scope-ablation --output outputs/scope-ablation.json
+
+python -m alignment_transfer_s2ut.benchmark compare \
+  outputs/registrations/baseline.json outputs/registrations/single.json outputs/registrations/all.json \
+  --allow-scope-ablation --output outputs/native-scope-ablation.json
+```
+
+同一の全層teacherを両scopeで使う。同じmethod/priorのままscopeを変え、recipe・更新予算・係数・初期化・teacher・評価に対する既存照合は維持する。異なるteacher signatureのsingle/all抽出結果を、このflagだけで同一扱いにはしない。legacyでは異なるsingle-layer番号も明示したscope条件として比較でき、nativeではfinal-layerとall-layerを比較する。学習のresume contractを緩めるflagではない。
+
+nativeのablation用学習は、両方の`benchmark train`で同じ`--teacher`を指定し、一方だけに`--all-layers`を付ける。Notebookのscope変更で別のteacherを再抽出した結果を、比較flagで自動的に同一扱いにはしない。
+
+ColabのGPU preflightでは、3転移方式ごとにtiny 2層FP16モデルを1更新→checkpoint保存・復元→2更新目まで検査し、実forwardのbetaとpeak allocated/reserved VRAMをJSONで出力する。ローカルCPUでは実測しておらず、これは本番6層モデルのVRAMや品質の測定でもない。
+
 ```bash
 python -m alignment_transfer_s2ut.extract_t2tt_attention \
   --manifest outputs/manifest.jsonl --checkpoint outputs/t2tt-200k/checkpoint_best.pt \

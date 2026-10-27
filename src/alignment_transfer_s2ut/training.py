@@ -112,7 +112,7 @@ def collate(rows, modality, source_tokenizer, target_tokenizer, backend, unit_st
 
 def prior_builder(rows, store, units_store, config, identity, backend, device,
                   feature_lengths=None, source_mapping="uniform", prior_type="t2tt", monotonic_sigma=0.1,
-                  teacher_signature=None, manifest_hashes=False, source_duration=None, all_layers=False):
+                  teacher_signature=None, manifest_hashes=False, source_duration=None, all_layers=False, layer=-1):
     if prior_type not in {"t2tt", "monotonic"}:
         raise ValueError("unknown prior type")
     packets = []
@@ -135,7 +135,11 @@ def prior_builder(rows, store, units_store, config, identity, backend, device,
                     "s2ut_architecture_hash": digest(config.asdict()), "backend": backend,
                     "units_hash": units_store.hash(row["pair_id"]),
                     "text_hash": digest([row["ja_text"], row["en_text"]])})
-        validate_teacher_layers(meta, packet, config.decoder_layers, all_layers)
+        spec = validate_teacher_layers(meta, packet, config.decoder_layers, all_layers)
+        if not all_layers and spec["all_layers"]:
+            if not -config.decoder_layers <= layer < config.decoder_layers:
+                raise ValueError("single-layer teacher selection out of range")
+            packet = {**packet, "mt_attention": packet["mt_attention_layers"][layer]}
         signature = signature_for(meta)
         if teacher_signature is not None and any(meta.get(k) != v for k, v in teacher_signature.items()):
             raise ValueError("mixed teacher artifacts")
@@ -321,7 +325,7 @@ def train(args, modality):
         if has_prior:
             builder = prior_builder([row], teacher_store, unit_store, config, identity, args.backend, "cpu",
                 lengths, args.source_mapping, args.prior_type, args.monotonic_sigma,
-                teacher_signature=teacher_signature, manifest_hashes=True, source_duration=[metadata[0]["duration"]], all_layers=capture_all)
+                teacher_signature=teacher_signature, manifest_hashes=True, source_duration=[metadata[0]["duration"]], all_layers=capture_all, layer=args.layer)
             prior = builder(output_lengths(lengths, config, args.backend), target.size(1))[0]
         return {"row": row, "source": source[0], "target": target[0], "prior": prior}
 

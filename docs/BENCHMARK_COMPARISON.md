@@ -32,6 +32,8 @@ FP16 overflowでは、optimizerへ入る前にloss scaleが下がった場合だ
 
 全層Guidanceは各Cross-Attentionへ対応層のpriorを加える。Distillationは勾配蓄積全体の層別有効row数でKLを正規化して層平均する。single-layerは従来の最終層と総有効row正規化を維持する。priorはFP32を保ち、native FP16変換で丸めない。beta=0とvalidation/inferenceでは公式Attentionの経路を使う。
 
+nativeではselected-head teacherをplan時に拒否し、全head平均を共通条件とする。final/allのscope ablationは比較コマンドの`--allow-scope-ablation`で明示し、同じ全層teacher・method・係数・学習条件を使う。[照合条件](ALL_LAYER_TRANSFER.md#scope-ablationの比較)。学習中runのscope切替・resume制約解除は行わない。
+
 ## 1. Snapshotを検証して別の場所へ復元
 
 ```bash

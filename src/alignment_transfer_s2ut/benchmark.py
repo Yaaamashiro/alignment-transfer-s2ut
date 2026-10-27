@@ -233,7 +233,9 @@ def artifact_contract(record, manifest, units, teacher, prior_type, all_layers=F
         meta, packet = ArtifactStore(teacher).get(reference["pair_id"], {"manifest_hash": manifest_hash(rows),
             "s2ut_architecture_hash": digest(result["backbone"]), "unit_config_hash": result["unit_config_hash"]})
         from .alignment.layers import validate_teacher_layers, teacher_signature
-        validate_teacher_layers(meta, packet, result["backbone"]["decoder_layers"], all_layers)
+        spec = validate_teacher_layers(meta, packet, result["backbone"]["decoder_layers"], all_layers)
+        if spec["heads"] is not None:
+            raise ValueError("native benchmark requires an all-head-mean teacher; re-extract without --heads")
         result["teacher_signature"] = teacher_signature(meta)
     return result
 
@@ -428,21 +430,30 @@ def register_transfer(run, checkpoint, output, resume=False):
     return record
 
 
-def compare_records(paths, evaluations=None):
+def compare_records(paths, evaluations=None, allow_scope_ablation=False):
     records = [read_record(path) for path in paths]
     if len(records) < 2 or not any(r["method"] == "baseline" for r in records):
         raise ValueError("comparison needs a separately trained baseline and another model")
     fields = ("scientific_config", "prepared", "training_budget", "checkpoint_selection", "selection_policy", "fairseq_revision")
     differences = {key: [r[key] for r in records] for key in fields if any(r[key] != records[0][key] for r in records[1:])}
     transfers = [r.get("transfer",{}) for r in records if r["method"] != "baseline"]
-    if transfers and any(t.get("all_layers",False) != transfers[0].get("all_layers",False) for t in transfers[1:]):
+    scope_varies=bool(transfers) and any(t.get("all_layers",False) != transfers[0].get("all_layers",False) for t in transfers[1:])
+    if scope_varies and not allow_scope_ablation:
         differences["transfer/all_layers"] = [t.get("all_layers",False) for t in transfers]
+    if scope_varies and allow_scope_ablation:
+        for key in ("method","prior_type","anneal_steps","beta","lambda_align","smoothing","artifacts"):
+            if any(t.get(key) != transfers[0].get(key) for t in transfers[1:]):
+                differences["ablation/"+key]=[t.get(key) for t in transfers]
     signatures = [t.get("artifacts",{}).get("teacher_signature") for t in transfers if t.get("prior_type","t2tt")=="t2tt"]
     if signatures and any(s != signatures[0] for s in signatures[1:]):
         differences["transfer/teacher_signature"] = signatures
     result = {"fair_comparison": not differences, "differences": differences,
               "models": [{"method": r["method"], "checkpoint_hash": r["checkpoint_hash"],
                            "checkpoint_updates": r["checkpoint_updates"], "training_budget": r["training_budget"]} for r in records]}
+    if allow_scope_ablation:
+        result["independent_variables"]={"all_layers":[t.get("all_layers",False) for t in transfers]} if scope_varies else {}
+        for item,record in zip(result["models"],records):
+            item["all_layers"]=record.get("transfer",{}).get("all_layers",False)
     if evaluations:
         if len(evaluations) != len(records):
             raise ValueError("supply one evaluation per registered model, in the same order")
@@ -488,6 +499,7 @@ def main(argv=None):
         child.add_argument("--" + field, required=True)
     child.add_argument("--resume", action="store_true")
     child = sub.add_parser("compare")
+    child.add_argument("--allow-scope-ablation",action="store_true")
     child.add_argument("records", nargs="+")
     child.add_argument("--evaluations", nargs="+")
     child.add_argument("--output", required=True)
@@ -517,7 +529,7 @@ def main(argv=None):
     elif args.action == "register-transfer":
         result = register_transfer(args.run, args.checkpoint, args.output, args.resume)
     elif args.action == "compare":
-        result = compare_records(args.records, args.evaluations)
+        result = compare_records(args.records, args.evaluations,args.allow_scope_ablation)
         if args.resume and Path(args.output).is_file():
             if read_json(args.output) != result:
                 raise ValueError("comparison changed; use a new report output")

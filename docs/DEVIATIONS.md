@@ -15,3 +15,5 @@
 13. **T2TTの予算延長:** [20k→200k](T2TT_EXTENSION.md)は別stageへverified snapshotをseedし、checkpointのimplementation hashと一致する元source treeを隔離して同じtrainerを実行する。scientific contractを書換えず、max updatesだけを延長する。延長process内の保存通知callbackを包み、local save/validationとは別にDrive snapshot頻度・milestone・保持数を制御する。元20kや通常のT2TT/S2UT trainer・保存runtime sourceは変更しない。CPUの小型モデルでcontinuationの一致を検査し、実200k学習・GPUでの性能は別途検証する。
 
 14. **層別転移:** [全層mode](ALL_LAYER_TRANSFER.md)は対応するT2TT/S2UT層のrouting priorを1 forwardで取得・適用する。層別のglobal valid-row正規化後に層平均し、betaは層数で割らない。nativeモデルのparameter/state key・Trainer・保存レシピは維持する。Attention/teacherは独立stageへ保存し、旧single-layerを全層へ複製しない。実GPUでの効果・VRAMは未測定。
+
+15. **Scope ablationとhead制限:** single-layerで全層teacherを読むときも対応層を選び、native benchmarkでは記録されたselected-head teacherを拒否して全head平均を維持する。比較の`--allow-scope-ablation`はscopeだけを独立変数として明示する分析用optionであり、学習・resumeのcontractや他の照合を緩めない。GPU接続試験の3方式保存/復元・VRAM出力はtiny 2層用で、本番6層の実測とは区別する。

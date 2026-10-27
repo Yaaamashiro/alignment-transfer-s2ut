@@ -1,5 +1,11 @@
 # Validation record — 2026-10-28
 
+全層実装へのレビュー指摘を現行コードで再現・修正した。最終全suiteは **264 passed, 8 skipped**（387.28秒）。全層teacherをsingle-layerへ使うときは指定層（負indexを含む）の配列を選び、学習・可視化の層番号を一致させる。対照的な2層行列による投影一致、元artifactのhash不変、中間層のlegacy学習・PNG/NPZ表示をsmoke/fairseq両方で検証した。
+
+nativeは全head平均を維持し、記録されたselected-head teacherをsingle/all双方のplan時に拒否する。比較の既定はscope固定のまま、`--allow-scope-ablation`を両比較CLIへ追加し、意図したscope変化を結果へ記録する。flagを付けてもmethod/prior・recipe・初期化・予算・係数・teacher等の照合は維持し、異なるteacher signatureを自動的に同一扱いにしない。legacyの異なるsingle層、nativeのfinal/all、CLI経由の出力と他設定の変更拒否を検査した。
+
+GPU preflightはDistillation/Annealed Guidance/Guidanceごとにtiny 2層FP16の1更新→保存/復元→2更新目、実forwardのbeta、実測peak allocated/reserved VRAMのJSON出力へ拡張し、Notebookの`-s`で表示する。ローカルではCUDA 7件とWindows上のPOSIX 1件がskipであり、GPU保存/復元・VRAMの実測はまだ行っていない。本番6層の性能・BLEUを推測しない。モデル・loss式・native Trainer hook・benchmark pin・Drive保存runtimeは変更していない。Notebook schema/Python/HTML、70ローカル文書リンク、CLI help、pip checkとwheel全63 Python sourceの同梱一致も確認した。
+
 全Decoder層のlayer-wise transferを追加。最終状態の全体 **249 passed, 6 skipped**（369.07秒）、native checkpoint可視化追加後の関連検査は **25 passed, 2 skipped**（110.98秒）。2層モデルでT2TT/S2UTを各1 forwardでcaptureし、層別prior・未知文字mask・FP32 NPZ・共有mappingによる`[L,U,F]`投影・memory budgetのL倍計算を確認した。旧single-layer抽出/teacherの読込・無変更resume、all-layerへの誤利用拒否、層数・scope・headsの不一致拒否も検査した。
 
 層ごとに有効row数を変え、全microbatchの層別row総数で正規化後に層平均するKLとその勾配が一括計算に一致した。native criterionでもTrainerのmain token正規化を含む損失差を実測照合。2層のstock fairseqに対しsingle/all両modeでbeta=0のlogits（atol=rtol=0）、loss、更新後parameterが厳密一致し、全層のq/kへ有限の非0勾配を確認した。native TrainerでBaseline/Distillation/Annealed Guidance/Guidanceを各2更新、beta減衰、teacher削除後の共通native生成を完走した。

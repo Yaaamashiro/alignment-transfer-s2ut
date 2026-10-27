@@ -17,7 +17,7 @@ def attention_spec(metadata):
 
 def validate_teacher_layers(metadata, packet, decoder_layers, all_layers):
     spec = attention_spec(metadata)
-    if all_layers:
+    if all_layers or spec["all_layers"]:
         if not spec["all_layers"] or "mt_attention_layers" not in packet:
             raise ValueError("All-layer transfer requires an all-layer T2TT teacher; re-extract teacher attention with --all-layers")
         values = packet["mt_attention_layers"]

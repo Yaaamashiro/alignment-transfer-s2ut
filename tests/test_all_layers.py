@@ -222,3 +222,11 @@ def test_all_layer_teacher_and_legacy_training_pipeline(tmp_path,backend):
         assert all("alignment/kl_layer_0" in log and "alignment/kl_layer_1" in log for log in logs)
         assert read_json(tmp_path/method/"experiment.json")["transfer"]["all_layers"]
         invoke("visualize_attention","--manifest",manifest,"--checkpoint",tmp_path/method/"checkpoint_best.pt","--pair-id","2","--units",tmp_path/"units","--teacher",tmp_path/"teacher","--layer",0,"--output",tmp_path/(method+"-plot"))
+    single=tmp_path/"single-intermediate"
+    invoke("train_s2ut",*common,"--trainer","legacy","--layer",0,"--method","distillation",
+        "--teacher",tmp_path/"teacher","--units",tmp_path/"units","--output",single)
+    invoke("visualize_attention","--manifest",manifest,"--checkpoint",single/"checkpoint_best.pt","--pair-id","2",
+        "--units",tmp_path/"units","--teacher",tmp_path/"teacher","--output",tmp_path/"single-plot")
+    meta,shown=ArtifactStore(tmp_path/"single-plot").get("2")
+    assert not meta["all_layers"] and meta["layer"]==0
+    np.testing.assert_array_equal(shown["t2tt"],ArtifactStore(tmp_path/"teacher").get("2")[1]["mt_attention_layers"][0])

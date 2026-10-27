@@ -191,20 +191,74 @@ def test_mixed_head_specification_is_rejected_during_native_loading(native_data)
 @pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(),reason="all-layer native FP16 connection requires CUDA")
 @pytest.mark.parametrize("native_data",[2],indirect=True)
-def test_all_layer_fp16_trainer_and_fp32_prior(native_data):
+@pytest.mark.parametrize("method",["distillation","annealed_guidance","guidance"])
+def test_all_layer_fp16_trainer_and_fp32_prior(native_data,method):
     from fairseq import tasks
     from fairseq_cli import train
     from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
     root=native_data.root; layered_teacher(root)
-    plan=b.make_plan(root/"baseline.json",root/"cuda","annealed_guidance","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",anneal_steps=1,all_layers=True)
+    plan=b.make_plan(root/"baseline.json",root/"cuda",method,"t2tt",root/"manifest.jsonl",root/"units",root/"teacher",anneal_steps=1,all_layers=True)
     write_json(root/"cuda/native-run.json",plan)
     cfg=b.native_config(plan["config"]); cfg.common.cpu=False; cfg.common.fp16=True
     task=tasks.setup_task(cfg.task); task.load_dataset("train"); ds=task.dataset("train")
     samples=[ds.collater([ds[i]]) for i in range(2)]
+    torch.cuda.reset_peak_memory_stats()
     with trainer_hooks(plan["contract_hash"]):
         trainer=train.Trainer(cfg,task,task.build_model(cfg.model),task.build_criterion(cfg.criterion))
         prepared,_=trainer._prepare_sample(samples[0])
         assert prepared["alignment_prior"].dtype==torch.float32 and prepared["alignment_prior"].size(1)==2
         assert prepared["net_input"]["src_tokens"].dtype==torch.float16
-        trainer.train_step(samples); trainer.train_step(samples)
-        assert trainer.get_num_updates()==2 and all(torch.isfinite(p).all() for p in trainer.model.parameters())
+        trainer.train_step(samples)
+        checkpoint=root/"cuda/checkpoints/checkpoint_last.pt";checkpoint.parent.mkdir()
+        trainer.consolidate_optimizer();trainer.save_checkpoint(str(checkpoint),{})
+        restarted=train.Trainer(cfg,task,task.build_model(cfg.model),task.build_criterion(cfg.criterion))
+        restarted.load_checkpoint(str(checkpoint))
+        assert restarted.get_num_updates()==1
+        betas=[]
+        restarted.model.register_forward_pre_hook(lambda model,args:betas.append(model.transfer_context[1]))
+        restarted.train_step(samples)
+        assert restarted.get_num_updates()==2 and all(torch.isfinite(p).all() for p in restarted.model.parameters())
+        assert betas and all(beta==(1. if method=="guidance" else 0.) for beta in betas)
+        torch.cuda.synchronize()
+        import json
+        print(json.dumps(dict(kind="tiny_all_layer_gpu_preflight",method=method,decoder_layers=2,
+            resumed_from_updates=1,completed_updates=2,gpu=torch.cuda.get_device_name(),
+            beta_after_resume=betas[-1],
+            peak_allocated_bytes=torch.cuda.max_memory_allocated(),peak_reserved_bytes=torch.cuda.max_memory_reserved())))
+
+
+@pytest.mark.parametrize("native_data",[2],indirect=True)
+@pytest.mark.parametrize("all_layers",[False,True])
+def test_native_rejects_selected_head_teacher(native_data,all_layers):
+    from alignment_transfer_s2ut.alignment.layers import attention_spec
+    root=native_data.root
+    if all_layers:layered_teacher(root)
+    store=ArtifactStore(root/"teacher");meta,packet=store.get("0")
+    meta["heads"]=[0];meta["attention_spec_hash"]=digest(attention_spec(meta))
+    store.put("0",meta,packet,overwrite=True)
+    with pytest.raises(ValueError,match="all-head-mean teacher"):
+        b.make_plan(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=all_layers)
+
+
+@pytest.mark.parametrize("native_data",[2],indirect=True)
+def test_native_scope_ablation_stays_strict_about_other_settings(native_data):
+    root=native_data.root;layered_teacher(root);paths=[root/"baseline.json"]
+    for scope,name in ((False,"single"),(True,"all")):
+        plan=b.make_plan(root/"baseline.json",root/name,"distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=scope)
+        record=deepcopy(native_data.record);record.update(method="distillation",transfer=plan["transfer"])
+        record["record_hash"]=digest({k:v for k,v in record.items() if k!="record_hash"})
+        path=root/(name+".json");write_json(path,record);paths.append(path)
+    assert not b.compare_records(paths)["fair_comparison"]
+    result=b.compare_records(paths,allow_scope_ablation=True)
+    assert result["fair_comparison"] and result["independent_variables"]==dict(all_layers=[False,True])
+    base=deepcopy(record)
+    for field,value in (("beta",.5),("lambda_align",2.),("smoothing",.1),("method","guidance")):
+        changed=deepcopy(base);changed["transfer"][field]=value
+        changed["record_hash"]=digest({k:v for k,v in changed.items() if k!="record_hash"})
+        write_json(paths[-1],changed,overwrite=True)
+        assert not b.compare_records(paths,allow_scope_ablation=True)["fair_comparison"]
+    write_json(paths[-1],base,overwrite=True)
+    output=root/"scope-comparison.json"
+    b.main(["compare",*map(str,paths),"--allow-scope-ablation","--output",str(output)])
+    from alignment_transfer_s2ut.io import read_json
+    assert read_json(output)["independent_variables"]==dict(all_layers=[False,True])
