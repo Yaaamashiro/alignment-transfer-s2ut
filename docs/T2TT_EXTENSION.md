@@ -123,3 +123,5 @@ reportはtrain/main_loss・dev/main_loss・train/learning_rateをoptimizer updat
 ## CPU継続試験の実行条件
 
 縮小モデルの完全一致試験では、基準を学習するpytest processと、延長を学習する新しいPython processのCPUスレッド数をともに1へ揃える。`torch.set_num_threads(1)` は子processへ継承されないため、試験fixture内だけで `OMP_NUM_THREADS=1`・`MKL_NUM_THREADS=1` も設定し、終了時に元へ戻す。比較には引き続き `torch.equal` を使用する。本番のT2TT/S2UT学習・Notebook全体のスレッド数は変更しない。
+
+全層転移では、Attention/teacher/audit/転移runの上記保存先へ`-all-layers`を付けて分離する。T2TT学習・dev/外部評価・CTCの保存先は変えない。[全層の実行設定](ALL_LAYER_TRANSFER.md)を参照。

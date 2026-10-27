@@ -15,6 +15,7 @@ from .progress import progress
 
 
 def diagnose(args):
+    all_layers=getattr(args,"all_layers",False)
     if args.max_samples < 1 or args.heatmaps < 0 or not 0 <= args.prior_smoothing <= 1:
         raise ValueError("invalid audit size, heatmap count or smoothing")
     rows = load_manifest(args.manifest)
@@ -34,7 +35,8 @@ def diagnose(args):
     metrics, signatures = [], []
     for index, row in enumerate(selected):
         meta, packet = teacher.get(row["pair_id"])
-        signature = {key: meta[key] for key in ("mt_checkpoint_hash", "tokenizer_hash", "ctc_config_hash", "unit_config_hash")}
+        from .alignment.layers import teacher_signature
+        signature = teacher_signature(meta)
         if signatures and signature != signatures[0]:
             raise ValueError("mixed teacher artifacts in audit")
         signatures.append(signature)
@@ -42,8 +44,9 @@ def diagnose(args):
         feature_length = len(features(row["ja_audio"], backend, config.input_feat_per_channel))
         length = int(output_lengths(feature_length, config, backend))
         builder = prior_builder([row], teacher, units, config, identity, backend, "cpu",
-                                [feature_length], args.source_mapping)
-        prior = builder(torch.tensor([length]), len(packet["reduced_units"]) + 1)[:, :-1]
+                                [feature_length], args.source_mapping,all_layers=all_layers)
+        projected = builder(torch.tensor([length]), len(packet["reduced_units"]) + 1)
+        prior = projected[:,-1,:-1] if all_layers else projected[:, :-1]
         effective = smooth_prior(prior, alpha=args.prior_smoothing)
         duration = float(packet["source_duration"])
         if args.source_mapping == "frontend":
@@ -71,6 +74,10 @@ def diagnose(args):
                   "zero_cells": int((prior[0][valid_rows] == 0).sum()),
                   "valid_cells": int(valid_rows.sum()) * length,
                   "teacher_packet_hash": file_hash(teacher.path(row["pair_id"]))}
+        if all_layers:
+            layers=projected[0,:,:-1]
+            values["layers"]=[dict(layer=l,valid_unit_rows=int((p.sum(-1)>0).sum()),
+                prior_entropy_sum=float(entropy(p)[p.sum(-1)>0].sum())) for l,p in enumerate(layers)]
         for side in ("source_tokens", "target_tokens", "unit_rows"):
             values["valid_" + side + "_ratio"] = values["valid_" + side] / max(1, values[side])
         metrics.append(values)
@@ -92,6 +99,11 @@ def diagnose(args):
                "source_mapping": args.source_mapping, "prior_smoothing": args.prior_smoothing,
                "counts": totals, "heatmaps": min(args.heatmaps, len(selected)),
                "quality_scope": "Coverage and uncertainty diagnostics; not forced-alignment accuracy or ASR CER."}
+    if all_layers:
+        summary["all_layers"]=True
+        summary["compatibility_heatmap_layer"]=config.decoder_layers-1
+        summary["layers"]=[dict(layer=l,valid_unit_rows=sum(r["layers"][l]["valid_unit_rows"] for r in metrics),
+            prior_entropy_sum=sum(r["layers"][l]["prior_entropy_sum"] for r in metrics)) for l in range(config.decoder_layers)]
     for side in ("source_tokens", "target_tokens", "unit_rows"):
         summary["valid_" + side + "_ratio"] = totals["valid_" + side] / max(1, totals[side])
     for key in ("prior", "smoothed"):
@@ -131,6 +143,7 @@ def main():
     parser.add_argument("--source-mapping", choices=["frontend", "uniform"], default="frontend")
     parser.add_argument("--prior-smoothing", type=float, default=.05)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--all-layers",action="store_true")
     import json
     print(json.dumps(diagnose(parser.parse_args()), ensure_ascii=False))
 

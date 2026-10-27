@@ -1,5 +1,7 @@
 # Experiments
 
+主要4条件はBaseline / All-layer Distillation（soft supervision）/ All-layer Annealed Guidance（temporary direct guidance）/ All-layer Guidance（persistent direct guidance）。全転移条件で同じteacher・初期化方針・データ・Baseline完了budgetを使う。旧single-layer条件とMonotonic controlは残す。[実行と正規化](ALL_LAYER_TRANSFER.md)。
+
 既存benchmark Baselineとの本比較は[BENCHMARK_COMPARISON](BENCHMARK_COMPARISON.md)を使用する。学習・推論設定は登録checkpointから取得し、下表の既定値を上書きしない。以下は`--trainer legacy`を明示する独立trainerの実験仕様。
 
 ## 共通レシピ

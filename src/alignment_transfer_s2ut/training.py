@@ -14,8 +14,9 @@ from .data.manifest import load_manifest, manifest_hash
 from .io import ArtifactStore, atomic_write, digest, file_hash, write_json
 from .tokenization.character import CharacterTokenizer, PAD, EOS
 from .s2ut.model import build_model
-from .guidance.attention import alignment_kl, beta_at, entropy
-from .alignment.projection import project_packet
+from .guidance.attention import alignment_kl, beta_at, entropy, layer_kl_sums, layer_row_counts
+from .alignment.projection import project_packet, project_packet_layers
+from .alignment.layers import validate_teacher_layers, teacher_signature as signature_for
 from .alignment.timing import encoder_time_spans, monotonic_prior
 from .recipes import load_recipe, fit_auxiliary, transform_features, augment_batch, auxiliary_losses
 from .progress import progress
@@ -111,7 +112,7 @@ def collate(rows, modality, source_tokenizer, target_tokenizer, backend, unit_st
 
 def prior_builder(rows, store, units_store, config, identity, backend, device,
                   feature_lengths=None, source_mapping="uniform", prior_type="t2tt", monotonic_sigma=0.1,
-                  teacher_signature=None, manifest_hashes=False, source_duration=None):
+                  teacher_signature=None, manifest_hashes=False, source_duration=None, all_layers=False):
     if prior_type not in {"t2tt", "monotonic"}:
         raise ValueError("unknown prior type")
     packets = []
@@ -134,7 +135,8 @@ def prior_builder(rows, store, units_store, config, identity, backend, device,
                     "s2ut_architecture_hash": digest(config.asdict()), "backend": backend,
                     "units_hash": units_store.hash(row["pair_id"]),
                     "text_hash": digest([row["ja_text"], row["en_text"]])})
-        signature = [meta[k] for k in ("mt_checkpoint_hash", "tokenizer_hash", "unit_config_hash", "ctc_config_hash")]
+        validate_teacher_layers(meta, packet, config.decoder_layers, all_layers)
+        signature = signature_for(meta)
         if teacher_signature is not None and any(meta.get(k) != v for k, v in teacher_signature.items()):
             raise ValueError("mixed teacher artifacts")
         if consistent is not None and signature != consistent:
@@ -142,7 +144,8 @@ def prior_builder(rows, store, units_store, config, identity, backend, device,
         consistent = signature
         packets.append(packet)
     def build(lengths, target_length):
-        result = torch.zeros(len(rows), target_length, int(lengths.max()), device=device)
+        shape = (len(rows), config.decoder_layers, target_length, int(lengths.max())) if all_layers else (len(rows), target_length, int(lengths.max()))
+        result = torch.zeros(shape, device=device)
         for index, (packet, length) in enumerate(zip(packets, lengths.tolist())):
             duration = float(packet["source_duration"])
             if source_mapping == "frontend":
@@ -154,12 +157,16 @@ def prior_builder(rows, store, units_store, config, identity, backend, device,
                 spans = np.stack([boundaries[:-1], boundaries[1:]], -1)
             else:
                 raise ValueError("unknown source timing mapping")
-            projected = monotonic_prior(packet["unit_spans"], float(packet["duration"]), spans,
-                                        duration, monotonic_sigma) if prior_type == "monotonic" else project_packet(
-                                            packet, length, spans)
-            if len(projected) + 1 > target_length:
+            if prior_type == "monotonic":
+                projected = monotonic_prior(packet["unit_spans"], float(packet["duration"]), spans, duration, monotonic_sigma)
+                if all_layers:
+                    projected = np.broadcast_to(projected, (config.decoder_layers, *projected.shape))
+            else:
+                project = project_packet_layers if all_layers else project_packet
+                projected = project(packet, length, spans)
+            if projected.shape[-2] + 1 > target_length:
                 raise ValueError("unit length exceeds target batch")
-            result[index, :len(projected), :length] = torch.as_tensor(projected, device=device, dtype=torch.float32)
+            result[index, ..., :projected.shape[-2], :length] = torch.tensor(projected, device=device, dtype=torch.float32)
         return result
     return build
 
@@ -187,6 +194,8 @@ def training_recipe(args):
 
 
 def train(args, modality):
+    all_layers = getattr(args, "all_layers", False)
+    capture_all = all_layers and modality == "speech" and args.method != "baseline"
     if args.resume and args.overwrite:
         raise ValueError("--resume and --overwrite are mutually exclusive")
     if args.max_updates < 1 or args.batch_size < 1 or args.update_frequency < 1 or args.max_tokens < 1:
@@ -237,10 +246,11 @@ def train(args, modality):
         meta, _ = unit_store.get(reference["pair_id"], {"split": "train", "manifest_hash": identity})
         unit_config_hash = meta["unit_config_hash"]
         if teacher_store is not None:
-            packet_meta, _ = teacher_store.get(reference["pair_id"], {
+            packet_meta, reference_packet = teacher_store.get(reference["pair_id"], {
                 "s2ut_architecture_hash": digest(config.asdict()), "backend": args.backend, "manifest_hash": identity,
                 "unit_config_hash": unit_config_hash})
-            teacher_signature = {k: packet_meta[k] for k in ("mt_checkpoint_hash", "tokenizer_hash", "unit_config_hash", "ctc_config_hash")}
+            validate_teacher_layers(packet_meta, reference_packet, config.decoder_layers, all_layers)
+            teacher_signature = signature_for(packet_meta)
     source_vocabulary = source_tokenizer.vocabulary if modality == "text" else []
     target_vocabulary = target_tokenizer.vocabulary if modality == "text" else UNIT_VOCABULARY
     method = args.method if modality == "speech" else "baseline"
@@ -248,6 +258,8 @@ def train(args, modality):
                                                    "anneal_steps", "layer", "heads", "prior_type", "prior_smoothing",
                                                    "source_mapping", "monotonic_sigma")} if modality == "speech" else {}
     recipe = training_recipe(args)
+    if modality == "speech":
+        transfer["all_layers"] = all_layers
     recipe["speech_recipe"] = speech_recipe
     runtime = {"python": ".".join(map(str, sys.version_info[:3])), "torch": str(torch.__version__),
                "numpy": np.__version__}
@@ -309,7 +321,7 @@ def train(args, modality):
         if has_prior:
             builder = prior_builder([row], teacher_store, unit_store, config, identity, args.backend, "cpu",
                 lengths, args.source_mapping, args.prior_type, args.monotonic_sigma,
-                teacher_signature=teacher_signature, manifest_hashes=True, source_duration=[metadata[0]["duration"]])
+                teacher_signature=teacher_signature, manifest_hashes=True, source_duration=[metadata[0]["duration"]], all_layers=capture_all)
             prior = builder(output_lengths(lengths, config, args.backend), target.size(1))[0]
         return {"row": row, "source": source[0], "target": target[0], "prior": prior}
 
@@ -322,11 +334,12 @@ def train(args, modality):
         previous[:, 0], previous[:, 1:] = EOS, target[:, :-1]
         prior = None
         if any(s["prior"] is not None for s in samples):
-            prior = torch.zeros(len(samples), target.size(1), int(output_lengths(lengths, config, args.backend).max()))
+            shape = (len(samples), config.decoder_layers, target.size(1), int(output_lengths(lengths, config, args.backend).max())) if capture_all else (len(samples), target.size(1), int(output_lengths(lengths, config, args.backend).max()))
+            prior = torch.zeros(shape)
             for i, sample in enumerate(samples):
                 if sample["prior"] is not None:
                     p = sample["prior"]
-                    prior[i, :p.size(0), :p.size(1)] = p
+                    prior[i, ..., :p.size(-2), :p.size(-1)] = p
         return [s["row"] for s in samples], (source, lengths, previous, target), prior
 
     def to_device(value):
@@ -350,7 +363,7 @@ def train(args, modality):
 
     def validate():
         model.eval()
-        loss_sum, count, alignment_sum, alignment_count = 0.0, 0, 0.0, 0
+        loss_sum, count, alignment_sum, alignment_count = 0.0, 0, np.zeros(config.decoder_layers) if capture_all else 0.0, np.zeros(config.decoder_layers) if capture_all else 0
         with torch.no_grad():
             requests = ((row, (0, i + 1)) for i, row in enumerate(dev_rows))
             with OrderedLoader(requests, load_sample, args.loader_workers, capacity) as validation:
@@ -360,15 +373,23 @@ def train(args, modality):
                     prior = to_device(prior) if prior is not None else None
                     builder = (lambda actual_lengths, target_length: prior) if prior is not None else None
                     logits, raw, _, prior = model(source, lengths, previous, builder, beta=0,
-                                                  layer=args.layer, heads=args.heads)
+                                                  layer=args.layer, heads=args.heads, all_layers=capture_all)
                     loss, tokens = unit_loss(logits, target, args.label_smoothing)
                     loss_sum += float(loss)
                     count += int(tokens)
                     if prior is not None:
+                        if capture_all:
+                            alignment_sum += layer_kl_sums(prior,raw).cpu().numpy()
+                            alignment_count += layer_row_counts(prior).cpu().numpy()
+                            continue
                         valid_count = int((prior.sum(-1) > 0).sum())
                         alignment_sum += float(alignment_kl(prior, raw, reduction="sum"))
                         alignment_count += valid_count
-        return loss_sum / count, alignment_sum / alignment_count if alignment_count else None
+        if capture_all:
+            alignment = float((alignment_sum / np.maximum(1,alignment_count)).mean()) if alignment_count.any() else None
+        else:
+            alignment = alignment_sum / alignment_count if alignment_count else None
+        return loss_sum / count, alignment
 
     def save(path):
         payload = {**contract, "input_pipeline": input_pipeline, "contract_hash": digest(contract), "model": model.state_dict(),
@@ -395,6 +416,7 @@ def train(args, modality):
             total_tokens = sum(int(values[3].ne(PAD).sum()) for _, values, _ in microbatches)
             priors = [p for _, _, p in microbatches]
             total_rows = sum(int((p.sum(-1) > 0).sum()) for p in priors if p is not None)
+            rows_per_layer = sum((layer_row_counts(p) for p in priors if p is not None), torch.zeros(config.decoder_layers)) if capture_all else None
             beta = beta_at(step, method, args.beta, args.beta_start, args.beta_end, args.anneal_steps)
             logs = {"train/main_loss": 0.0, "train/alignment_loss": 0.0,
                     "alignment/teacher_entropy": 0.0, "alignment/student_entropy": 0.0,
@@ -411,9 +433,22 @@ def train(args, modality):
                     return prepared_prior
                 logits, raw, guided, prior = model(source, lengths, previous,
                     prepared_builder if prepared_prior is not None else None, beta, args.layer, args.heads,
-                    args.prior_smoothing)
+                    args.prior_smoothing, all_layers=capture_all)
                 main_sum, _ = unit_loss(logits, target, args.label_smoothing)
-                kl = alignment_kl(prior, raw, reduction="sum") / max(1, total_rows) if prior is not None else raw.sum() * 0
+                if capture_all and prior is not None:
+                    per_layer = layer_kl_sums(prior,raw) / rows_per_layer.to(raw.device).clamp_min(1)
+                    kl = per_layer.mean()
+                    for l, value in enumerate(per_layer):
+                        key = f"alignment/kl_layer_{l}"
+                        logs[key] = logs.get(key,0.) + float(value.detach())
+                        valid_l=prior[:,l].sum(-1)>0
+                        for name,matrix,mask,denominator in (("teacher",prior[:,l],valid_l,max(1,float(rows_per_layer[l]))),
+                                ("student",raw[:,l].detach(),target.ne(PAD),total_tokens)):
+                            key=f"alignment/{name}_entropy_layer_{l}"
+                            logs[key]=logs.get(key,0.)+float(entropy(matrix)[mask].sum())/denominator
+                    logs["alignment/kl_mean"] = logs.get("alignment/kl_mean",0.) + float(kl.detach())
+                else:
+                    kl = alignment_kl(prior, raw, reduction="sum") / max(1, total_rows) if prior is not None else raw.sum() * 0
                 align = kl if method == "distillation" else kl * 0
                 aux_losses = auxiliary_losses(model, selected, target) if auxiliary else {}
                 aux_sum = sum(aux_losses.values(), main_sum * 0)
@@ -427,10 +462,10 @@ def train(args, modality):
                     logs[key] = logs.get(key, 0.0) + float(value.detach()) / total_tokens
                 logs["train/alignment_loss"] += float(align.detach())
                 logs["alignment/kl_teacher_student"] += float(kl.detach())
-                logs["alignment/student_entropy"] += float(entropy(raw.detach())[target.ne(PAD)].sum()) / total_tokens
+                logs["alignment/student_entropy"] += (float(entropy(raw.detach()).mean(1)[target.ne(PAD)].sum()) if capture_all else float(entropy(raw.detach())[target.ne(PAD)].sum())) / total_tokens
                 if prior is not None:
                     valid = prior.sum(-1) > 0
-                    logs["alignment/teacher_entropy"] += float(entropy(prior)[valid].sum()) / max(1, total_rows)
+                    logs["alignment/teacher_entropy"] += (sum(float(entropy(prior[:,l])[valid[:,l]].sum())/max(1,float(rows_per_layer[l])) for l in range(config.decoder_layers))/config.decoder_layers if capture_all else float(entropy(prior)[valid].sum())/max(1,total_rows))
             gradient_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_norm, error_if_nonfinite=True))
             step += 1
             lr = learning_rate(step, args.learning_rate, args.warmup_updates, args.warmup_init_lr)
@@ -475,6 +510,7 @@ def file_tensor_hash(value):
 
 
 def extract_attention(args):
+    all_layers = getattr(args, "all_layers", False)
     batch_size = getattr(args, "batch_size", 8)
     max_tokens = getattr(args, "max_tokens", 4096)
     max_cells = getattr(args, "max_attention_cells", 1000000)
@@ -485,6 +521,7 @@ def extract_attention(args):
     checkpoint_stamp = stamp(args.checkpoint)
     checkpoint_hash = file_hash(args.checkpoint)
     saved = load_checkpoint(args.checkpoint)
+    layer_factor = saved["backbone"]["decoder_layers"] if all_layers else 1
     def unchanged_checkpoint():
         if stamp(args.checkpoint) != checkpoint_stamp:
             raise ValueError("T2TT checkpoint changed during attention extraction")
@@ -513,6 +550,9 @@ def extract_attention(args):
                 "mt_checkpoint_hash": checkpoint_hash, "mt_architecture_hash": digest(saved["backbone"]),
                 "tokenizer_hash": digest([source.fingerprint, target.fingerprint]), "layer": args.layer,
                 "heads": args.heads, "teacher_forcing": True, "training_split": "train"}
+    if all_layers:
+        common.pop("layer")
+        common.update(all_layers=True, decoder_layers=layer_factor, layer_indices=list(range(layer_factor)))
     completed = extracted = reused = forwards = 0
     extraction_seconds = 0.
     pending, source_length, target_length = [], 0, 0
@@ -542,18 +582,20 @@ def extract_attention(args):
         batch_rows = [row for row, _ in pending]
         values = collate(batch_rows, "text", source, target, saved["backend"], None, 80, args.device)
         with torch.no_grad():
-            _, raw, _, _ = model(*values[:3], layer=args.layer, heads=args.heads)
+            _, raw, _, _ = model(*values[:3], layer=args.layer, heads=args.heads, **({"all_layers": True} if all_layers else {}))
         # Transfer the batch once. Padding and EOS never enter per-pair output.
         matrices = raw.detach().cpu().numpy()
         unchanged_checkpoint()
         forwards += 1
         for index, (row, meta) in enumerate(pending):
-            matrix = matrices[index, :len(row["en_text"]), :len(row["ja_text"])]
+            matrix = matrices[index, ..., :len(row["en_text"]), :len(row["ja_text"])]
             # Held-out codepoints outside the train vocabulary remain invalid.
             src_valid = np.asarray(source.encode(row["ja_text"])) != 3
             tgt_valid = np.asarray(target.encode(row["en_text"])) != 3
             matrix = matrix * tgt_valid[:, None] * src_valid[None, :]
-            store.put(row["pair_id"], meta, {"attention": matrix}, args.overwrite)
+            arrays = {"attention_layers": matrix, "attention": matrix[-1]} if all_layers else {"attention": matrix}
+            details = dict(attention_shape=list(matrix.shape), attention_dtype=str(matrix.dtype), decoder_layers=saved["backbone"]["decoder_layers"], all_layers=all_layers)
+            store.put(row["pair_id"], {**meta, **details}, arrays, args.overwrite)
             completed += 1
             extracted += 1
         pending.clear()
@@ -567,19 +609,23 @@ def extract_attention(args):
         unchanged_checkpoint()
         meta = {**common, "split": row["split"], "text_hash": digest([row["ja_text"], row["en_text"]])}
         if args.resume and store.path(row["pair_id"]).exists():
-            store.verify_for_resume(row["pair_id"], meta)
+            cached_meta, cached = store.verify_for_resume(row["pair_id"], meta)
+            if cached_meta.get("all_layers", False) != all_layers:
+                raise ValueError("attention all_layers scope differs on resume")
+            if all_layers and cached["attention_layers"].shape != (layer_factor, len(row["en_text"]), len(row["ja_text"])):
+                raise ValueError("invalid all-layer attention shape on resume")
             completed += 1
             reused += 1
             report()
             continue
         src_len, tgt_len = len(row["ja_text"]), len(row["en_text"]) + 1
-        if src_len + tgt_len > max_tokens or src_len * tgt_len > max_cells:
+        if src_len + tgt_len > max_tokens or layer_factor * src_len * tgt_len > max_cells:
             raise ValueError("pair exceeds attention batch budget: " + row["pair_id"] +
                              "; increase --max-tokens/--max-attention-cells")
         count = len(pending) + 1
         next_source, next_target = max(source_length, src_len), max(target_length, tgt_len)
         if pending and (count > batch_size or count * (next_source + next_target) > max_tokens or
-                        count * next_source * next_target > max_cells):
+                        count * layer_factor * next_source * next_target > max_cells):
             flush()
         pending.append((row, meta))
         source_length, target_length = max(source_length, src_len), max(target_length, tgt_len)

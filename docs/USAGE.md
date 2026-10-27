@@ -1,5 +1,7 @@
 # 利用ガイド
 
+全層の本比較は[ALL_LAYER_TRANSFER](ALL_LAYER_TRANSFER.md)を参照。`--all-layers`をAttention抽出とS2UT学習の両方へ指定し、新しいAttention/teacher/run directoryを使う。旧single-layer artifactを全層へ流用しない。以下のCLI例はsingle-layer互換modeである。
+
 既存benchmarkで学習したS2UTをBaselineに使う場合は[BENCHMARK_COMPARISON](BENCHMARK_COMPARISON.md)を使用する。以下のS2UT学習例は`--trainer legacy`を明示する独立trainerの診断用手順。
 
 各コマンドの実行環境は[README](../README.md#インストール)を参照。

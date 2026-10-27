@@ -44,25 +44,33 @@ class NativeModel(nn.Module):
         from ..alignment.timing import output_lengths
         return lengths if self.modality == "text" else output_lengths(lengths, self.config)
 
-    def decode(self, previous, encoded, prior=None, beta=0.0, layer=-1, heads=None, prior_smoothing=0.0):
+    def decode(self, previous, encoded, prior=None, beta=0.0, layer=-1, heads=None, prior_smoothing=0.0, all_layers=False):
         selected = layer % len(self.network.decoder.layers)
-        adapter = self.network.decoder.layers[selected].encoder_attn
-        for decoder_layer in self.network.decoder.layers:
-            decoder_layer.encoder_attn.transfer_prior = None
-            decoder_layer.encoder_attn.transfer_capture = False
-        adapter.transfer_prior = prior
-        adapter.transfer_beta = beta
-        adapter.transfer_capture = True
-        adapter.transfer_heads = heads
-        adapter.transfer_smoothing = prior_smoothing
+        adapters = [block.encoder_attn for block in self.network.decoder.layers]
+        expected = (previous.size(0), len(adapters), previous.size(1), encoded["encoder_out"][0].size(0))
+        if all_layers and prior is not None and tuple(prior.shape) != expected:
+            raise ValueError("all-layer prior must be [B,decoder_layers,T,S]")
+        for i, adapter in enumerate(adapters):
+            adapter.raw_attention = adapter.guided_attention = None
+            adapter.transfer_capture = all_layers or i == selected
+            adapter.transfer_prior = (prior[:, i] if all_layers else prior) if adapter.transfer_capture and prior is not None else None
+            adapter.transfer_beta = beta
+            adapter.transfer_heads = heads
+            adapter.transfer_smoothing = prior_smoothing
         try:
             logits, extra = self.network.decoder(previous, encoder_out=encoded, alignment_layer=selected)
             if self.auxiliary and self.training:
                 self.auxiliary_states = (encoded, extra)
-            return logits, adapter.raw_attention, adapter.guided_attention
+            if all_layers:
+                raw = torch.stack([a.raw_attention for a in adapters], 1)
+                guided = raw if all(a.raw_attention is a.guided_attention for a in adapters) else torch.stack([a.guided_attention for a in adapters], 1)
+                return logits, raw, guided
+            return logits, adapters[selected].raw_attention, adapters[selected].guided_attention
         finally:
-            adapter.transfer_prior = None
-            adapter.transfer_capture = False
+            for adapter in adapters:
+                adapter.transfer_prior = None
+                adapter.transfer_capture = False
+                adapter.raw_attention = adapter.guided_attention = None
 
     @staticmethod
     def encoder_lengths(encoded):
@@ -71,8 +79,8 @@ class NativeModel(nn.Module):
         return (~masks[0]).sum(-1) if masks else torch.full((values.shape[1],), values.shape[0],
                                                           device=values.device, dtype=torch.long)
 
-    def forward(self, source, lengths, previous, prior_builder=None, beta=0.0, layer=-1, heads=None, prior_smoothing=0.0):
+    def forward(self, source, lengths, previous, prior_builder=None, beta=0.0, layer=-1, heads=None, prior_smoothing=0.0, all_layers=False):
         encoded = self.encode(source, lengths)
         prior = prior_builder(self.encoder_lengths(encoded), previous.size(1)) if prior_builder else None
-        logits, raw, guided = self.decode(previous, encoded, prior, beta, layer, heads, prior_smoothing)
+        logits, raw, guided = self.decode(previous, encoded, prior, beta, layer, heads, prior_smoothing, all_layers)
         return logits, raw, guided, prior

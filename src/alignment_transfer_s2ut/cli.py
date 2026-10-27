@@ -11,6 +11,8 @@ class StageParser(argparse.ArgumentParser):
         values = list(sys.argv[1:] if args is None else args)
         result = super().parse_args(values, namespace)
         result.explicit_options = {value.split("=", 1)[0] for value in values if value.startswith("--")}
+        if getattr(result, "all_layers", False) and "--layer" in result.explicit_options:
+            raise ValueError("--all-layers and explicit --layer are mutually exclusive")
         return result
 
 
@@ -73,6 +75,7 @@ def parser_for(stage):
                             help="native benchmark-matched training is the research default")
         parser.add_argument("--baseline-record", help="registered separately trained native S2UT baseline")
     if stage in {"train_t2tt", "train_s2ut", "extract_t2tt_attention", "visualize_attention"}:
+        parser.add_argument("--all-layers", action="store_true", help="transfer/capture corresponding decoder layers in one forward")
         parser.add_argument("--layer", type=int, default=None if stage == "visualize_attention" else -1)
         parser.add_argument("--heads", type=int, nargs="+")
     if stage in {"infer", "extract_t2tt_attention", "evaluate_t2tt", "visualize_attention"}:
@@ -127,14 +130,14 @@ def run(stage, args):
                              "The old standalone trainer requires explicit --trainer legacy.")
         allowed = {"--baseline-record", "--trainer", "--backend", "--manifest", "--units", "--teacher", "--output",
                    "--method", "--prior-type", "--beta", "--lambda-align", "--anneal-steps", "--prior-smoothing",
-                   "--resume", "--resume-if-exists"}
+                   "--resume", "--resume-if-exists", "--all-layers"}
         changed = args.explicit_options - allowed
         if changed:
             raise ValueError("scientific settings are bound to the saved baseline; unsupported overrides: " + ", ".join(sorted(changed)))
         from .benchmark import make_plan, train_native
         resume = args.resume or args.resume_if_exists and (Path(args.output) / "native-run.json").is_file()
         plan = make_plan(args.baseline_record, args.output, args.method, args.prior_type, args.manifest, args.units,
-                         args.teacher, args.anneal_steps, args.beta, args.lambda_align, args.prior_smoothing)
+                         args.teacher, args.anneal_steps, args.beta, args.lambda_align, args.prior_smoothing, args.all_layers)
         return train_native(plan, args.output, resume)
     if getattr(args, "resume_if_exists", False):
         args.resume = (Path(args.output) / "checkpoint_last.pt").is_file()

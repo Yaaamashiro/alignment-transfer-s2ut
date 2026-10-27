@@ -138,7 +138,8 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
     identity = manifest_hash(rows)
     mt_store, ctc_store, units_store, output_store = map(ArtifactStore,
                                                        (mt_root, alignment_root, unit_root, output))
-    architecture_hash = digest(BackboneConfig.load(s2ut_config).asdict())
+    config = BackboneConfig.load(s2ut_config)
+    architecture_hash = digest(config.asdict())
     teacher_identity = None
     speech_identity = None
     for index, row in enumerate(rows):
@@ -146,10 +147,19 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
         expected = {"split": row["split"], "manifest_hash": identity,
                     "text_hash": digest([row["ja_text"], row["en_text"]])}
         mt_meta, mt = mt_store.get(pair, expected)
+        from .alignment.layers import attention_spec
+        spec = attention_spec(mt_meta)
+        if ("attention_layers" in mt) != spec["all_layers"]:
+            raise ValueError("attention layer payload and extraction specification disagree")
+        if spec["all_layers"]:
+            if spec["decoder_layers"] != config.decoder_layers or mt["attention_layers"].shape != (config.decoder_layers, len(row["en_text"]), len(row["ja_text"])):
+                raise ValueError("T2TT / S2UT decoder layer count or attention dimensions mismatch")
+            if not np.array_equal(mt["attention"], mt["attention_layers"][-1]):
+                raise ValueError("compatibility attention must match the final layer")
         source_meta, source = ctc_store.get(pair + ":ja", {**expected, "original_pair_id": pair})
         target_meta, target = ctc_store.get(pair + ":en", {**expected, "original_pair_id": pair})
         units_meta, units = units_store.get(pair, expected)
-        mt_identity = tuple(mt_meta[key] for key in ("mt_checkpoint_hash", "mt_architecture_hash", "tokenizer_hash", "backend"))
+        mt_identity = tuple(mt_meta[key] for key in ("mt_checkpoint_hash", "mt_architecture_hash", "tokenizer_hash", "backend")) + (digest(spec),)
         acoustic_identity = (source_meta["config_hash"], target_meta["config_hash"], units_meta["unit_config_hash"])
         if teacher_identity is not None and teacher_identity != mt_identity:
             raise ValueError("mixed MT checkpoint, architecture, tokenizer or backend")
@@ -173,9 +183,18 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
                                                file_hash(ctc_store.path(pair + ":en"))]),
                 "ctc_config_hash": digest(acoustic_identity[:2]),
                 "unit_config_hash": units_meta["unit_config_hash"],
-                "units_hash": file_hash(units_store.path(pair)), "backend": mt_meta["backend"]}
-        if not existing(output_store, row, meta, resume):
+                "units_hash": file_hash(units_store.path(pair)), "backend": mt_meta["backend"],
+                **spec, "attention_spec_hash": digest(spec)}
+        arrays = {"mt_attention_layers": mt["attention_layers"]} if spec["all_layers"] else {}
+        expected_meta = meta
+        if resume and output_store.path(pair).is_file():
+            old_meta, old_packet = output_store.get(pair)
+            if "attention_spec_hash" not in old_meta:
+                if spec != dict(all_layers=False, layer=-1, heads=None) or not np.array_equal(old_packet["mt_attention"],mt["attention"]):
+                    raise ValueError("legacy teacher cannot prove the requested attention extraction specification")
+                expected_meta = {k:v for k,v in meta.items() if k not in {*spec,"attention_spec_hash"}}
+        if not existing(output_store, row, expected_meta, resume):
             output_store.put(pair, meta, {"mt_attention": mt["attention"], "source_spans": source["spans"],
                              "target_spans": target["spans"], "source_duration": source["duration"],
-                             "unit_spans": units["unit_spans"], "reduced_units": units["reduced_units"]}, overwrite)
+                             "unit_spans": units["unit_spans"], "reduced_units": units["reduced_units"], **arrays}, overwrite)
         progress("teacher packet", index + 1, len(rows))

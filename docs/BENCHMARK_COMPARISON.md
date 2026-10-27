@@ -11,10 +11,12 @@ Colabの通常運用は[COLAB_RUNTIME](COLAB_RUNTIME.md)を参照。入出力・
 | 位置付け | Condition | Colabのスイッチ |
 |---|---|---|
 | 主比較 | S2UT Baseline（登録済みモデル） | 再学習せず使用 |
-| 主比較 | Annealed T2TT Guidance | `RUN_TRANSFER=True` |
+| 主比較 | All-layer Distillation | `ALL_LAYERS=True`, `RUN_DISTILLATION=True` |
+| 主比較 | All-layer Annealed Guidance | `ALL_LAYERS=True`, `RUN_TRANSFER=True` |
+| 主比較 | All-layer Guidance | `ALL_LAYERS=True`, `RUN_GUIDANCE=True` |
 | 任意のcontrol | Annealed Monotonic Guidance | `RUN_MONOTONIC=True` |
 
-両S2UTスイッチの既定値はFalse。T2TT側は既定で保存済み20kを200kへ継続し、評価確認後にteacher準備へ進む。S2UT本学習は自動開始しない。[T2TT延長の手順](T2TT_EXTENSION.md)。両方Trueなら3条件を比較する。`RUN_MONOTONIC=True`・`RUN_TRANSFER=False`ではT2TT・CTC・teacher準備をスキップし、Monotonicだけを新規学習できる。完成済みT2TTがあれば評価へ再利用する。正式な条件名はAnnealed Monotonic Guidanceとし、native fairseq経路の実装名と区別する。
+S2UTの各学習スイッチの既定値はFalse。主要4条件は上の3転移スイッチをすべてTrueにする。T2TT側は既定で保存済み20kを200kへ継続し、評価確認後にteacher準備へ進む。S2UT本学習は自動開始しない。[T2TT延長の手順](T2TT_EXTENSION.md)。Monotonicだけを指定した場合はT2TT・CTC・teacher準備をスキップできる。`ALL_LAYERS=False`で旧single-layer条件・保存先を使用する。[全層転移](ALL_LAYER_TRANSFER.md)。
 
 ## 学習条件
 
@@ -28,7 +30,7 @@ Baseline checkpointの実際の`cfg`を再利用するため、FP16、Adam設定
 
 FP16 overflowでは、optimizerへ入る前にloss scaleが下がった場合だけ、同じ論理batchとRNG/bufferを復元して再試行する。OOM・不明な更新失敗・optimizerに入った後の失敗は停止し、sampleを飛ばさない。確定済み更新数・optimizer/scaler・iterator・RNG・選択状態を保存し、同じrunのcheckpointだけを再開する。Baseline checkpointを転移側のrestore先へ指定しない。
 
-Guidanceは選択した最終Cross-Attentionへpriorを加える。Distillationはnative lossへKLを加算し、勾配蓄積全体の有効alignment row数で正規化する。追加priorはFP32を保ち、native FP16 sample変換で丸めない。beta=0とvalidation/inferenceでは公式Attentionの経路を使う。
+全層Guidanceは各Cross-Attentionへ対応層のpriorを加える。Distillationは勾配蓄積全体の層別有効row数でKLを正規化して層平均する。single-layerは従来の最終層と総有効row正規化を維持する。priorはFP32を保ち、native FP16変換で丸めない。beta=0とvalidation/inferenceでは公式Attentionの経路を使う。
 
 ## 1. Snapshotを検証して別の場所へ復元
 

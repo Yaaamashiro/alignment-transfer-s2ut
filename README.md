@@ -20,20 +20,22 @@ T2TT Attentionを、日英のCTC forced alignmentとHuBERT unitの時刻情報�
 | 条件 | 学習時のalignment |
 |---|---|
 | S2UT Baseline | benchmarkの学習済みモデル |
-| Annealed T2TT Guidance | T2TT由来priorを徐々に減衰 |
+| All-layer Distillation | 対応層のroutingをKL lossで監督 |
+| All-layer Annealed Guidance | 対応層のpriorを徐々に減衰 |
+| All-layer Guidance | 対応層のpriorを学習中維持 |
 | Annealed Monotonic Guidance（任意のcontrol） | 音声時間から作る単調priorを徐々に減衰 |
 
-Alignment Distillation・固定係数のGuidanceにも対応する。モデル構成・数式・実装範囲は[ARCHITECTURE](docs/ARCHITECTURE.md)、[METHOD](docs/METHOD.md)、[DEVIATIONS](docs/DEVIATIONS.md)を参照。
+T2TT層lのlearned soft alignmentをS2UT層lへ転移する。[全層転移の手順](docs/ALL_LAYER_TRANSFER.md)。single-layer modeも維持する。構成・数式・実装範囲は[ARCHITECTURE](docs/ARCHITECTURE.md)、[METHOD](docs/METHOD.md)、[DEVIATIONS](docs/DEVIATIONS.md)を参照。
 
 ## Colabで始める
 
 1. [benchmark比較ノートブック](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/benchmark_comparison.ipynb)をGPUランタイムで開く。
 2. 既存実験の`BENCHMARK`・`RUN_NAME`と、今回の`ROOT`（VMローカル）・`PERSISTENT`（Drive）を設定する。
-3. `RUN_TRANSFER=True`で主比較を実行する。3条件を比較する場合は`RUN_MONOTONIC=True`も指定する。
+3. 主要4条件では`ALL_LAYERS=True`で`RUN_DISTILLATION`・`RUN_TRANSFER`・`RUN_GUIDANCE`をすべてTrueにする。`RUN_MONOTONIC`は任意のcontrol。
 4. 上から環境検査・データ準備を実行し、6.1aで保存済み20k T2TTを独立stageへ200kまで延長する。
 5. 6.1bのdev・6.1cの固定FLEURS/FLORES・6.1dの曲線と翻訳例を確認し、`RUN_TEACHER_ARTIFACTS=True`で6.2へ進む。
 
-S2UTの両学習スイッチがFalseでも、既定の`RUN_T2TT_EXTENSION=True`では**T2TT 20k→200k延長**を実行する。Attentionは評価確認後の明示スイッチまで停止し、S2UT本学習は開始しない。延長の元データ・architecture・optimizer・LR/warmup・batch・RNG・best選択を保ち、20kをread-onlyで保持する。[延長と再開の手順](docs/T2TT_EXTENSION.md)
+S2UTの学習スイッチがすべてFalseでも、既定の`RUN_T2TT_EXTENSION=True`では**T2TT 20k→200k延長**を実行する。Attentionは評価確認後の明示スイッチまで停止し、S2UT本学習は開始しない。延長の元データ・architecture・optimizer・LR/warmup・batch・RNG・best選択を保ち、20kをread-onlyで保持する。[延長と再開の手順](docs/T2TT_EXTENSION.md)
 
 200kを評価するだけなら`RUN_T2TT_EXTENSION=False`、`USE_EXTENDED_T2TT=True`。20kを選ぶ場合は`USE_EXTENDED_T2TT=False`にし、直下の保存先セルも再実行する。ASR-BLEUを測る場合は、最初から`GENERATE_WAVEFORMS=True`と`ASR_BLEU=True`を指定する。
 

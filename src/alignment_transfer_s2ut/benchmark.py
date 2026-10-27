@@ -207,7 +207,7 @@ def backbone(config):
     return BackboneConfig(**result)
 
 
-def artifact_contract(record, manifest, units, teacher, prior_type):
+def artifact_contract(record, manifest, units, teacher, prior_type, all_layers=False):
     from .data.manifest import load_manifest, manifest_hash
     from .io import ArtifactStore
     rows = load_manifest(manifest, check_audio=False)
@@ -230,10 +230,11 @@ def artifact_contract(record, manifest, units, teacher, prior_type):
     result = {"manifest_sha256": file_hash(manifest), "manifest_hash": manifest_hash(rows),
               "unit_config_hash": meta["unit_config_hash"], "backbone": backbone(record["config"]).asdict()}
     if prior_type == "t2tt":
-        meta, _ = ArtifactStore(teacher).get(reference["pair_id"], {"manifest_hash": manifest_hash(rows),
+        meta, packet = ArtifactStore(teacher).get(reference["pair_id"], {"manifest_hash": manifest_hash(rows),
             "s2ut_architecture_hash": digest(result["backbone"]), "unit_config_hash": result["unit_config_hash"]})
-        result["teacher_signature"] = {key: meta[key] for key in
-            ("mt_checkpoint_hash", "tokenizer_hash", "unit_config_hash", "ctc_config_hash")}
+        from .alignment.layers import validate_teacher_layers, teacher_signature
+        validate_teacher_layers(meta, packet, result["backbone"]["decoder_layers"], all_layers)
+        result["teacher_signature"] = teacher_signature(meta)
     return result
 
 
@@ -317,7 +318,7 @@ def read_record(path, verify_data=True):
 
 
 def make_plan(baseline, output, method="annealed_guidance", prior_type="t2tt", manifest=None,
-              units=None, teacher=None, anneal_steps=200000, beta=1., lambda_align=1., smoothing=.05):
+              units=None, teacher=None, anneal_steps=200000, beta=1., lambda_align=1., smoothing=.05, all_layers=False):
     record = read_record(baseline)
     if any(Path(output).resolve().is_relative_to(root) for root in
            (Path(record["data"]).resolve(), Path(record["checkpoint"]).resolve().parent)):
@@ -345,11 +346,11 @@ def make_plan(baseline, output, method="annealed_guidance", prior_type="t2tt", m
     cfg["common"]["wandb_project"] = None
     if scientific_config(cfg) != record["scientific_config"]:
         raise ValueError("scientific configuration differs from the registered baseline")
-    transfer = {"method": method, "prior_type": prior_type, "anneal_steps": anneal_steps, "beta": beta,
+    transfer = {"method": method, "prior_type": prior_type, "all_layers": bool(all_layers), "anneal_steps": anneal_steps, "beta": beta,
                 "lambda_align": lambda_align, "smoothing": smoothing, "manifest": str(Path(manifest).resolve()) if manifest else None,
                 "units": str(Path(units).resolve()) if units else None, "teacher": str(Path(teacher).resolve()) if teacher else None}
     if method != "baseline":
-        transfer["artifacts"] = artifact_contract(record, manifest, units, teacher, prior_type)
+        transfer["artifacts"] = artifact_contract(record, manifest, units, teacher, prior_type, all_layers)
     if method != "baseline":
         cfg["task"]["_name"] = "benchmark_alignment_speech"
         cfg["task"]["alignment_config"] = str(Path(output).resolve() / "native-run.json")
@@ -433,6 +434,12 @@ def compare_records(paths, evaluations=None):
         raise ValueError("comparison needs a separately trained baseline and another model")
     fields = ("scientific_config", "prepared", "training_budget", "checkpoint_selection", "selection_policy", "fairseq_revision")
     differences = {key: [r[key] for r in records] for key in fields if any(r[key] != records[0][key] for r in records[1:])}
+    transfers = [r.get("transfer",{}) for r in records if r["method"] != "baseline"]
+    if transfers and any(t.get("all_layers",False) != transfers[0].get("all_layers",False) for t in transfers[1:]):
+        differences["transfer/all_layers"] = [t.get("all_layers",False) for t in transfers]
+    signatures = [t.get("artifacts",{}).get("teacher_signature") for t in transfers if t.get("prior_type","t2tt")=="t2tt"]
+    if signatures and any(s != signatures[0] for s in signatures[1:]):
+        differences["transfer/teacher_signature"] = signatures
     result = {"fair_comparison": not differences, "differences": differences,
               "models": [{"method": r["method"], "checkpoint_hash": r["checkpoint_hash"],
                            "checkpoint_updates": r["checkpoint_updates"], "training_budget": r["training_budget"]} for r in records]}
@@ -475,6 +482,7 @@ def main(argv=None):
         child.add_argument("--lambda-align", type=float, default=1.)
         child.add_argument("--smoothing", type=float, default=.05)
         child.add_argument("--resume", action="store_true")
+        child.add_argument("--all-layers", action="store_true")
     child = sub.add_parser("register-transfer")
     for field in ("run", "checkpoint", "output"):
         child.add_argument("--" + field, required=True)
@@ -521,7 +529,7 @@ def main(argv=None):
         return
     else:
         result = make_plan(args.baseline, args.output, args.method, args.prior_type, args.manifest,
-                           args.units, args.teacher, args.anneal_steps, args.beta, args.lambda_align, args.smoothing)
+                           args.units, args.teacher, args.anneal_steps, args.beta, args.lambda_align, args.smoothing, args.all_layers)
         if args.action == "train":
             result = train_native(result, args.output, args.resume)
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))

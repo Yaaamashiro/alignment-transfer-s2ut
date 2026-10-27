@@ -63,3 +63,15 @@ def alignment_kl(teacher, student, eps=1e-8, reduction="mean"):
 
 def entropy(matrix):
     return -(matrix * matrix.clamp_min(1e-8).log()).sum(-1)
+
+
+def layer_kl_sums(teacher, student):
+    if teacher.ndim != 4 or teacher.shape != student.shape:
+        raise ValueError("layer-wise KL requires matching [B,L,T,S]")
+    return torch.stack([alignment_kl(teacher[:, l], student[:, l], reduction="sum") for l in range(teacher.size(1))])
+
+
+def layer_row_counts(prior):
+    if prior.ndim != 4:
+        raise ValueError("layer-wise valid rows require [B,L,T,S]")
+    return (prior.sum(-1) > 0).sum((0, 2))

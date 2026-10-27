@@ -25,7 +25,7 @@ def yaml_file(path, value):
 
 
 @pytest.fixture
-def native_data(tmp_path):
+def native_data(tmp_path, request):
     from fairseq import options, tasks, utils
     from fairseq.dataclass.utils import convert_namespace_to_omegaconf
     from fairseq.trainer import Trainer
@@ -71,7 +71,7 @@ def native_data(tmp_path):
     argv = [str(data), "--task", "speech_to_speech", "--target-is-code", "--target-code-size", "100",
         "--criterion", "speech_to_unit", "--arch", "s2ut_transformer_fisher", "--config-yaml", "config.yaml",
         "--multitask-config-yaml", "config_multitask.yaml", "--train-subset", "train", "--valid-subset", "dev",
-        "--encoder-layers", "1", "--decoder-layers", "1", "--encoder-embed-dim", "16", "--decoder-embed-dim", "16",
+        "--encoder-layers", "1", "--decoder-layers", str(getattr(request,"param",1)), "--encoder-embed-dim", "16", "--decoder-embed-dim", "16",
         "--encoder-ffn-embed-dim", "32", "--decoder-ffn-embed-dim", "32", "--encoder-attention-heads", "2",
         "--decoder-attention-heads", "2", "--conv-channels", "32", "--dropout", "0", "--attention-dropout", "0",
         "--relu-dropout", "0", "--share-decoder-input-output-embed", "--max-target-positions", "3000",

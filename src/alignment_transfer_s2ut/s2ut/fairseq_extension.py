@@ -50,6 +50,8 @@ def verify_fairseq():
 
 
 class TransferAttention(MultiheadAttention):
+    raw_attention = None
+    guided_attention = None
     transfer_prior = None
     transfer_capture = False
     transfer_beta = 0.0

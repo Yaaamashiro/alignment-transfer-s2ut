@@ -1,5 +1,11 @@
 # Validation record — 2026-10-28
 
+全Decoder層のlayer-wise transferを追加。最終状態の全体 **249 passed, 6 skipped**（369.07秒）、native checkpoint可視化追加後の関連検査は **25 passed, 2 skipped**（110.98秒）。2層モデルでT2TT/S2UTを各1 forwardでcaptureし、層別prior・未知文字mask・FP32 NPZ・共有mappingによる`[L,U,F]`投影・memory budgetのL倍計算を確認した。旧single-layer抽出/teacherの読込・無変更resume、all-layerへの誤利用拒否、層数・scope・headsの不一致拒否も検査した。
+
+層ごとに有効row数を変え、全microbatchの層別row総数で正規化後に層平均するKLとその勾配が一括計算に一致した。native criterionでもTrainerのmain token正規化を含む損失差を実測照合。2層のstock fairseqに対しsingle/all両modeでbeta=0のlogits（atol=rtol=0）、loss、更新後parameterが厳密一致し、全層のq/kへ有限の非0勾配を確認した。native TrainerでBaseline/Distillation/Annealed Guidance/Guidanceを各2更新、beta減衰、teacher削除後の共通native生成を完走した。
+
+legacyとnativeのcheckpointから同じ層番号のteacher/raw/guidedを表示し、NPZの内容とPNGを確認した。Notebookの4条件生成・別stage・共通評価・旧single/Monotonic-only/T2TT延長との互換性も検査。新しい全層CUDA抽出parity・FP16/FP32 prior接続試験をNotebookのGPU preflightへ追加した。6 skipはCUDA 5件とWindows上のPOSIX process group 1件であり、実GPUの学習性能・VRAM・実データBLEU/研究効果は未測定。固定benchmark/fairseq pin・既存Baseline・T2TT recipe・S2UT更新budgetは変更していない。全Notebookのschema/Python/HTML、69ローカル文書リンク、CLI help、pip check、wheel内の全63 Python sourceのbyte一致も確認した。
+
 Colabの環境検査セル[10]では依存/CUDA検査が成功した後、延長学習のCPU完全一致試験3件が失敗した（223 passed）。fixtureが親processだけを `torch.set_num_threads(1)` にしており、新しい学習processに同じスレッド設定を渡していなかった。ローカルでも外部環境を `OMP_NUM_THREADS=2`・`MKL_NUM_THREADS=2` にするとsmoke/fairseqの2件で再現し、smokeのmodel parameter差は最大約3.53e-8だった。学習contractは一致していた。
 
 試験fixtureに限定して親と子のCPUスレッド数を1へ揃え、終了時に元の設定へ戻すよう修正した。新しい子processの実スレッド数も回帰試験で検査する。意図的に外部環境を2スレッドにしたまま、関連 **26 passed**（159.00秒）。`torch.equal`によるmodel/optimizer/RNGの完全一致検査は維持した。本番training/runtime/Notebookのスレッド設定・checkpoint・scientific contractは変更していない。

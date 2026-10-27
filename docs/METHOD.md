@@ -1,5 +1,14 @@
 # Method
 
+主要比較では`--all-layers`で対応層のlearned soft alignmentを転移する。
+
+\[
+A^{T2TT}_l \rightarrow A^{S2UT}_l,\qquad
+L_{align}=\frac1L\sum_{l=1}^{L}\frac{\sum_m KLsum_{m,l}}{\max(1,N_l)}.
+\]
+
+投影済みteacherを`A^T_l`、S2UTのraw Attentionを`A^S_l`とすると、各層の有効row平均を用いた`L_align = (1/L) sum_l D_KL(A^T_l || A^S_l)`に相当する。`N_l`は同じoptimizer update内の全microbatchで数えた層別有効row数。層ごとのmeanを層平均し、betaをLで割らない。以下の選択層の説明はsingle-layer互換modeを指す。[全層の実行手順](ALL_LAYER_TRANSFER.md)。
+
 T2TTとS2UTは同じ対訳pairとtrain splitから学習する。語彙もtrainのみから作成し、devは共通のcheckpoint選択、testは最終評価に使う。T2TTのパラメータをS2UTへコピーしない。
 
 T2TTのteacher-forced cross-attentionを`A_MT[T,S]`とする。最終decoder層、head平均が既定値。出力側EOS、source/target padding、未知の文字を除外する。任意のdecoder層とhead集合を指定できる。

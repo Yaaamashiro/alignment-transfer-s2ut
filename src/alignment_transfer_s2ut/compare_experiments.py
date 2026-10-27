@@ -12,7 +12,7 @@ CONTROLLED = ("backbone", "backend", "modality", "source_vocabulary", "target_vo
 def compare_experiments(roots):
     experiments = [read_json(Path(root) / "experiment.json") for root in roots]
     identities = [(e["method"], e.get("transfer", {}).get("prior_type", "t2tt")
-                   if e["method"] != "baseline" else None) for e in experiments]
+                   if e["method"] != "baseline" else None, e.get("transfer",{}).get("all_layers",False)) for e in experiments]
     if len(experiments) < 2 or len(set(identities)) != len(identities) or not any(
             e["method"] == "baseline" for e in experiments):
         raise ValueError("supply a baseline and distinct method/prior runs")
@@ -22,6 +22,8 @@ def compare_experiments(roots):
     for key in ("source_mapping", "prior_smoothing", "layer", "heads"):
         if any(t.get(key) != transfers[0].get(key) for t in transfers[1:]):
             differences["transfer/" + key] = [t.get(key) for t in transfers]
+    if transfers and any(t.get("all_layers",False)!=transfers[0].get("all_layers",False) for t in transfers[1:]):
+        differences["transfer/all_layers"]=[t.get("all_layers",False) for t in transfers]
     # Runs using the same method must also use the same schedule/loss settings.
     for method in {e["method"] for e in experiments} - {"baseline"}:
         selected = [e["transfer"] for e in experiments if e["method"] == method]
@@ -33,7 +35,7 @@ def compare_experiments(roots):
     if teacher_signatures and any(value != teacher_signatures[0] for value in teacher_signatures[1:]):
         differences["teacher_signature"] = teacher_signatures
     return {"fair_comparison": not differences, "methods": [e["method"] for e in experiments],
-            "conditions": [{"method": method, "prior_type": prior} for method, prior in identities],
+            "conditions": [{"method": method, "prior_type": prior,"all_layers":scope} for method, prior,scope in identities],
             "controlled_fields": list(CONTROLLED), "differences": differences}
 
 

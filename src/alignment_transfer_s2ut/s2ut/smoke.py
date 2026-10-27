@@ -88,16 +88,23 @@ class SmokeModel(nn.Module):
     def output_lengths(self, lengths):
         return lengths if self.modality == "text" else (lengths + 3) // 4
 
-    def decode(self, previous, encoded, prior=None, beta=0.0, layer=-1, heads=None, prior_smoothing=0.0):
+    def decode(self, previous, encoded, prior=None, beta=0.0, layer=-1, heads=None, prior_smoothing=0.0, all_layers=False):
         memory, mask, _ = encoded
         x = self.embedding(previous) * math.sqrt(self.config.decoder_embed_dim)
         x = x + positions(x.size(1), x.size(2), x.device)
         selected = layer % len(self.decoder)
+        if all_layers and prior is not None and tuple(prior.shape) != (previous.size(0),len(self.decoder),previous.size(1),memory.size(1)):
+            raise ValueError("all-layer prior must be [B,decoder_layers,T,S]")
+        raw_layers, guided_layers = [], []
         for index, block in enumerate(self.decoder):
-            x, current_raw, current_guided = block(x, memory, mask, prior if index == selected else None,
-                                                   beta if index == selected else 0, heads, prior_smoothing)
+            current_prior = (prior[:, index] if all_layers else prior) if prior is not None and (all_layers or index == selected) else None
+            x, current_raw, current_guided = block(x, memory, mask, current_prior,
+                                                   beta if all_layers or index == selected else 0, heads, prior_smoothing)
+            if all_layers:
+                raw_layers.append(current_raw)
+                guided_layers.append(current_guided)
             if index == selected:
                 raw, guided = current_raw, current_guided
-        return self.projection(self.final_norm(x)), raw, guided
+        return self.projection(self.final_norm(x)), torch.stack(raw_layers, 1) if all_layers else raw, torch.stack(guided_layers, 1) if all_layers else guided
 
     forward = NativeModel.forward

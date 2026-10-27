@@ -46,3 +46,12 @@ def project_packet(packet, encoder_length, frame_spans=None):
     return compose(packet["mt_attention"],
                    source_mapping(packet["source_spans"], float(packet["source_duration"]), encoder_length, frame_spans),
                    target_mapping(packet["target_spans"], packet["unit_spans"]))
+
+
+def project_packet_layers(packet, encoder_length, frame_spans=None):
+    layers = np.asarray(packet["mt_attention_layers"])
+    if layers.ndim != 3 or layers.shape[0] < 1:
+        raise ValueError("layer-wise MT attention must be [L,T,S]")
+    src = source_mapping(packet["source_spans"], float(packet["source_duration"]), encoder_length, frame_spans)
+    tgt = target_mapping(packet["target_spans"], packet["unit_spans"])
+    return np.stack([compose(matrix, src, tgt) for matrix in layers])

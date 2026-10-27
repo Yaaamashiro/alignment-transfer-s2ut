@@ -1,4 +1,18 @@
 # All runs in a comparison share one controlled/strong recipe and timing/smoothing.
+all_layer_distillation:
+  method: distillation
+  all_layers: true
+  lambda_align: 1.0
+all_layer_annealed_guidance:
+  method: annealed_guidance
+  all_layers: true
+  beta_start: 1.0
+  beta_end: 0.0
+  anneal_steps: 10000
+all_layer_guidance:
+  method: guidance
+  all_layers: true
+  beta: 1.0
 baseline:
   method: baseline
 distillation:

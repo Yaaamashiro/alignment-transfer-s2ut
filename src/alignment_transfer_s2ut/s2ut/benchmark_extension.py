@@ -21,7 +21,7 @@ from ..benchmark import read_record, artifact_contract
 from ..config import BackboneConfig
 from ..data.manifest import load_manifest
 from ..io import ArtifactStore, read_json, write_jsonl, read_jsonl, atomic_write
-from ..guidance.attention import alignment_kl, beta_at
+from ..guidance.attention import alignment_kl, beta_at, layer_kl_sums, layer_row_counts, entropy
 from ..training import prior_builder
 
 
@@ -53,7 +53,8 @@ class AlignmentDataset(BaseWrapperDataset):
         build = prior_builder([row], self.teacher, self.units, self.config,
             identity=self.policy["artifacts"]["manifest_hash"], backend="fairseq", device="cpu",
             feature_lengths=lengths, source_mapping="frontend", prior_type=self.policy["prior_type"],
-            teacher_signature=self.policy["artifacts"].get("teacher_signature"), manifest_hashes=True)
+            teacher_signature=self.policy["artifacts"].get("teacher_signature"), manifest_hashes=True,
+            all_layers=self.policy.get("all_layers",False))
         prior = build(encoder_lengths, item.target.size(0))[0]
         return native, prior
 
@@ -66,9 +67,11 @@ class AlignmentDataset(BaseWrapperDataset):
             entry = item[0] if isinstance(item, tuple) else item
             by_index[entry.index] = prior
         values = [by_index[int(index)] for index in native["id"]]
-        prior = torch.zeros(len(values), native["target"].size(1), max(p.size(1) for p in values))
+        all_layers = self.policy.get("all_layers",False)
+        shape = (len(values),self.config.decoder_layers,native["target"].size(1),max(p.size(-1) for p in values)) if all_layers else (len(values),native["target"].size(1),max(p.size(1) for p in values))
+        prior = torch.zeros(shape)
         for i, value in enumerate(values):
-            prior[i, :value.size(0), :value.size(1)] = value
+            prior[i, ..., :value.size(-2), :value.size(-1)] = value
         native["alignment_prior"] = prior
         return native
 
@@ -86,7 +89,7 @@ class AlignmentTask(SpeechToSpeechTask):
         record = read_record(plan["baseline_record"])
         self.transfer_policy = plan["transfer"]
         policy = self.transfer_policy
-        if artifact_contract(record, policy["manifest"], policy["units"], policy["teacher"], policy["prior_type"]) != policy["artifacts"]:
+        if artifact_contract(record, policy["manifest"], policy["units"], policy["teacher"], policy["prior_type"], policy.get("all_layers",False)) != policy["artifacts"]:
             raise ValueError("alignment artifact contract changed")
 
     def load_dataset(self, split, **kw):
@@ -100,6 +103,7 @@ class AlignmentTask(SpeechToSpeechTask):
 class BenchmarkTransferModel(AlignmentS2UT):
     transfer_context = None
     alignment_raw = None
+    alignment_guided = None
     alignment_updates = 0
 
     def set_num_updates(self, updates):
@@ -109,19 +113,29 @@ class BenchmarkTransferModel(AlignmentS2UT):
     def forward(self, src_tokens, src_lengths, prev_output_tokens, tgt_speaker=None, return_all_hiddens=False):
         if self.transfer_context is None:
             return super().forward(src_tokens, src_lengths, prev_output_tokens, tgt_speaker, return_all_hiddens)
-        prior, beta, smoothing = self.transfer_context
+        prior, beta, smoothing, all_layers = self.transfer_context
+        self.alignment_raw = self.alignment_guided = None
         encoded = self.encoder(src_tokens, src_lengths=src_lengths, tgt_speaker=tgt_speaker,
                                return_all_hiddens=return_all_hiddens)
-        if prior.size(2) != encoded["encoder_out"][0].size(0) or prior.size(1) != prev_output_tokens.size(1):
+        if prior.ndim != (4 if all_layers else 3) or prior.size(0) != prev_output_tokens.size(0) or prior.size(-1) != encoded["encoder_out"][0].size(0) or prior.size(-2) != prev_output_tokens.size(1):
             raise ValueError("prepared prior and native encoder/decoder lengths disagree")
-        adapter = self.decoder.layers[-1].encoder_attn
-        adapter.transfer_capture, adapter.transfer_prior = True, prior
-        adapter.transfer_beta, adapter.transfer_smoothing, adapter.transfer_heads = beta, smoothing, None
+        adapters = [block.encoder_attn for block in self.decoder.layers]
+        if all_layers and prior.size(1) != len(adapters):
+            raise ValueError("prior decoder layer count mismatch")
+        selected = adapters if all_layers else adapters[-1:]
+        for i,adapter in enumerate(selected):
+            adapter.raw_attention = adapter.guided_attention = None
+            adapter.transfer_capture, adapter.transfer_prior = True, prior[:,i] if all_layers else prior
+            adapter.transfer_beta, adapter.transfer_smoothing, adapter.transfer_heads = beta, smoothing, None
         try:
             output = self.decoder(prev_output_tokens, encoder_out=encoded)
-            self.alignment_raw = adapter.raw_attention
+            self.alignment_raw = torch.stack([a.raw_attention for a in selected],1) if all_layers else selected[0].raw_attention
+            same_attention = all(a.raw_attention is a.guided_attention for a in selected)
+            self.alignment_guided = self.alignment_raw if same_attention else (torch.stack([a.guided_attention for a in selected],1) if all_layers else selected[0].guided_attention)
         finally:
-            adapter.transfer_capture, adapter.transfer_prior = False, None
+            for adapter in adapters:
+                adapter.transfer_capture, adapter.transfer_prior = False, None
+                adapter.raw_attention = adapter.guided_attention = None
         if return_all_hiddens:
             output[-1]["encoder_states"] = encoded["encoder_states"]
             output[-1]["encoder_padding_mask"] = encoded["encoder_padding_mask"]
@@ -136,6 +150,7 @@ def architecture(args):
 @register_criterion("speech_to_unit_alignment", dataclass=RdropLabelSmoothedCrossEntropyCriterionConfig)
 class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
     alignment_scale = 1.
+    alignment_scales = None
 
     def forward(self, model, sample, reduce=True):
         if not model.training:
@@ -145,9 +160,22 @@ class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
             raise ValueError("alignment recipe does not support R-Drop duplication")
         policy = self.task.transfer_policy
         beta = beta_at(model.alignment_updates, policy["method"], policy["beta"], policy["beta"], 0., policy["anneal_steps"])
-        model.transfer_context = (sample["alignment_prior"].float(), beta, policy["smoothing"])
+        all_layers = policy.get("all_layers",False)
+        model.transfer_context = (sample["alignment_prior"].float(), beta, policy["smoothing"], all_layers)
         try:
             loss, size, logs = super().forward(model, sample, reduce)
+            if all_layers:
+                prior=sample["alignment_prior"]
+                sums=layer_kl_sums(prior,model.alignment_raw)
+                counts=layer_row_counts(prior)
+                scales = self.alignment_scales if self.alignment_scales is not None else size/counts.clamp_min(1)/len(counts)
+                if policy["method"]=="distillation":
+                    loss = loss + policy["lambda_align"] * (sums * scales.to(sums.device)).sum()
+                for l in range(len(sums)):
+                    logs[f"alignment_kl_sum_layer_{l}"]=sums[l].detach()
+                    logs[f"alignment_rows_layer_{l}"]=counts[l].detach()
+                logs.update(guidance_beta=beta,loss=loss.detach(),alignment_layers=len(sums))
+                return loss,size,logs
             kl_sum = alignment_kl(sample["alignment_prior"].float(), model.alignment_raw, reduction="sum")
             if policy["method"] == "distillation":
                 loss = loss + policy["lambda_align"] * kl_sum * self.alignment_scale
@@ -158,6 +186,7 @@ class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
         finally:
             model.transfer_context = None
             model.alignment_raw = None
+            model.alignment_guided = None
 
     @classmethod
     def reduce_metrics(cls, logging_outputs):
@@ -165,6 +194,16 @@ class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
         count = sum(log.get("alignment_rows", 0) for log in logging_outputs)
         if count:
             metrics.log_scalar("alignment_kl", sum(log.get("alignment_kl_sum", 0) for log in logging_outputs) / count, count)
+        layers=max((log.get("alignment_layers",0) for log in logging_outputs),default=0)
+        means=[]
+        for l in range(layers):
+            rows=sum(log.get(f"alignment_rows_layer_{l}",0) for log in logging_outputs)
+            value=sum(log.get(f"alignment_kl_sum_layer_{l}",0) for log in logging_outputs)/max(1,rows)
+            means.append(value)
+            metrics.log_scalar(f"alignment/kl_layer_{l}",value,max(1,rows))
+        if means:
+            metrics.log_scalar("alignment/kl_mean",sum(means)/layers)
+            metrics.log_scalar("alignment_kl",sum(means)/layers)
 
 
 def rng_state(model):
@@ -256,10 +295,15 @@ def trainer_hooks(contract_hash, selection_policy=None):
         def train_step(self, samples, *args, **kwargs):
             if isinstance(self.criterion, AlignmentCriterion):
                 tokens = sum(s["target"].size(0) if self.criterion.sentence_avg else s["ntokens"] for s in samples if s)
-                rows = sum(int((s["alignment_prior"].sum(-1) > 0).sum()) for s in samples if s)
-                # Native Trainer divides by total main tokens. This factor retains
-                # lambda * sum(KL) / all valid rows across accumulated microbatches.
-                self.criterion.alignment_scale = tokens / max(1, rows)
+                if self.criterion.task.transfer_policy.get("all_layers",False):
+                    layers=len(self.model.decoder.layers)
+                    rows=sum((layer_row_counts(s["alignment_prior"]).cpu() for s in samples if s),torch.zeros(layers))
+                    self.criterion.alignment_scales=tokens/rows.clamp_min(1)/layers
+                else:
+                    rows = sum(int((s["alignment_prior"].sum(-1) > 0).sum()) for s in samples if s)
+                    # Native Trainer divides by total main tokens. This factor retains
+                    # lambda * sum(KL) / all valid rows across accumulated microbatches.
+                    self.criterion.alignment_scale = tokens / max(1, rows)
             step = lambda values: super(Trainer, self).train_step(values, raise_oom=True)
             if os.environ.get("S2ST_TRAIN_STAGING"):
                 return step(samples)  # The pinned benchmark runtime owns overflow retries.
