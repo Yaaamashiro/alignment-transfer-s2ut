@@ -214,6 +214,34 @@ def test_partial_cache_detects_modified_payload(evaluation):
     assert len(calls) == 300
 
 
+def test_output_stem_cannot_overwrite_existing_dev_predictions(evaluation):
+    args, calls = evaluation
+    dev_predictions = args.dev_evaluation.with_name(args.dev_evaluation.stem + "-predictions.jsonl")
+    before = file_hash(dev_predictions)
+    # A different extension still produces exactly the dev predictions filename.
+    args.output = args.dev_evaluation.with_suffix(".jsonl")
+    with pytest.raises(ValueError, match="overlaps protected"):
+        external.evaluate(args)
+    assert not calls and file_hash(dev_predictions) == before
+
+
+def test_verify_is_read_only_never_generates_and_rechecks_dev_inputs(evaluation, monkeypatch):
+    args, calls = evaluation
+    with pytest.raises(ValueError, match="completed external evaluation required"):
+        external.evaluate(args, completed_only=True)
+    assert not calls and not args.output.parent.exists()
+    result = external.evaluate(args)
+    hashes = {p: file_hash(p) for p in args.output.parent.rglob("*") if p.is_file()}
+    monkeypatch.setattr(external, "checkpoint_model", lambda *_: pytest.fail("verification loaded model"))
+    assert external.evaluate(args, completed_only=True) == result
+    assert len(calls) == 300 and all(file_hash(p) == sha for p, sha in hashes.items())
+    dev_predictions = args.dev_evaluation.with_name(args.dev_evaluation.stem + "-predictions.jsonl")
+    dev_predictions.write_text('changed dev predictions', encoding="utf-8")
+    with pytest.raises(ValueError, match="dev evaluation must be verified"):
+        external.evaluate(args, completed_only=True)
+    assert len(calls) == 300
+
+
 def test_normalization_preserves_historical_rules(evidence):
     # Exercise the actual pinned implementation, including its apostrophe rule.
     from direct_s2st.evaluation import bleu
@@ -289,9 +317,13 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
     display_module = types.ModuleType("IPython.display")
     display_module.display = lambda frame: displays.append(frame)
     def prepare(*command, **kwargs):
-        assert command[:4] == ("python", "-m", "alignment_transfer_s2ut.evaluate_t2tt_external", "prepare")
+        assert command[:3] == ("python", "-m", "alignment_transfer_s2ut.evaluate_t2tt_external")
         validate_command(command[2], command[3:])
-        return external.prepare_fixed_set(evidence.benchmark, args.fixed_set)
+        if command[3] == "prepare":
+            return external.prepare_fixed_set(evidence.benchmark, args.fixed_set)
+        assert command[3] == "verify" and kwargs["name"] == "verify-external-text"
+        calls.append("verify")
+        return external.evaluate(args, completed_only=True)
     def run(name, module, *arguments, **kwargs):
         assert name == "t2tt-flores-fleurs" and kwargs == {"gpu": True}
         validate_command(module, arguments)
@@ -306,6 +338,60 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
         exec(source, namespace)
         assert not calls and skips[0][1] == "skipped"
         exec(source.replace("RUN_EXTERNAL_TEXT = False", "RUN_EXTERNAL_TEXT = True"), namespace)
-    assert calls == ["t2tt-flores-fleurs"]
+    assert calls == ["t2tt-flores-fleurs", "verify"]
     assert displays[0][0]["native text BLEU"] == 3.14
     assert len(displays[1]) == 10 and all("Reference EN" in row for row in displays[1])
+
+
+@pytest.mark.parametrize("backend", ["smoke", "fairseq"])
+def test_real_checkpoint_and_unmodified_generator_evaluate_all_300(evidence, backend):
+    """Synthetic finite weights; real loader, tokenizer, model and beam search."""
+    import torch
+    from alignment_transfer_s2ut import training
+    from alignment_transfer_s2ut.cli import parser_for
+    from alignment_transfer_s2ut.config import BackboneConfig
+    from alignment_transfer_s2ut.data.manifest import manifest_hash
+    from alignment_transfer_s2ut.smoke_pipeline import TINY_CONFIG
+    if backend == "fairseq":
+        pytest.importorskip("fairseq")
+    torch.set_num_threads(1)
+    config = BackboneConfig(**TINY_CONFIG["backbone"])
+    source = SPECIAL + list("日本語0123456789")
+    target = SPECIAL + list("abcde")
+    training.seed_all(7)
+    model = training.build_model(config, "text", source, target, backend)
+    norm = model.final_norm if backend == "smoke" else model.network.decoder.layer_norm
+    projection = model.projection if backend == "smoke" else model.network.decoder.output_projection
+    # Make this synthetic decoder emit EOS promptly, while running every real
+    # encoder/decoder and the same default beam-5 generator without mocks.
+    with torch.no_grad():
+        norm.weight.zero_()
+        norm.bias.fill_(1.)
+        projection.weight.fill_(-20.)
+        projection.weight[EOS].fill_(20.)
+    root = evidence.base
+    manifest_rows = [dict(pair_id=str(i), split=split, ja_text="日本語" + str(i), en_text="abcde" + str(i),
+                          ja_audio=str(root / f"not-needed-{i}-ja.wav"), en_audio=str(root / f"not-needed-{i}-en.wav"))
+                     for i, split in enumerate(("train", "dev"))]
+    manifest = root / "manifest.jsonl"
+    write_jsonl(manifest, manifest_rows)
+    checkpoint = root / "t2tt/checkpoint_best.pt"
+    checkpoint.parent.mkdir()
+    torch.save(dict(modality="text", backend=backend, step=123, backbone=config.asdict(),
+        source_vocabulary=source, target_vocabulary=target, model=model.state_dict(), recipe=dict(seed=7),
+        train_hash=manifest_hash(manifest_rows[:1]), dev_hash=manifest_hash(manifest_rows[1:])), checkpoint)
+    dev = root / "text-evaluation/dev-text.json"
+    dev_args = parser_for("evaluate_t2tt").parse_args(list(map(str, [
+        "--manifest", manifest, "--checkpoint", checkpoint, "--output", dev])))
+    external.text.evaluate_t2tt(dev_args)
+    fixed = root / "fixed-8c.json"
+    external.prepare_fixed_set(evidence.benchmark, fixed)
+    args = SimpleNamespace(fixed_set=fixed, checkpoint=checkpoint, dev_evaluation=dev,
+        output=root / "text-evaluation/external/flores-fleurs-text.json", resume=True, device="cpu")
+    result = external.evaluate(args)
+    predictions = read_jsonl(result["predictions"])
+    assert result["samples"] == len(predictions) == 300
+    assert result["checkpoint_step"] == 123 and result["eos_reached_ratio"] == 1.
+    assert all(r["hypothesis"] == "" and r["eos_reached"] for r in predictions)
+    assert result["source_unk_characters"] == 300 and result["samples_with_unk"] == 300
+    assert external.evaluate(args, completed_only=True) == result

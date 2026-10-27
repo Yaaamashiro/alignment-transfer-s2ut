@@ -147,7 +147,7 @@ def score_predictions(predictions):
             "hypothesis_tokens": score.sys_len, "reference_tokens": score.ref_len}
 
 
-def evaluate(args):
+def evaluate(args, *, completed_only=False):
     from sacrebleu import __version__ as bleu_version
     packet = read_json(args.fixed_set)
     rows = packet["samples"]
@@ -184,11 +184,21 @@ def evaluate(args):
                 "benchmark_revision": BENCHMARK_REVISION, "benchmark_bleu_hash": file_hash(inspect.getfile(bleu)),
                 "implementation_hash": file_hash(__file__), "generation_implementation_hash": file_hash(text.__file__)}
     output = Path(args.output).resolve()
-    if (output.is_relative_to(Path(packet["source_8c_root"]).resolve()) or
-            output.parent == Path(args.checkpoint).resolve().parent or
-            output == Path(args.dev_evaluation).resolve() or output == Path(args.fixed_set).resolve()):
-        raise ValueError("external evaluation output overlaps protected input directory")
-    predictions_path = output.with_name(output.stem + "-predictions.jsonl")
+    predictions_path = output.with_name(output.stem + "-predictions.jsonl").resolve()
+    cache_root = (output.parent / (output.stem + "-cache")).resolve()
+    dev_path = Path(args.dev_evaluation).resolve()
+    protected_files = (Path(args.checkpoint).resolve(), Path(args.fixed_set).resolve(), dev_path,
+                       dev_path.with_name(dev_path.stem + "-predictions.jsonl"))
+    protected_trees = (Path(packet["source_8c_root"]).resolve(), Path(args.checkpoint).resolve().parent,
+                       dev_path.parent / (dev_path.stem + "-cache"))
+    # Check ALL derived names, not only the metrics path: changing .json to
+    # .jsonl leaves the predictions/cache stem unchanged.
+    for generated_path in (output, predictions_path, cache_root):
+        if (any(generated_path == p or p.is_relative_to(generated_path) for p in protected_files) or
+                any(generated_path.is_relative_to(p) or p.is_relative_to(generated_path) for p in protected_trees)):
+            raise ValueError("external evaluation output overlaps protected input directory")
+    if completed_only and not output.is_file():
+        raise ValueError("completed external evaluation required for read-only verification")
     if args.resume and output.is_file():
         previous = read_json(output)
         if (previous.get("evaluation_contract") != contract or not predictions_path.is_file() or
@@ -201,6 +211,8 @@ def evaluate(args):
             raise ValueError("resumed BLEU differs from saved predictions")
         progress("T2TT external: reused verified completed evaluation; no generation")
         return previous
+    if completed_only:
+        raise ValueError("read-only verification requires resume of a completed evaluation")
     if not args.resume and (output.exists() or predictions_path.exists()):
         raise FileExistsError(output)
     saved = load_checkpoint(args.checkpoint)
@@ -220,7 +232,7 @@ def evaluate(args):
         unknown.update(ch for ch, token in zip(row["source_text"], tokens) if token == UNK)
         expected = {**row, "evaluation_contract_hash": digest(contract),
                     "source_unk_characters": tokens.count(UNK)}
-        cache = output.parent / (output.stem + "-cache") / (digest(row["sample_id"]) + ".json")
+        cache = cache_root / (digest(row["sample_id"]) + ".json")
         if args.resume and cache.is_file():
             record = read_json(cache)
             if (any(record.get(k) != v for k, v in expected.items()) or
@@ -269,13 +281,18 @@ def main():
     prepare.add_argument("--benchmark", required=True)
     prepare.add_argument("--source-8c", help="existing identity directory/name; required if multiple completed sets exist")
     prepare.add_argument("--output", required=True)
-    evaluation = sub.add_parser("evaluate")
-    for name in ("fixed-set", "checkpoint", "dev-evaluation", "output"):
-        evaluation.add_argument("--" + name, required=True)
-    evaluation.add_argument("--device", default="cpu")
-    evaluation.add_argument("--resume", action="store_true")
+    for action in ("evaluate", "verify"):
+        evaluation = sub.add_parser(action)
+        for name in ("fixed-set", "checkpoint", "dev-evaluation", "output"):
+            evaluation.add_argument("--" + name, required=True)
+        evaluation.add_argument("--device", default="cpu")
+        if action == "evaluate":
+            evaluation.add_argument("--resume", action="store_true")
+        else:
+            evaluation.set_defaults(resume=True)
     args = parser.parse_args()
-    result = (prepare_fixed_set(args.benchmark, args.output, args.source_8c) if args.action == "prepare" else evaluate(args))
+    result = (prepare_fixed_set(args.benchmark, args.output, args.source_8c) if args.action == "prepare" else
+              evaluate(args, completed_only=args.action == "verify"))
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
 
 

@@ -11,6 +11,8 @@
 3. 6.1.1セルの `RUN_EXTERNAL_TEXT=True` にする。保存済み8Cが複数ある場合だけ `SOURCE_8C` に既存identityのフォルダ名を指定する。
 4. このセルを実行する。固定300件の照合、生成、採点、ZIP保存、得点・固定seedの10例の表示まで行う。
 
+完了済みZIPの復元で生成stageがスキップされた場合も、表示直前に読込専用の `verify` を実行する。checkpoint・固定セット・dev評価とそのpredictionのハッシュ、外部predictionのID・ハッシュ・corpus BLEUを再照合し、変更があれば停止する。この確認は生成やファイルの更新を行わず、未完了の結果から勝手に生成を始めることもない。
+
 表示するcheckpoint stepは**選択済みbestの実際の更新数**。学習予算20,000から推測して埋めない。devと外部のcheckpoint SHAが異なる場合は停止する。
 
 ## 保存済み8Cの取得と検証
@@ -64,6 +66,8 @@ PERSISTENT/stages/t2tt-flores-fleurs/<snapshot>/
 ```
 
 既存 `run(...)` が、固定benchmark runtimeの検証付き増分ZIPでcacheと結果を保存・復元する。個別JSONを繰り返しDriveへコピーしない。`t2tt`・`t2tt-dev` のstage、既存checkpoint、Cascade/S2UT結果は変更しない。
+
+CLIで出力名を変えた場合も、metrics・prediction・cacheの全派生パスについて既存dev評価・prediction/cache・checkpoint・8C入力との重複を拒否する。たとえば `dev-text.jsonl` は、拡張子が異なっても既存devと同じprediction名になるため使えない。
 
 同じVMなら6.1.1を再実行する。新しいVMなら同じrevision・パス・設定で環境と必要な入力・既存teacher checkpoint/dev評価を復元後、6.1.1を実行する。検証済みcacheを再利用し、完了済み評価は生成しない。CLI単体の再開でも契約・predictionハッシュ・corpus BLEUの再計算を照合する。最後のZIP保存以降にVMから失われた生成分は再計算する。
 
