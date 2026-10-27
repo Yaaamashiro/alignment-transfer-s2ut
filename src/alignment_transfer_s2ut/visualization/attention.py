@@ -87,7 +87,7 @@ def visualize(args):
     heads = args.heads if args.heads is not None else transfer.get("heads")
     builder = prior_builder(selected, teacher, units, cfg, manifest_hash(rows), saved["backend"], args.device,
                             values[1], transfer.get("source_mapping", "uniform"), prior_type,
-                            transfer.get("monotonic_sigma", .1), all_layers=all_layers, layer=layer,
+                            transfer.get("monotonic_sigma", .1), all_layers=all_layers, layer=layer, heads=heads,
                             teacher_signature=transfer.get("artifacts",{}).get("teacher_signature",saved.get("teacher_signature")))
     with torch.no_grad():
         _, raw, guided, prior = model(*values[:3], builder, args.beta, layer, heads,

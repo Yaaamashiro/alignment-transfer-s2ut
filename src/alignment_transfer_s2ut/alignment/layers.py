@@ -28,6 +28,35 @@ def validate_teacher_layers(metadata, packet, decoder_layers, all_layers):
     return spec
 
 
+def validate_teacher_selection(metadata, packet, decoder_layers, all_layers=False, layer=-1, heads=None):
+    """Require corresponding layers/heads, including legacy single-layer packets.
+
+    Historical packets without selection metadata retain the documented defaults:
+    final decoder layer and all-head mean. They cannot establish another selection.
+    """
+    spec = validate_teacher_layers(metadata, packet, decoder_layers, all_layers)
+    if type(layer) is not int or not -decoder_layers <= layer < decoder_layers:
+        raise ValueError("student attention layer out of range")
+    if not spec["all_layers"]:
+        teacher_layer = spec["layer"]
+        if type(teacher_layer) is not int or not -decoder_layers <= teacher_layer < decoder_layers:
+            raise ValueError("teacher attention layer out of range; re-extract teacher attention")
+        if teacher_layer % decoder_layers != layer % decoder_layers:
+            raise ValueError("teacher/student attention layer mismatch; re-extract the matching teacher layer")
+
+    def canonical_heads(value):
+        if value is None:
+            return None
+        if (not isinstance(value, (list, tuple)) or not value or
+                any(type(h) is not int or h < 0 for h in value) or len(set(value)) != len(value)):
+            raise ValueError("invalid teacher/student attention head selection")
+        return sorted(value)
+
+    if canonical_heads(spec["heads"]) != canonical_heads(heads):
+        raise ValueError("teacher/student attention heads mismatch; use the same heads or re-extract teacher attention")
+    return spec
+
+
 def teacher_signature(metadata):
     result = {k: metadata[k] for k in ("mt_checkpoint_hash", "tokenizer_hash", "unit_config_hash", "ctc_config_hash")}
     # Preserve old single-layer signatures while incorporating extraction policy

@@ -241,6 +241,22 @@ def test_native_rejects_selected_head_teacher(native_data,all_layers):
 
 
 @pytest.mark.parametrize("native_data",[2],indirect=True)
+def test_native_rejects_single_teacher_from_another_layer(native_data):
+    from alignment_transfer_s2ut.alignment.layers import attention_spec
+    root=native_data.root;store=ArtifactStore(root/"teacher")
+    args=(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher")
+    meta,packet=store.get("0")
+    # Missing legacy metadata still means the final layer; its positive alias is equivalent.
+    b.make_plan(*args)
+    meta["layer"]=1;meta["attention_spec_hash"]=digest(attention_spec(meta))
+    store.put("0",meta,packet,overwrite=True)
+    b.make_plan(*args)
+    meta["layer"]=0;meta["attention_spec_hash"]=digest(attention_spec(meta))
+    store.put("0",meta,packet,overwrite=True)
+    with pytest.raises(ValueError,match="layer mismatch"):b.make_plan(*args)
+
+
+@pytest.mark.parametrize("native_data",[2],indirect=True)
 def test_native_scope_ablation_stays_strict_about_other_settings(native_data):
     root=native_data.root;layered_teacher(root);paths=[root/"baseline.json"]
     for scope,name in ((False,"single"),(True,"all")):

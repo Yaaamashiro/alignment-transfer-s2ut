@@ -197,6 +197,27 @@ def test_all_layer_teacher_and_legacy_training_pipeline(tmp_path,backend):
         output=tmp_path/"audit",split="dev",seed=1,max_samples=1,heatmaps=0,source_mapping="frontend",
         prior_smoothing=.05,overwrite=False,all_layers=True))
     assert len(audit["layers"])==2 and audit["compatibility_heatmap_layer"]==1
+    audit_args=Namespace(manifest=manifest,config=config,teacher=tmp_path/"teacher",units=tmp_path/"units",
+        output=tmp_path/"audit-intermediate",split="dev",seed=1,max_samples=1,heatmaps=1,source_mapping="frontend",
+        prior_smoothing=.05,overwrite=False,all_layers=False,layer=0)
+    intermediate=diagnose(audit_args)
+    assert intermediate["layer"]==0 and intermediate["heads"] is None
+    audit_meta,audit_values=ArtifactStore(audit_args.output/"heatmaps").get("2")
+    np.testing.assert_array_equal(audit_values["t2tt"],ArtifactStore(tmp_path/"teacher").get("2")[1]["mt_attention_layers"][0])
+    assert audit_meta["layer"]==0
+    assert intermediate["counts"]["valid_unit_rows"]==audit["layers"][0]["valid_unit_rows"]
+    assert intermediate["counts"]["prior_entropy_sum"]==pytest.approx(audit["layers"][0]["prior_entropy_sum"])
+    from alignment_transfer_s2ut.alignment.projection import project_packet_layers
+    from alignment_transfer_s2ut.alignment.timing import encoder_time_spans
+    _,teacher_packet=ArtifactStore(tmp_path/"teacher").get("2")
+    frames=encoder_time_spans(audit_meta["feature_frames"],audit_meta["encoder_frames"],tiny(),backend,float(teacher_packet["source_duration"]))
+    expected=project_packet_layers(teacher_packet,audit_meta["encoder_frames"],frames)
+    np.testing.assert_allclose(audit_values["projected"],expected[0],atol=1e-7,rtol=1e-6)
+    audit_args.output=tmp_path/"audit-final";audit_args.layer=-1
+    assert diagnose(audit_args)["layer"]==1
+    with pytest.raises(ValueError,match="heads mismatch"):
+        invoke("train_s2ut",*common,"--trainer","legacy","--heads",0,"--method","distillation",
+            "--teacher",tmp_path/"teacher","--units",tmp_path/"units","--output",tmp_path/"invalid-heads")
     # An old single-layer packet can be reused without adding metadata/writes.
     invoke("extract_t2tt_attention","--manifest",manifest,"--checkpoint",tmp_path/"t2tt/checkpoint_best.pt","--output",tmp_path/"old-mt")
     teacher_args=["--manifest",manifest,"--config",config,"--mt-attention",tmp_path/"old-mt","--alignment",tmp_path/"ctc","--units",tmp_path/"units","--output",tmp_path/"old-teacher"]
@@ -216,6 +237,9 @@ def test_all_layer_teacher_and_legacy_training_pipeline(tmp_path,backend):
     assert prior_builder(*params)(torch.tensor([4]),6).shape==(1,6,4)
     with pytest.raises(ValueError,match="all-layer T2TT teacher"):
         prior_builder(*params,all_layers=True)
+    with pytest.raises(ValueError,match="layer mismatch"):
+        invoke("train_s2ut",*common,"--trainer","legacy","--layer",0,"--method","distillation",
+            "--teacher",tmp_path/"old-teacher","--units",tmp_path/"units","--output",tmp_path/"invalid-layer")
     for method in ("distillation","annealed_guidance","guidance"):
         invoke("train_s2ut",*common,"--trainer","legacy","--all-layers","--method",method,"--anneal-steps",1,"--teacher",tmp_path/"teacher","--units",tmp_path/"units","--output",tmp_path/method)
         logs=[__import__('json').loads(x) for x in (tmp_path/method/"metrics.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -230,3 +254,18 @@ def test_all_layer_teacher_and_legacy_training_pipeline(tmp_path,backend):
     meta,shown=ArtifactStore(tmp_path/"single-plot").get("2")
     assert not meta["all_layers"] and meta["layer"]==0
     np.testing.assert_array_equal(shown["t2tt"],ArtifactStore(tmp_path/"teacher").get("2")[1]["mt_attention_layers"][0])
+    if backend=="smoke":
+        invoke("extract_t2tt_attention","--manifest",manifest,"--checkpoint",tmp_path/"t2tt/checkpoint_best.pt",
+            "--heads",0,"--layer",0,"--output",tmp_path/"head-mt")
+        invoke("build_teacher_alignment","--manifest",manifest,"--config",config,"--mt-attention",tmp_path/"head-mt",
+            "--alignment",tmp_path/"ctc","--units",tmp_path/"units","--output",tmp_path/"head-teacher")
+        invoke("train_s2ut",*common,"--trainer","legacy","--layer",0,"--heads",0,"--method","distillation",
+            "--teacher",tmp_path/"head-teacher","--units",tmp_path/"units","--output",tmp_path/"head-run")
+        viz=["--manifest",manifest,"--checkpoint",tmp_path/"head-run/checkpoint_best.pt","--pair-id","2",
+            "--units",tmp_path/"units","--teacher",tmp_path/"head-teacher"]
+        invoke("visualize_attention",*viz,"--output",tmp_path/"head-plot")
+        assert ArtifactStore(tmp_path/"head-plot").get("2")[0]["heads"]==[0]
+        with pytest.raises(ValueError,match="heads mismatch"):
+            invoke("visualize_attention",*viz,"--heads",1,"--output",tmp_path/"invalid-head-plot")
+        audit_args.output=tmp_path/"audit-head";audit_args.layer=0;audit_args.teacher=tmp_path/"head-teacher"
+        assert diagnose(audit_args)["heads"]==[0]

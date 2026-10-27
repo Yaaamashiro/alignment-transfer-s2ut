@@ -232,10 +232,11 @@ def artifact_contract(record, manifest, units, teacher, prior_type, all_layers=F
     if prior_type == "t2tt":
         meta, packet = ArtifactStore(teacher).get(reference["pair_id"], {"manifest_hash": manifest_hash(rows),
             "s2ut_architecture_hash": digest(result["backbone"]), "unit_config_hash": result["unit_config_hash"]})
-        from .alignment.layers import validate_teacher_layers, teacher_signature
+        from .alignment.layers import validate_teacher_layers, validate_teacher_selection, teacher_signature
         spec = validate_teacher_layers(meta, packet, result["backbone"]["decoder_layers"], all_layers)
         if spec["heads"] is not None:
             raise ValueError("native benchmark requires an all-head-mean teacher; re-extract without --heads")
+        validate_teacher_selection(meta, packet, result["backbone"]["decoder_layers"], all_layers)
         result["teacher_signature"] = teacher_signature(meta)
     return result
 

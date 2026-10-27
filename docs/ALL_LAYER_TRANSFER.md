@@ -25,6 +25,10 @@
 
 native benchmarkはteacher/studentとも全head平均を使う。`heads != None`が記録されたteacherはplan時に拒否し、`--heads`を省略した再抽出を要求する。head ablationを行うlegacy経路の選択機能は維持する。
 
+single-layer teacherを使う場合も、記録されたteacher層とstudent層の対応を検査する。`-1`と実際の最終層番号は同じ層として扱う。別層のteacherを指定すると停止し、対応層での再抽出を要求する。legacyのhead選択もteacher/studentで同じ集合を要求し、全head平均（`None`）とsubsetの混在を拒否する。層・headの記録がない旧packetは従来の最終層・全head平均として扱い、中間層やsubsetへ暗黙流用しない。既存artifactを書き換えない。
+
+単層診断は`diagnose_alignment --layer N`で学習と同じ層を指定する（既定`-1`）。全層teacherから対応層を選び、投影prior・coverage・heatmapをその層で計算し、summary/pair metadataへ層番号とteacherのhead選択を記録する。`--all-layers`と明示した`--layer`は競合する。診断自体にはstudentがいないため、headはteacherに記録された選択を使う。
+
 ## Scope ablationの比較
 
 通常の比較はscopeを固定する。層の範囲を独立変数として変える場合だけ、比較コマンドへ`--allow-scope-ablation`を指定する。比較結果に独立変数と各条件のscopeを記録する。

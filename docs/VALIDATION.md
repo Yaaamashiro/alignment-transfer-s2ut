@@ -1,5 +1,11 @@
 # Validation record — 2026-10-28
 
+追加レビューの単層teacher対応・legacy head対応・診断層指定を修正し、全suiteは **289 passed, 8 skipped**（403.32秒）。teacher/studentの単層番号を範囲検査してから正規化し、正負indexの同一層は受理、別層や不正な記録値は拒否する。legacyではhead集合の一致を要求する。記録のない旧packetは最終層・全head平均の既定で再利用でき、元artifactのhashが変わらないことも確認した。nativeはplan時と遅延データ読込時の照合を維持する。
+
+smoke/fairseq両方で不一致の学習拒否、対応層での従来学習・可視化を検査し、smokeではselected-head teacherの抽出→構築→同じheadでの学習→表示まで実行した。診断の`--layer`で選択した層のteacher・投影prior・層別entropyを直接投影した結果と照合し、summary/pair metadataへ層・headを記録する。`--all-layers --layer -1`の明示的競合も拒否する。全Notebookのschema/Python/HTML、70ローカル文書リンク、CLI help、pip check、wheel内63 Python sourceのbyte一致を確認した。
+
+8 skipはCUDA関連7件とWindows上のPOSIX 1件。実GPUのFP16学習・保存/復元・VRAMは未実行のままで、NotebookのGPU preflightで別途確認する。モデル・loss・更新予算・benchmark pin・Drive保存runtimeは変更していない。以下は過去の検証記録。
+
 全層実装へのレビュー指摘を現行コードで再現・修正した。最終全suiteは **264 passed, 8 skipped**（387.28秒）。全層teacherをsingle-layerへ使うときは指定層（負indexを含む）の配列を選び、学習・可視化の層番号を一致させる。対照的な2層行列による投影一致、元artifactのhash不変、中間層のlegacy学習・PNG/NPZ表示をsmoke/fairseq両方で検証した。
 
 nativeは全head平均を維持し、記録されたselected-head teacherをsingle/all双方のplan時に拒否する。比較の既定はscope固定のまま、`--allow-scope-ablation`を両比較CLIへ追加し、意図したscope変化を結果へ記録する。flagを付けてもmethod/prior・recipe・初期化・予算・係数・teacher等の照合は維持し、異なるteacher signatureを自動的に同一扱いにしない。legacyの異なるsingle層、nativeのfinal/all、CLI経由の出力と他設定の変更拒否を検査した。

@@ -10,7 +10,8 @@ from alignment_transfer_s2ut.compare_experiments import CONTROLLED,compare_exper
 from test_all_layers import tiny
 
 
-def test_single_prior_selects_matching_layer_from_full_teacher_without_writes(tmp_path):
+@pytest.fixture
+def teacher_inputs(tmp_path):
     units,teacher=ArtifactStore(tmp_path/"units"),ArtifactStore(tmp_path/"teacher")
     row=dict(pair_id="p",split="train",ja_text="あい",en_text="ab",ja_sha256="ja",en_sha256="en")
     units.put("p",{},dict(reduced_units=np.array([0,1]),unit_spans=np.array([[0.,.5],[.5,1.]])))
@@ -23,8 +24,13 @@ def test_single_prior_selects_matching_layer_from_full_teacher_without_writes(tm
     teacher.put("p",meta,dict(mt_attention=layers[-1],mt_attention_layers=layers,
         source_spans=np.array([[0.,.5],[.5,1.]]),target_spans=np.array([[0.,.5],[.5,1.]]),
         unit_spans=np.array([[0.,.5],[.5,1.]]),source_duration=np.array(1.)))
+    return ([row],teacher,units,tiny(),"manifest","smoke","cpu")
+
+
+def test_single_prior_selects_matching_layer_from_full_teacher_without_writes(teacher_inputs):
+    args=teacher_inputs
+    teacher=args[1]
     before=teacher.hash("p")
-    args=([row],teacher,units,tiny(),"manifest","smoke","cpu")
     full=prior_builder(*args,manifest_hashes=True,all_layers=True)(torch.tensor([2]),3)
     for layer in (0,1,-1,-2):
         single=prior_builder(*args,manifest_hashes=True,layer=layer)(torch.tensor([2]),3)
@@ -33,6 +39,75 @@ def test_single_prior_selects_matching_layer_from_full_teacher_without_writes(tm
     with pytest.raises(ValueError,match="out of range"):
         prior_builder(*args,manifest_hashes=True,layer=2)
     assert teacher.hash("p")==before
+
+
+@pytest.mark.parametrize("teacher_layer,student_layer",[(1,-1),(-1,1),(0,-2),(-2,0)])
+def test_single_teacher_layer_aliases_are_accepted(teacher_inputs,teacher_layer,student_layer):
+    from alignment_transfer_s2ut.alignment.layers import attention_spec
+    teacher=teacher_inputs[1];meta,packet=teacher.get("p")
+    for key in ("all_layers","layer_indices","decoder_layers"):meta.pop(key,None)
+    packet.pop("mt_attention_layers")
+    meta["layer"]=teacher_layer;meta["attention_spec_hash"]=digest(attention_spec(meta))
+    teacher.put("p",meta,packet,overwrite=True)
+    before=teacher.hash("p")
+    assert prior_builder(*teacher_inputs,manifest_hashes=True,layer=student_layer)(torch.tensor([2]),3).shape==(1,3,2)
+    with pytest.raises(ValueError,match="layer mismatch"):
+        prior_builder(*teacher_inputs,manifest_hashes=True,layer=(student_layer+1)%2)
+    assert teacher.hash("p")==before
+
+
+@pytest.mark.parametrize("teacher_layer",[2,-3,True,"1"])
+def test_invalid_recorded_teacher_layer_is_not_wrapped(teacher_inputs,teacher_layer):
+    from alignment_transfer_s2ut.alignment.layers import attention_spec
+    teacher=teacher_inputs[1];meta,packet=teacher.get("p")
+    meta.update(all_layers=False,layer=teacher_layer)
+    meta["attention_spec_hash"]=digest(attention_spec(meta))
+    packet.pop("mt_attention_layers")
+    teacher.put("p",meta,packet,overwrite=True)
+    with pytest.raises(ValueError,match="teacher attention layer out of range"):
+        prior_builder(*teacher_inputs,manifest_hashes=True)
+
+
+@pytest.mark.parametrize("all_layers",[False,True])
+@pytest.mark.parametrize("teacher_heads,student_heads,accepted",[
+    (None,None,True),([0],[0],True),([1,0],[0,1],True),
+    ([0],[1],False),(None,[0],False),([0],None,False),([],None,False)])
+def test_teacher_student_head_correspondence(teacher_inputs,all_layers,teacher_heads,student_heads,accepted):
+    from alignment_transfer_s2ut.alignment.layers import attention_spec
+    teacher=teacher_inputs[1];meta,packet=teacher.get("p")
+    meta.update(heads=teacher_heads,all_layers=all_layers)
+    meta["attention_spec_hash"]=digest(attention_spec(meta))
+    if not all_layers:packet.pop("mt_attention_layers")
+    teacher.put("p",meta,packet,overwrite=True)
+    if accepted:
+        prior=prior_builder(*teacher_inputs,manifest_hashes=True,all_layers=all_layers,heads=student_heads)(torch.tensor([2]),3)
+        assert prior.ndim==(4 if all_layers else 3)
+    else:
+        with pytest.raises(ValueError,match="head"):
+            prior_builder(*teacher_inputs,manifest_hashes=True,all_layers=all_layers,heads=student_heads)
+
+
+def test_legacy_unspecified_selection_keeps_only_documented_defaults(teacher_inputs):
+    teacher=teacher_inputs[1];meta,packet=teacher.get("p")
+    for key in ("all_layers","layer_indices","decoder_layers","heads","attention_spec_hash"):meta.pop(key,None)
+    packet.pop("mt_attention_layers")
+    teacher.put("p",meta,packet,overwrite=True)
+    before=teacher.hash("p")
+    prior_builder(*teacher_inputs,manifest_hashes=True)
+    with pytest.raises(ValueError,match="layer mismatch"):
+        prior_builder(*teacher_inputs,manifest_hashes=True,layer=0)
+    with pytest.raises(ValueError,match="heads mismatch"):
+        prior_builder(*teacher_inputs,manifest_hashes=True,heads=[0])
+    assert teacher.hash("p")==before
+
+
+def test_audit_layer_cli_is_explicit_and_exclusive():
+    from test_notebook_commands import validate_command
+    command=[]  # Required paths are parsed without reading them.
+    for key in ("manifest","teacher","units","config","output"):command += ["--"+key,"unused"]
+    validate_command("alignment_transfer_s2ut.diagnose_alignment",[*command,"--layer","-2"])
+    with pytest.raises(SystemExit):
+        validate_command("alignment_transfer_s2ut.diagnose_alignment",[*command,"--all-layers","--layer","-1"])
 
 
 @pytest.fixture

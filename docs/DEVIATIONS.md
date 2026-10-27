@@ -17,3 +17,5 @@
 14. **層別転移:** [全層mode](ALL_LAYER_TRANSFER.md)は対応するT2TT/S2UT層のrouting priorを1 forwardで取得・適用する。層別のglobal valid-row正規化後に層平均し、betaは層数で割らない。nativeモデルのparameter/state key・Trainer・保存レシピは維持する。Attention/teacherは独立stageへ保存し、旧single-layerを全層へ複製しない。実GPUでの効果・VRAMは未測定。
 
 15. **Scope ablationとhead制限:** single-layerで全層teacherを読むときも対応層を選び、native benchmarkでは記録されたselected-head teacherを拒否して全head平均を維持する。比較の`--allow-scope-ablation`はscopeだけを独立変数として明示する分析用optionであり、学習・resumeのcontractや他の照合を緩めない。GPU接続試験の3方式保存/復元・VRAM出力はtiny 2層用で、本番6層の実測とは区別する。
+
+16. **単層・head ablationの整合性:** 旧single-layer teacherでも対応層を検査し、legacyではteacher/studentのhead選択を照合する。記録のない旧packetは最終層・全head平均に限り互換性を維持する。診断の`--layer`は同じ層のprior/coverage/heatmapを選び、teacherのhead選択を記録する。モデル・loss・学習予算・保存runtimeは変更しない。

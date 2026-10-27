@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from .alignment.timing import encoder_time_spans, output_lengths, monotonic_prior
 from .alignment.projection import source_mapping, target_mapping
+from .alignment.layers import attention_spec, teacher_signature
 from .config import BackboneConfig
 from .data.audio import features
 from .data.manifest import load_manifest, manifest_hash
@@ -16,6 +17,10 @@ from .progress import progress
 
 def diagnose(args):
     all_layers=getattr(args,"all_layers",False)
+    layer=getattr(args,"layer",None)
+    layer=-1 if layer is None else layer
+    if all_layers and layer != -1:
+        raise ValueError("--all-layers and --layer are mutually exclusive")
     if args.max_samples < 1 or args.heatmaps < 0 or not 0 <= args.prior_smoothing <= 1:
         raise ValueError("invalid audit size, heatmap count or smoothing")
     rows = load_manifest(args.manifest)
@@ -26,25 +31,33 @@ def diagnose(args):
     indices = np.random.default_rng(args.seed).permutation(len(population))[:args.max_samples]
     selected = [population[int(i)] for i in indices]
     config = BackboneConfig.load(args.config)
+    if not -config.decoder_layers <= layer < config.decoder_layers:
+        raise ValueError("audit layer out of range")
+    selected_layer = config.decoder_layers - 1 if all_layers else layer % config.decoder_layers
     units, teacher = ArtifactStore(args.units), ArtifactStore(args.teacher)
     root = Path(args.output)
     if root.exists() and any(root.iterdir()) and not args.overwrite:
         raise FileExistsError("audit output exists; use a new directory or --overwrite")
     root.mkdir(parents=True, exist_ok=True)
     matrix_store = ArtifactStore(root / "heatmaps")
-    metrics, signatures = [], []
+    metrics, signatures, selections = [], [], []
     for index, row in enumerate(selected):
         meta, packet = teacher.get(row["pair_id"])
-        from .alignment.layers import teacher_signature
         signature = teacher_signature(meta)
         if signatures and signature != signatures[0]:
             raise ValueError("mixed teacher artifacts in audit")
         signatures.append(signature)
+        spec = attention_spec(meta)
+        if selections and spec != selections[0]:
+            raise ValueError("mixed teacher attention selections in audit")
+        selections.append(spec)
         backend = meta["backend"]
         feature_length = len(features(row["ja_audio"], backend, config.input_feat_per_channel))
         length = int(output_lengths(feature_length, config, backend))
+        # This audit inspects the teacher, without a student head selection.
+        heads = spec["heads"]
         builder = prior_builder([row], teacher, units, config, identity, backend, "cpu",
-                                [feature_length], args.source_mapping,all_layers=all_layers)
+                                [feature_length], args.source_mapping,all_layers=all_layers,layer=layer,heads=heads)
         projected = builder(torch.tensor([length]), len(packet["reduced_units"]) + 1)
         prior = projected[:,-1,:-1] if all_layers else projected[:, :-1]
         effective = smooth_prior(prior, alpha=args.prior_smoothing)
@@ -56,13 +69,14 @@ def diagnose(args):
             frames = np.stack([bounds[:-1], bounds[1:]], -1)
         src = source_mapping(packet["source_spans"], duration, length, frames)
         tgt = target_mapping(packet["target_spans"], packet["unit_spans"])
-        mt = packet["mt_attention"]
+        mt = packet["mt_attention_layers"][selected_layer] if spec["all_layers"] else packet["mt_attention"]
         src_valid = (src.sum(-1) > 0) & (mt.sum(0) > 0)
         tgt_valid = (tgt.sum(0) > 0) & (mt.sum(-1) > 0)
         valid_rows = prior[0].sum(-1) > 0
         def span_valid(spans):
             return (spans[:, 0] >= 0) & (spans[:, 1] > spans[:, 0])
         values = {"pair_id": row["pair_id"], "split": row["split"], "backend": backend,
+                  "layer": selected_layer, "heads": heads,
                   "source_tokens": len(src), "valid_source_tokens": int(src_valid.sum()),
                   "ctc_source_tokens": int(span_valid(packet["source_spans"]).sum()),
                   "target_tokens": mt.shape[0], "valid_target_tokens": int(tgt_valid.sum()),
@@ -97,6 +111,7 @@ def diagnose(args):
     summary = {"split": args.split, "population_pairs": len(population), "audited_pairs": len(selected),
                "seed": args.seed, "manifest_hash": identity, "teacher_signature": signatures[0],
                "source_mapping": args.source_mapping, "prior_smoothing": args.prior_smoothing,
+               "layer": selected_layer, "heads": heads,
                "counts": totals, "heatmaps": min(args.heatmaps, len(selected)),
                "quality_scope": "Coverage and uncertainty diagnostics; not forced-alignment accuracy or ASR CER."}
     if all_layers:
@@ -143,7 +158,9 @@ def main():
     parser.add_argument("--source-mapping", choices=["frontend", "uniform"], default="frontend")
     parser.add_argument("--prior-smoothing", type=float, default=.05)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--all-layers",action="store_true")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--all-layers",action="store_true")
+    scope.add_argument("--layer",type=int,help="Teacher decoder layer (zero-based; default -1 is final)")
     import json
     print(json.dumps(diagnose(parser.parse_args()), ensure_ascii=False))
 
