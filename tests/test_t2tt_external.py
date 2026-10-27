@@ -214,6 +214,43 @@ def test_partial_cache_detects_modified_payload(evaluation):
     assert len(calls) == 300
 
 
+@pytest.mark.parametrize("missing", ["metrics", "metrics_and_predictions", "argument"])
+def test_absent_optional_dev_metrics_does_not_block_external_evaluation(evaluation, missing):
+    args, calls = evaluation
+    dev_path = args.dev_evaluation
+    dev_predictions = dev_path.with_name(dev_path.stem + "-predictions.jsonl")
+    dev_path.unlink()
+    if missing != "metrics":
+        dev_predictions.unlink()
+    if missing == "argument":
+        args.dev_evaluation = None
+    result = external.evaluate(args)
+    assert len(calls) == 300 and result["samples"] == 300
+    assert result["generation"] == dict(beam_size=5, max_chars=1000, length_penalty=1.)
+    assert result["dev_evaluation_available"] is False
+    assert result["evaluation_contract"]["dev_evaluation_hash"] is None
+    assert not dev_path.exists()  # No implicit in-domain generation/training.
+    assert external.evaluate(args, completed_only=True) == result
+    assert external.evaluate(args) == result and len(calls) == 300
+
+
+def test_present_dev_with_missing_predictions_is_rejected(evaluation):
+    args, calls = evaluation
+    args.dev_evaluation.with_name(args.dev_evaluation.stem + "-predictions.jsonl").unlink()
+    with pytest.raises(ValueError, match="dev evaluation must be verified"):
+        external.evaluate(args)
+    assert not calls
+
+
+@pytest.mark.parametrize("payload", [None, [], {}])
+def test_invalid_present_dev_metrics_never_fall_back_to_absent(evaluation, payload):
+    args, calls = evaluation
+    write_json(args.dev_evaluation, payload, overwrite=True)
+    with pytest.raises(ValueError, match="dev evaluation"):
+        external.evaluate(args)
+    assert not calls
+
+
 def test_output_stem_cannot_overwrite_existing_dev_predictions(evaluation):
     args, calls = evaluation
     dev_predictions = args.dev_evaluation.with_name(args.dev_evaluation.stem + "-predictions.jsonl")
@@ -301,13 +338,17 @@ e.evaluate(args)
         r["sample_id"] for r in evidence.samples}
 
 
-def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev(evidence, evaluation, monkeypatch):
+@pytest.mark.parametrize("has_dev", [True, False])
+def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev(evidence, evaluation, monkeypatch, has_dev):
     import json
     import sys
     import types
     from unittest.mock import patch
     from test_notebook_commands import validate_command
     args, _ = evaluation
+    if not has_dev:
+        args.dev_evaluation.unlink()
+        args.dev_evaluation.with_name(args.dev_evaluation.stem + "-predictions.jsonl").unlink()
     notebook = json.loads((Path(__file__).resolve().parents[1] /
         "notebooks/colab/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
     source = "".join(next(c for c in notebook["cells"] if c.get("id") == "external-text-evaluate")["source"])
@@ -339,7 +380,11 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
         assert not calls and skips[0][1] == "skipped"
         exec(source.replace("RUN_EXTERNAL_TEXT = False", "RUN_EXTERNAL_TEXT = True"), namespace)
     assert calls == ["t2tt-flores-fleurs", "verify"]
-    assert displays[0][0]["native text BLEU"] == 3.14
+    if has_dev:
+        assert displays[0][0]["native text BLEU"] == 3.14
+    else:
+        assert len(displays[0]) == 1 and displays[0][0]["Dataset"] == "External FLEURS/FLORES"
+        assert any(s[0] == "in-domain-dev-comparison" and s[1] == "skipped" for s in skips)
     assert len(displays[1]) == 10 and all("Reference EN" in row for row in displays[1])
 
 

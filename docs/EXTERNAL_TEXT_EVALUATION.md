@@ -7,11 +7,13 @@
 `notebooks/colab/benchmark_comparison.ipynb` の **6.1.1 FLEURS/FLORES external text BLEU** を実行する。
 
 1. 既存の環境・Drive接続・`run(...)` helperを準備する。6.1の学習を再実行する必要はない。
-2. `ROOT/t2tt/checkpoint_best.pt` と既存の `ROOT/text-evaluation/dev-text.json`、対応するpredictions JSONLが復元済みであることを確認する。
+2. 学習済み `ROOT/t2tt/checkpoint_best.pt` が復元済みであることを確認する。`ROOT/text-evaluation/dev-text.json` は任意で、存在する場合は対応するpredictions JSONLも必要。
 3. 6.1.1セルの `RUN_EXTERNAL_TEXT=True` にする。保存済み8Cが複数ある場合だけ `SOURCE_8C` に既存identityのフォルダ名を指定する。
 4. このセルを実行する。固定300件の照合、生成、採点、ZIP保存、得点・固定seedの10例の表示まで行う。
 
-完了済みZIPの復元で生成stageがスキップされた場合も、表示直前に読込専用の `verify` を実行する。checkpoint・固定セット・dev評価とそのpredictionのハッシュ、外部predictionのID・ハッシュ・corpus BLEUを再照合し、変更があれば停止する。この確認は生成やファイルの更新を行わず、未完了の結果から勝手に生成を始めることもない。
+dev結果がない場合も、既存 `evaluate_t2tt` の固定生成・BLEU設定で外部300件の評価を行う。devを再評価したりT2TTを学習したりせず、in-domain比較だけをスキップして明示する。devが存在する場合は、壊れた結果・欠落したprediction・異なるcheckpointや設定を拒否する。
+
+完了済みZIPの復元で生成stageがスキップされた場合も、表示直前に読込専用の `verify` を実行する。checkpoint・固定セット・存在するdev評価とそのpredictionのハッシュ、外部predictionのID・ハッシュ・corpus BLEUを再照合し、変更があれば停止する。この確認は生成やファイルの更新を行わず、未完了の結果から勝手に生成を始めることもない。
 
 表示するcheckpoint stepは**選択済みbestの実際の更新数**。学習予算20,000から推測して埋めない。devと外部のcheckpoint SHAが異なる場合は停止する。
 
@@ -69,7 +71,7 @@ PERSISTENT/stages/t2tt-flores-fleurs/<snapshot>/
 
 CLIで出力名を変えた場合も、metrics・prediction・cacheの全派生パスについて既存dev評価・prediction/cache・checkpoint・8C入力との重複を拒否する。たとえば `dev-text.jsonl` は、拡張子が異なっても既存devと同じprediction名になるため使えない。
 
-同じVMなら6.1.1を再実行する。新しいVMなら同じrevision・パス・設定で環境と必要な入力・既存teacher checkpoint/dev評価を復元後、6.1.1を実行する。検証済みcacheを再利用し、完了済み評価は生成しない。CLI単体の再開でも契約・predictionハッシュ・corpus BLEUの再計算を照合する。最後のZIP保存以降にVMから失われた生成分は再計算する。
+同じVMなら6.1.1を再実行する。新しいVMなら同じrevision・パス・設定で環境と既存teacher checkpointを復元後、6.1.1を実行する。dev評価を比較に使っていた場合は同じdev結果も復元する。devの有無とハッシュも再開契約に含む。検証済みcacheを再利用し、完了済み評価は生成しない。CLI単体の再開でも契約・predictionハッシュ・corpus BLEUの再計算を照合する。最後のZIP保存以降にVMから失われた生成分は再計算する。
 
 既存学習の再開契約は全Pythonソースを束縛している。**未完了のT2TT/S2UT学習を、新しい評価コードへ更新したまま再開しない**。学習を元のrevisionで完了してから評価コードを使う。完成済みcheckpointの読込・外部評価には再学習は不要。
 

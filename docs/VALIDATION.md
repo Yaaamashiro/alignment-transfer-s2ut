@@ -1,5 +1,9 @@
 # Validation record — 2026-10-27
 
+Colabから報告された6.1.1の失敗は、固定8C 300件の取得・照合成功後に `text-evaluation/dev-text.json` がなく停止したもの。指示書ではdev結果は存在時だけ比較する任意入力だったが、実装で必須化していたため修正した。未保存のdev結果を自動生成したりT2TTを再学習したりせず、既存CLIから取得した同じbeam=5/max_chars=1000/length_penalty=1.0とnative BLEU設定で外部評価を行う。devが存在する場合のcheckpoint・metric/generation契約・predictionハッシュ検証は維持し、不完全・壊れたdev結果を「不在」として扱わない。
+
+関連 **46 passed**（62.80秒）。dev JSONだけ不在、JSON/predictionとも不在、引数省略、既存devの欠落prediction・不正JSON object拒否、devなしNotebook実行と比較skip表示、devなし完了結果の再検証・再利用を追加した。既存の参照非混入・BLEU再計算・実ZIP復元・公式fairseq/人工checkpoint各300件の生成と既存dev/Notebook互換性も通過。Notebook schema/構文/HTMLとCLI helpも確認した。今回の修正では学習・generator・保存runtime・benchmark pinは変更せず、全suiteの再実行は行っていない（直前の全suiteは174 passed/4 skipped）。実Colabでの外部BLEU値は未取得。
+
 外部テキスト評価の再点検は **174 passed, 4 skipped**（125.23秒）。CLIのmetrics出力を `dev-text.jsonl` にすると、別拡張子でも既存devと同じprediction名になり上書きできる問題を回帰テストで再現し、全派生出力と保護対象のパス照合で生成前に拒否するよう修正した。Notebookは完了済みZIPをスキップした場合も、表示直前に読込専用 `verify` でdev入力・checkpoint・固定セット・外部prediction・corpus BLEUを再検証する。未完了時には生成せず停止し、検証でモデル読込やファイル更新を行わないこと、壊れたdev predictionを拒否することを確認した。
 
 推論をstubにした既存試験に加え、有限の人工重みを保存したsmokeと公式fairseqの小型checkpointを実際のloader・tokenizer・既存beam-5 generatorで読み、各300件の外部生成・採点・検証を実行した。EOS/UNK集計と実際のcheckpoint stepも確認。これはCPU上の人工条件による配線検証であり、学習済み実teacherの翻訳性能評価ではない。`pip check`、Notebookのschema/Python/HTML、verify CLI、wheel buildと全Python source同梱も成功。T2TT/S2UT学習・Attention・既存runtime source・benchmark pinは変更していない。skipは従来通りCUDA 3件とPOSIX 1件。実データ/GPUの外部BLEU値は引き続き未測定。

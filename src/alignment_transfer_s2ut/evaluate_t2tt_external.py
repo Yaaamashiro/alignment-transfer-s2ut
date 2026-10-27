@@ -163,30 +163,37 @@ def evaluate(args, *, completed_only=False):
             raise ValueError("frozen 8C text SHA mismatch")
     if Path(args.checkpoint).name != "checkpoint_best.pt":
         raise ValueError("external evaluation requires checkpoint_best.pt")
-    dev = read_json(args.dev_evaluation)
     checkpoint_hash = file_hash(args.checkpoint)
-    if (dev.get("split") != "dev" or dev.get("checkpoint_hash") != checkpoint_hash or
-            dev.get("predictions_hash") != file_hash(Path(args.dev_evaluation).with_name(
-                Path(args.dev_evaluation).stem + "-predictions.jsonl"))):
-        raise ValueError("dev evaluation must be verified and use the same checkpoint_best.pt")
+    dev_path = (Path(args.dev_evaluation) if args.dev_evaluation else
+                Path(args.checkpoint).parent.parent / "text-evaluation/dev-text.json").resolve()
+    dev = read_json(dev_path) if dev_path.is_file() else None
+    if dev_path.is_file() and not isinstance(dev, dict):
+        raise ValueError("dev evaluation must be a valid metrics object when present")
     from .cli import parser_for
     defaults = parser_for("evaluate_t2tt")
     decoding = {k: defaults.get_default(k) for k in ("beam_size", "max_chars", "length_penalty")}
     metric = {"name": "sacrebleu", "version": bleu_version, "tokenize": "13a", "lowercase": False,
               "smooth_method": "exp", "effective_order": False}
-    if (dev.get("evaluation_contract", {}).get("decoding") != decoding or
-            dev["evaluation_contract"].get("metric") != metric or
-            dev["evaluation_contract"].get("implementation_hash") != file_hash(text.__file__)):
-        raise ValueError("dev evaluation differs from the existing default generation/BLEU settings")
+    if dev is not None:
+        dev_predictions = dev_path.with_name(dev_path.stem + "-predictions.jsonl")
+        if (dev.get("split") != "dev" or dev.get("checkpoint_hash") != checkpoint_hash or
+                not dev_predictions.is_file() or dev.get("predictions_hash") != file_hash(dev_predictions)):
+            raise ValueError("dev evaluation must be verified and use the same checkpoint_best.pt")
+        if (dev.get("evaluation_contract", {}).get("decoding") != decoding or
+                dev["evaluation_contract"].get("metric") != metric or
+                dev["evaluation_contract"].get("implementation_hash") != file_hash(text.__file__)):
+            raise ValueError("dev evaluation differs from the existing default generation/BLEU settings")
+    else:
+        progress("T2TT external: dev text metrics unavailable; using existing evaluate_t2tt defaults; dev comparison skipped")
     bleu, _ = benchmark_functions()
     contract = {"checkpoint_hash": checkpoint_hash, "fixed_set_hash": file_hash(args.fixed_set),
-                "dev_evaluation_hash": file_hash(args.dev_evaluation), "decoding": decoding, "metric": metric,
+                "dev_evaluation_hash": file_hash(dev_path) if dev is not None else None,
+                "decoding": decoding, "metric": metric,
                 "benchmark_revision": BENCHMARK_REVISION, "benchmark_bleu_hash": file_hash(inspect.getfile(bleu)),
                 "implementation_hash": file_hash(__file__), "generation_implementation_hash": file_hash(text.__file__)}
     output = Path(args.output).resolve()
     predictions_path = output.with_name(output.stem + "-predictions.jsonl").resolve()
     cache_root = (output.parent / (output.stem + "-cache")).resolve()
-    dev_path = Path(args.dev_evaluation).resolve()
     protected_files = (Path(args.checkpoint).resolve(), Path(args.fixed_set).resolve(), dev_path,
                        dev_path.with_name(dev_path.stem + "-predictions.jsonl"))
     protected_trees = (Path(packet["source_8c_root"]).resolve(), Path(args.checkpoint).resolve().parent,
@@ -259,6 +266,7 @@ def evaluate(args, *, completed_only=False):
     characters = sum(len(row["ja_text"]) for row in rows)
     samples_with_unk = sum(r["source_unk_characters"] > 0 for r in predictions)
     result = {"evaluation": "t2tt_flores_fleurs_external", "split": "external", "samples": 300,
+              "dev_evaluation_available": dev is not None,
               "checkpoint_hash": checkpoint_hash, "checkpoint_step": saved["step"], "backend": saved["backend"],
               "diagnostic_only": True, "source_8c_identity": packet["source_8c_identity"],
               "source_sample_set_hash": packet["source_sample_set_hash"], **scores,
@@ -283,8 +291,9 @@ def main():
     prepare.add_argument("--output", required=True)
     for action in ("evaluate", "verify"):
         evaluation = sub.add_parser(action)
-        for name in ("fixed-set", "checkpoint", "dev-evaluation", "output"):
+        for name in ("fixed-set", "checkpoint", "output"):
             evaluation.add_argument("--" + name, required=True)
+        evaluation.add_argument("--dev-evaluation", help="optional existing dev metrics for validation/comparison; defaults to the checkpoint run's text-evaluation/dev-text.json")
         evaluation.add_argument("--device", default="cpu")
         if action == "evaluate":
             evaluation.add_argument("--resume", action="store_true")
