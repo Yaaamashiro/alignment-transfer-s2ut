@@ -360,6 +360,10 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
     def prepare(*command, **kwargs):
         assert command[:3] == ("python", "-m", "alignment_transfer_s2ut.evaluate_t2tt_external")
         validate_command(command[2], command[3:])
+        if command[3] == "restore-inputs":
+            calls.append("restore")
+            return external.restore_inputs(evidence.base / "t2tt", evidence.base / "drive/stages/t2tt", 20000,
+                evidence.base / "drive/stages/t2tt-dev", args.dev_evaluation)
         if command[3] == "prepare":
             return external.prepare_fixed_set(evidence.benchmark, args.fixed_set)
         assert command[3] == "verify" and kwargs["name"] == "verify-external-text"
@@ -372,6 +376,7 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
         calls.append(name)
         return external.evaluate(args)
     namespace = dict(ROOT=str(evidence.base), BENCHMARK=str(evidence.benchmark), Path=Path, json=json,
+                     PERSISTENT=str(evidence.base / "drive"), T2TT_UPDATES=20000,
                      PYTHON="python", LOGS=evidence.base / "logs", execute_json=prepare, run=run,
                      log_event=lambda *a: skips.append(a))
     with patch.dict(sys.modules, {"pandas": pandas, "IPython": types.ModuleType("IPython"),
@@ -379,7 +384,7 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
         exec(source, namespace)
         assert not calls and skips[0][1] == "skipped"
         exec(source.replace("RUN_EXTERNAL_TEXT = False", "RUN_EXTERNAL_TEXT = True"), namespace)
-    assert calls == ["t2tt-flores-fleurs", "verify"]
+    assert calls == ["restore", "t2tt-flores-fleurs", "verify"]
     if has_dev:
         assert displays[0][0]["native text BLEU"] == 3.14
     else:
@@ -440,3 +445,97 @@ def test_real_checkpoint_and_unmodified_generator_evaluate_all_300(evidence, bac
     assert all(r["hypothesis"] == "" and r["eos_reached"] for r in predictions)
     assert result["source_unk_characters"] == 300 and result["samples_with_unk"] == 300
     assert external.evaluate(args, completed_only=True) == result
+
+
+@pytest.fixture
+def saved_teacher(evidence):
+    import torch
+    root = evidence.base
+    frozen = root / "frozen-training"
+    frozen.mkdir()
+    torch.save(dict(modality="text", step=19000, model=dict(weight=torch.ones(2))), frozen / "checkpoint_best.pt")
+    torch.save(dict(modality="text", step=20000, model=dict(weight=torch.ones(2))), frozen / "checkpoint_last.pt")
+    work = root / "t2tt"
+    backup = root / "drive/stages/t2tt"
+    identity = dict(work=str(work), benchmark_revision=colab_runtime.BENCHMARK_REVISION,
+        inputs={str(root / "missing-manifest.jsonl"): "a" * 64},
+        command=["python", "-m", "alignment_transfer_s2ut.train_t2tt", "--manifest", str(root / "missing-manifest.jsonl"),
+                 "--output", str(work), "--max-updates", "20000"])
+    bench = colab_runtime.runtime()
+    snapshot = bench.publish_packed(frozen, backup, identity, 20000)
+    dev_output = root / "text-evaluation/dev-text.json"
+    dev_backup = root / "drive/stages/t2tt-dev"
+    dev_frozen = root / "frozen-dev"
+    write_jsonl(dev_frozen / "dev-text-predictions.jsonl", [dict(hypothesis="test fixture only")])
+    write_json(dev_frozen / "dev-text.json", dict(checkpoint_hash=file_hash(frozen / "checkpoint_best.pt"),
+        predictions_hash=file_hash(dev_frozen / "dev-text-predictions.jsonl"), text_bleu=3.14))
+    dev_identity = dict(work=str(dev_output.parent), benchmark_revision=colab_runtime.BENCHMARK_REVISION,
+        inputs={str(work / "checkpoint_best.pt"): file_hash(frozen / "checkpoint_best.pt")},
+        command=["python", "-m", "alignment_transfer_s2ut.evaluate_t2tt", "--output", str(dev_output)])
+    write_json(dev_frozen / "stage-complete.json", dict(identity=digest(dev_identity)))
+    dev_snapshot = bench.publish_packed(dev_frozen, dev_backup, dev_identity, 1)
+    return SimpleNamespace(root=root, work=work, backup=backup, frozen=frozen, snapshot=snapshot,
+        identity=identity, dev_output=dev_output, dev_backup=dev_backup, dev_snapshot=dev_snapshot)
+
+
+def test_restore_saved_teacher_and_dev_without_training_or_clobbering_external(saved_teacher, monkeypatch):
+    saved = saved_teacher
+    monkeypatch.setattr(colab_runtime, "train_session", lambda *a, **kw: pytest.fail("restore started training"))
+    external_result = saved.dev_output.parent / "flores-fleurs/retained.json"
+    write_json(external_result, dict(retain=True))
+    write_json(saved.work / "unfinished.json", dict(retain=True))
+    before = {p: file_hash(p) for p in (saved.root / "drive").rglob("*") if p.is_file()}
+    result = external.restore_inputs(saved.work, saved.backup, 20000, saved.dev_backup, saved.dev_output)
+    assert result["checkpoint_restored"] and result["dev_restored"] and result["completed_updates"] == 20000
+    assert file_hash(saved.work / "checkpoint_best.pt") == file_hash(saved.frozen / "checkpoint_best.pt")
+    assert external.load_checkpoint(saved.work / "checkpoint_best.pt")["step"] == 19000
+    assert read_json(external_result) == dict(retain=True)
+    assert list(saved.root.glob("t2tt.interrupted-*/unfinished.json"))
+    assert read_json(saved.dev_output)["checkpoint_hash"] == file_hash(saved.work / "checkpoint_best.pt")
+    assert not (saved.root / "missing-manifest.jsonl").exists()
+    assert all(file_hash(p) == sha for p, sha in before.items())
+    second = external.restore_inputs(saved.work, saved.backup, 20000, saved.dev_backup, saved.dev_output)
+    assert not second["checkpoint_restored"] and not second["dev_restored"]
+
+
+def test_restore_requires_existing_teacher_never_starts_new_run(evidence, monkeypatch):
+    monkeypatch.setattr(colab_runtime, "train_session", lambda *a, **kw: pytest.fail("restore started training"))
+    with pytest.raises(FileNotFoundError, match="no training was started"):
+        external.restore_inputs(evidence.base / "t2tt", evidence.base / "no-backup", 20000)
+    assert not (evidence.base / "t2tt/checkpoint_best.pt").exists()
+
+
+@pytest.mark.parametrize("change", ["incomplete", "corrupt_zip", "wrong_stage", "no_best"])
+def test_restore_rejects_invalid_teacher_without_last_checkpoint_fallback(saved_teacher, change):
+    saved = saved_teacher
+    marker = saved.snapshot / "snapshot.json"
+    state = read_json(marker)
+    if change == "incomplete":
+        state["updates"] = 19900
+        write_json(marker, state, overwrite=True)
+    elif change == "corrupt_zip":
+        with (saved.snapshot / "snapshot.zip").open("ab") as stream:
+            stream.write(b"corrupt")
+    elif change == "wrong_stage":
+        state["identity"]["command"][2] = "alignment_transfer_s2ut.train_s2ut"
+        write_json(marker, state, overwrite=True)
+    else:
+        (saved.frozen / "checkpoint_best.pt").unlink()
+        state["identity"]["command"].append("--fixture-newer")
+        colab_runtime.runtime().publish_packed(saved.frozen, saved.backup, state["identity"], 20001)
+        # Keep the expected complete budget, but publish no best checkpoint.
+        newer = max(saved.backup.glob("*/snapshot.json"))
+        new_state = read_json(newer)
+        new_state["updates"] = 20000
+        write_json(newer, new_state, overwrite=True)
+    with pytest.raises(ValueError):
+        external.restore_inputs(saved.work, saved.backup, 20000)
+    assert not (saved.work / "checkpoint_best.pt").exists()
+
+
+def test_restore_does_not_overwrite_different_local_dev_report(saved_teacher):
+    saved = saved_teacher
+    write_json(saved.dev_output, dict(existing="different"))
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        external.restore_inputs(saved.work, saved.backup, 20000, saved.dev_backup, saved.dev_output)
+    assert read_json(saved.dev_output) == dict(existing="different")

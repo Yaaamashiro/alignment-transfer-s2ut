@@ -1,5 +1,9 @@
 # Validation record — 2026-10-27
 
+新しいVMの6.1.1で `t2tt/checkpoint_best.pt` が欠落していたため、外部評価セルへ保存済み入力の復元を追加した。**189 passed, 4 skipped**（136.14秒）。`restore-inputs` は固定benchmarkの `latest/restore` で既存ZIPを検証し、同じrun path・T2TT stage・完了済み予算・bestの存在を確認して復元する。trainerやgeneratorは起動せず、best欠落をlastで代用しない。元manifest/音声の再取得も不要。devは同じcheckpointの完了済み最終packからmetrics/predictionだけを検証してVMへ復元し、外部評価の親フォルダや異なるローカル結果を置き換えない。
+
+実benchmark ZIPを使う7件の追加試験で、19k best/20k完了の区別、未公開ローカルファイルと外部結果の保持、Driveバックアップのbytes不変、再実行時の再復元なし、保存なし・未完了・破損ZIP・異なるstage・bestなし・異なるローカルdevの拒否を確認した。Notebookの復元→外部評価→読込専用検証の配線も既存のCLI parserに通した。Notebook schema/Python/HTML、CLI help、`pip check`も成功。T2TT/S2UT学習・Attention・既存保存runtime source・benchmark pinは変更していない。CUDA 3件とPOSIX 1件は引き続きローカル未実行であり、利用者の実モデルでの外部BLEU値は未取得。
+
 Colabから報告された6.1.1の失敗は、固定8C 300件の取得・照合成功後に `text-evaluation/dev-text.json` がなく停止したもの。指示書ではdev結果は存在時だけ比較する任意入力だったが、実装で必須化していたため修正した。未保存のdev結果を自動生成したりT2TTを再学習したりせず、既存CLIから取得した同じbeam=5/max_chars=1000/length_penalty=1.0とnative BLEU設定で外部評価を行う。devが存在する場合のcheckpoint・metric/generation契約・predictionハッシュ検証は維持し、不完全・壊れたdev結果を「不在」として扱わない。
 
 関連 **46 passed**（62.80秒）。dev JSONだけ不在、JSON/predictionとも不在、引数省略、既存devの欠落prediction・不正JSON object拒否、devなしNotebook実行と比較skip表示、devなし完了結果の再検証・再利用を追加した。既存の参照非混入・BLEU再計算・実ZIP復元・公式fairseq/人工checkpoint各300件の生成と既存dev/Notebook互換性も通過。Notebook schema/構文/HTMLとCLI helpも確認した。今回の修正では学習・generator・保存runtime・benchmark pinは変更せず、全suiteの再実行は行っていない（直前の全suiteは174 passed/4 skipped）。実Colabでの外部BLEU値は未取得。

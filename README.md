@@ -74,7 +74,7 @@ smokeは人工データで4条件の学習からteacher削除後の推論まで�
 
 ### T2TTの外部評価
 
-比較ノートブックの **6.1.1 FLEURS/FLORES external text BLEU** で、学習済み `checkpoint_best.pt` を以前のCascade/S2UTと同じ保存済み8C 300件で評価できる。`RUN_EXTERNAL_TEXT=True` にすると、devと同じnative BLEU、benchmark正規化BLEU、未知文字率、生成例を表示する。再学習・新しい300件の選択・音声取得は行わない。[固定セットの確認・保存・再開](docs/EXTERNAL_TEXT_EVALUATION.md)
+比較ノートブックの **6.1.1 FLEURS/FLORES external text BLEU** で、学習済み `checkpoint_best.pt` を以前のCascade/S2UTと同じ保存済み8C 300件で評価できる。VMにbestがなければ完了済みT2TT ZIPから復元し、保存済みdev結果もあれば復元する。`RUN_EXTERNAL_TEXT=True` にすると、devと同じnative BLEU、benchmark正規化BLEU、未知文字率、生成例を表示する。再学習・新しい300件の選択・音声取得は行わない。[固定セットの確認・保存・再開](docs/EXTERNAL_TEXT_EVALUATION.md)
 
 ## CLIとデータ
 

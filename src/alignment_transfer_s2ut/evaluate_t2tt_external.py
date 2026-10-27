@@ -9,12 +9,13 @@ import hashlib
 import inspect
 import json
 from pathlib import Path
+import tempfile
 
 import torch
 
-from .colab_runtime import runtime, BENCHMARK_REVISION
+from .colab_runtime import runtime, session_paths, BENCHMARK_REVISION
 from .evaluation import text
-from .io import digest, file_hash, read_json, read_jsonl, write_json, write_jsonl
+from .io import atomic_write, digest, file_hash, read_json, read_jsonl, write_json, write_jsonl
 from .progress import progress
 from .tokenization.character import CharacterTokenizer, UNK
 from .training import load_checkpoint, checkpoint_model
@@ -24,6 +25,89 @@ FIELDS = ("sample_id", "flores_id", "flores_split", "fleurs_id", "fleurs_split",
           "ja_text", "en_reference", "ja_text_sha256", "en_text_sha256")
 MISSING = ("No completed saved 8C FLORES/FLEURS 300-sample identity found. "
            "Run/recover the existing benchmark external evaluation first.")
+
+
+def saved_snapshot(backup, work, module, output):
+    """Use the pinned verifier without launching a trainer or requiring audio."""
+    bench = runtime()
+    markers = sorted(Path(backup).glob("*/snapshot.json"), reverse=True)
+    if not markers:
+        return None
+    state = read_json(markers[0])
+    identity = state.get("identity", {})
+    command = identity.get("command", [])
+    if (identity.get("benchmark_revision") != BENCHMARK_REVISION or identity.get("work") != str(work) or
+            module not in command or "--output" not in command or
+            command[command.index("--output") + 1] != str(output) or state.get("storage") != "zip-v1"):
+        raise ValueError("saved stage identity/path differs from the requested T2TT evaluation inputs")
+    snapshot = bench.latest(backup, identity)
+    if snapshot is None:
+        raise ValueError("no verified ZIP snapshot; refusing to generate or train replacement inputs")
+    return snapshot
+
+
+def restore_inputs(work, backup, expected_updates, dev_backup=None, dev_output=None):
+    """Restore existing teacher/dev artifacts only. This function cannot train."""
+    if expected_updates < 1:
+        raise ValueError("positive expected T2TT update budget required")
+    bench = runtime()
+    work, backup = session_paths(work, backup)
+    best = work / "checkpoint_best.pt"
+    result = {"checkpoint": str(best), "checkpoint_restored": False, "dev_restored": False}
+    if best.is_file():
+        progress("T2TT external: using existing local checkpoint_best.pt")
+    else:
+        snapshot = saved_snapshot(backup, work, "alignment_transfer_s2ut.train_t2tt", work)
+        if snapshot is None:
+            raise FileNotFoundError("No saved T2TT checkpoint_best.pt/ZIP found at " + str(backup) +
+                                    ". Recover the existing T2TT experiment; no training was started.")
+        state = snapshot[1]
+        command = state["identity"]["command"]
+        if (state["updates"] != expected_updates or "--max-updates" not in command or
+                int(command[command.index("--max-updates") + 1]) != expected_updates):
+            raise ValueError("saved T2TT training is not complete at the requested budget; no training was started")
+        if not {"checkpoint_best.pt", "checkpoint_last.pt"} <= state["files"].keys():
+            raise ValueError("saved T2TT snapshot lacks checkpoint_best.pt; checkpoint_last is never substituted")
+        bench.restore(snapshot, work)  # Preserves incomplete local work in .interrupted-*.
+        selected = load_checkpoint(best)
+        if selected.get("modality") != "text" or not 0 < int(selected.get("step", 0)) <= expected_updates:
+            raise ValueError("restored best checkpoint is not a compatible T2TT checkpoint")
+        del selected
+        result.update(checkpoint_restored=True, completed_updates=state["updates"], snapshot=str(snapshot[0]))
+        progress("T2TT external: restored verified existing T2TT checkpoint; no training")
+    if dev_backup is None:
+        return result
+    dev_output = Path(dev_output or work.parent / "text-evaluation/dev-text.json").resolve()
+    dev_predictions = dev_output.with_name(dev_output.stem + "-predictions.jsonl")
+    if dev_output.is_file() and dev_predictions.is_file():
+        progress("T2TT external: using existing local dev text metrics")
+        return result
+    dev_work, dev_backup = session_paths(dev_output.parent, dev_backup)
+    snapshot = saved_snapshot(dev_backup, dev_work, "alignment_transfer_s2ut.evaluate_t2tt", dev_output)
+    required = {dev_output.name, dev_predictions.name, "stage-complete.json"}
+    if snapshot is None or not required <= snapshot[1]["files"].keys():
+        progress("T2TT external: no completed saved dev report; optional dev comparison skipped")
+        return result
+    identity = snapshot[1]["identity"]
+    if identity.get("inputs", {}).get(str(best)) != file_hash(best):
+        raise ValueError("saved dev report belongs to a different T2TT checkpoint")
+    # Dev snapshots are incremental. The completed final pack contains the two
+    # report files; avoid replacing their parent, which also holds external work.
+    with tempfile.TemporaryDirectory(dir=work.parent, prefix=".external-dev-restore-") as temp:
+        restored = Path(temp) / "files"
+        bench.restore(snapshot, restored)
+        if read_json(restored / "stage-complete.json").get("identity") != digest(identity):
+            raise ValueError("saved dev completion marker does not match the evaluation identity")
+        for target in (dev_predictions, dev_output):
+            if target.exists() and file_hash(target) != snapshot[1]["files"][target.name]:
+                raise ValueError("local dev report differs from saved report; refusing to overwrite")
+        for target in (dev_predictions, dev_output):
+            if not target.exists():
+                data = (restored / target.name).read_bytes()
+                atomic_write(target, lambda stream, data=data: stream.write(data))
+    result["dev_restored"] = True
+    progress("T2TT external: restored verified existing dev report; no dev generation")
+    return result
 
 
 def indexed(rows):
@@ -285,6 +369,12 @@ def evaluate(args, *, completed_only=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
+    restore = sub.add_parser("restore-inputs")
+    restore.add_argument("--work", required=True)
+    restore.add_argument("--backup", required=True)
+    restore.add_argument("--expected-updates", required=True, type=int)
+    restore.add_argument("--dev-backup")
+    restore.add_argument("--dev-output")
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--benchmark", required=True)
     prepare.add_argument("--source-8c", help="existing identity directory/name; required if multiple completed sets exist")
@@ -300,8 +390,12 @@ def main():
         else:
             evaluation.set_defaults(resume=True)
     args = parser.parse_args()
-    result = (prepare_fixed_set(args.benchmark, args.output, args.source_8c) if args.action == "prepare" else
-              evaluate(args, completed_only=args.action == "verify"))
+    if args.action == "restore-inputs":
+        result = restore_inputs(args.work, args.backup, args.expected_updates, args.dev_backup, args.dev_output)
+    elif args.action == "prepare":
+        result = prepare_fixed_set(args.benchmark, args.output, args.source_8c)
+    else:
+        result = evaluate(args, completed_only=args.action == "verify")
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
 
 

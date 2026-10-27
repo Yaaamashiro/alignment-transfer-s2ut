@@ -7,9 +7,13 @@
 `notebooks/colab/benchmark_comparison.ipynb` の **6.1.1 FLEURS/FLORES external text BLEU** を実行する。
 
 1. 既存の環境・Drive接続・`run(...)` helperを準備する。6.1の学習を再実行する必要はない。
-2. 学習済み `ROOT/t2tt/checkpoint_best.pt` が復元済みであることを確認する。`ROOT/text-evaluation/dev-text.json` は任意で、存在する場合は対応するpredictions JSONLも必要。
+2. `ROOT`・`PERSISTENT`・`T2TT_UPDATES` を学習時と同じ値にする。VMにbest checkpointがなければ、6.1.1が `PERSISTENT/stages/t2tt` の学習完了済みZIPから復元する。
 3. 6.1.1セルの `RUN_EXTERNAL_TEXT=True` にする。保存済み8Cが複数ある場合だけ `SOURCE_8C` に既存identityのフォルダ名を指定する。
 4. このセルを実行する。固定300件の照合、生成、採点、ZIP保存、得点・固定seedの10例の表示まで行う。
+
+最初に `restore-inputs` が固定benchmarkの `latest/restore` でZIP・member checksumを検証する。保存先・T2TT stage・固定benchmark revision・設定した更新予算の完了を照合し、**保存済み `checkpoint_best.pt` だけを評価に使用**する。既存のローカルbestは差し替えず、不完全なローカル学習ディレクトリは元runtimeの `.interrupted-*` 保持で残す。保存済みmodelがない・ZIPが壊れている・学習が未完了・bestが含まれない場合、学習やlast checkpointへの代替を行わず停止する。音声・元manifestの復元は不要。
+
+`PERSISTENT/stages/t2tt-dev` に完了済みdev結果があれば、同じbest checkpointの評価であることを確認してmetricsとpredictionを復元する。増分ZIPの最終packから必要な2ファイルだけをローカルへ戻し、外部評価用サブディレクトリを含む親フォルダは置き換えない。異なるローカルdev結果は上書きしない。devの再生成は行わない。
 
 dev結果がない場合も、既存 `evaluate_t2tt` の固定生成・BLEU設定で外部300件の評価を行う。devを再評価したりT2TTを学習したりせず、in-domain比較だけをスキップして明示する。devが存在する場合は、壊れた結果・欠落したprediction・異なるcheckpointや設定を拒否する。
 
@@ -71,15 +75,20 @@ PERSISTENT/stages/t2tt-flores-fleurs/<snapshot>/
 
 CLIで出力名を変えた場合も、metrics・prediction・cacheの全派生パスについて既存dev評価・prediction/cache・checkpoint・8C入力との重複を拒否する。たとえば `dev-text.jsonl` は、拡張子が異なっても既存devと同じprediction名になるため使えない。
 
-同じVMなら6.1.1を再実行する。新しいVMなら同じrevision・パス・設定で環境と既存teacher checkpointを復元後、6.1.1を実行する。dev評価を比較に使っていた場合は同じdev結果も復元する。devの有無とハッシュも再開契約に含む。検証済みcacheを再利用し、完了済み評価は生成しない。CLI単体の再開でも契約・predictionハッシュ・corpus BLEUの再計算を照合する。最後のZIP保存以降にVMから失われた生成分は再計算する。
+同じVMなら6.1.1を再実行する。新しいVMなら同じrevision・パス・設定でセクション1・2の環境とDrive接続を準備後、6.1.1を実行する。必要なbestと保存済みdev結果は冒頭で復元する。devの有無とハッシュも再開契約に含む。検証済みcacheを再利用し、完了済み評価は生成しない。CLI単体の再開でも契約・predictionハッシュ・corpus BLEUの再計算を照合する。最後のZIP保存以降にVMから失われた生成分は再計算する。
 
 既存学習の再開契約は全Pythonソースを束縛している。**未完了のT2TT/S2UT学習を、新しい評価コードへ更新したまま再開しない**。学習を元のrevisionで完了してから評価コードを使う。完成済みcheckpointの読込・外部評価には再学習は不要。
 
 ## CLI
 
-固定benchmark runtimeを導入済みの環境で、2コマンドを順に実行する。
+固定benchmark runtimeを導入済みの環境で、保存済み入力の復元・固定セット取得・評価の順に実行する。
 
 ```bash
+python -m alignment_transfer_s2ut.evaluate_t2tt_external restore-inputs \
+  --work /local/work/t2tt --backup /drive/experiment/stages/t2tt \
+  --expected-updates 20000 --dev-backup /drive/experiment/stages/t2tt-dev \
+  --dev-output /local/work/text-evaluation/dev-text.json
+
 python -m alignment_transfer_s2ut.evaluate_t2tt_external prepare \
   --benchmark /path/to/benchmark-experiment \
   --output /local/work/external-text-input/fixed-8c.json
