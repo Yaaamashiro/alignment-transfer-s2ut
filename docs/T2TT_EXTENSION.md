@@ -89,6 +89,25 @@ sourceコードファイル・model/loss/optimizer処理は変更しない。que
 
 `T2TT_CHECKPOINT = T2TT_ACTIVE_ROOT / 'checkpoint_best.pt'` がdev・外部評価・Attentionの唯一の参照元。teacher作成とS2UTも選択中のAttention/teacher directoryを参照する。extended teacherを使うS2UT結果は `annealed-t2tt-200k` へ分離する。
 
+## 学習中のlossとDrive用サマリー
+
+延長を起動した親processが、VMローカルの`metrics.jsonl`を1秒ごとに追記読み込みする。100 updatesごと、または新しいdev測定があれば、`[T2TT loss]`としてtrain loss・LR・最新dev lossとその測定update・観測済みbestを標準エラーへ出す。通常のprocess loggerがNotebookへ表示して`.log`へ保存する。開始時と終了時にも最新行を表示し、書込み途中のJSONL行は次の読込みまで待つ。これは未保存の更新を含むローカル観測であり、durable progressの代用にはしない。
+
+各full ZIPを固定benchmark実装で公開・検証した後、そのsnapshot directoryへ`metrics-summary.json`を1回保存する。材料は学習が更新している原本ではなく、そのZIP用にfreezeしてcheckpoint updateまでtrimしたローカルコピー。snapshot ZIP SHA・metrics SHA・best checkpoint SHA・contract・durable updateで対応付ける。最新train/dev、dev測定update、実際のbest checkpoint step/loss、履歴を含める。
+
+履歴は最大2000個の実測点。validation点は1000個以下ならすべて保持し、残りにtrainの観測点を均等抽出する。それを超えるvalidationも間引く。平均・補間・loss値の推定は行わず、全履歴は従来どおりZIP内の`metrics.jsonl`に残す。Driveへの細かな連続書込みは追加しない。サマリー作成・保存の失敗は警告し、公開済みcheckpointを失敗扱いにしない。retentionは同じsnapshotに対応するサマリーだけを併せて整理する。
+
+```text
+PERSISTENT/stages/t2tt-200k/<update>-<id>/
+  snapshot.json
+  snapshot.zip
+  metrics-summary.json
+```
+
+サマリーは診断用で、復旧の根拠は引き続き検証済みZIP/receipt。親processの監視だけで元の学習source・worker control hash・scientific contractを変更しない。保存済み旧control scriptのrunでも通常の延長再開時から利用できる。完了済みstageを再確認するときも、サマリーがなければ復元済みローカル履歴から作り、checkpointを再学習しない。
+
+すでに動いているprocessにはコード更新が自動反映されない。loss表示のためだけに停止する必要はない。今すぐ数値を見るにはColabのファイル欄から`ROOT/t2tt-200k/metrics.jsonl`をダウンロードし、次の通常再開時に更新したNotebookを使う。実行中セルがあると別のコードセルは待機するため、並行セルの実行を手順にしない。
+
 ## 再開
 
 同じrevision・設定・入力パスでNotebookを再実行する。`t2tt-200k` 自身にverified snapshotがあれば、source stageを読み直さず、そこからlastを復元して続ける。必要な元implementationも保存したrevision/hashで再構築する。完了済み200kではoptimizer更新を再実行しない。

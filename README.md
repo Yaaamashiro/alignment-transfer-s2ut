@@ -37,6 +37,8 @@ T2TT層lのlearned soft alignmentをS2UT層lへ転移する。[全層転移の�
 
 S2UTの学習スイッチがすべてFalseでも、既定の`RUN_T2TT_EXTENSION=True`では**T2TT 20k→200k延長**を実行する。Attentionは評価確認後の明示スイッチまで停止し、S2UT本学習は開始しない。延長の元データ・architecture・optimizer・LR/warmup・batch・RNG・best選択を保ち、20kをread-onlyで保持する。[延長と再開の手順](docs/T2TT_EXTENSION.md)
 
+延長中のtrain/dev lossとLRはNotebookの`[T2TT loss]`ログで確認できる。Driveの各検証済みsnapshotには`metrics-summary.json`も保存し、大きなZIPを取得せず履歴を読める。すでに実行中の旧processには自動反映されず、次の通常再開から適用する。
+
 200kを評価するだけなら`RUN_T2TT_EXTENSION=False`、`USE_EXTENDED_T2TT=True`。20kを選ぶ場合は`USE_EXTENDED_T2TT=False`にし、直下の保存先セルも再実行する。ASR-BLEUを測る場合は、最初から`GENERATE_WAVEFORMS=True`と`ASR_BLEU=True`を指定する。
 
 音声ZIPが未準備なら、CPUで`PREPARE_AUDIO_PACKS=True`にして入力準備まで実行し、GPUへ切り替えてFalseへ戻す。作業・checkpoint・pair artifactはVMへ保存し、固定revisionのbenchmark runtimeで検証付きZIPをDriveへ保存する。切断後は同じコードrevision・設定・保存先で上から再実行する。[保存・再開の詳細](docs/COLAB_RUNTIME.md)

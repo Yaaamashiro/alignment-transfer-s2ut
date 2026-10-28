@@ -235,16 +235,23 @@ def prune_target(backup, identity, keep_last, milestones):
         if update in milestones:
             continue
         try:
+            names = {p.name for p in directory.iterdir()}
             if (directory.is_symlink() or directory.resolve().parent != backup or
-                    {p.name for p in directory.iterdir()} != {"snapshot.zip", "snapshot.json"} or
+                    names not in ({"snapshot.zip", "snapshot.json"}, {"snapshot.zip", "snapshot.json", "metrics-summary.json"}) or
                     any(p.is_symlink() for p in directory.iterdir())):
                 progress("extension retention: retained unexpected directory " + str(directory))
                 continue
+            if "metrics-summary.json" in names:
+                from alignment_transfer_s2ut.training_metrics import owned_summary
+                if not owned_summary(directory / "metrics-summary.json", read_json(directory / "snapshot.json")):
+                    progress("extension retention: retained unrecognized metrics summary " + str(directory))
+                    continue
+                (directory / "metrics-summary.json").unlink()
             (directory / "snapshot.zip").unlink()
             (directory / "snapshot.json").unlink()
             directory.rmdir()
             progress("extension retention: removed old non-milestone snapshot " + str(update))
-        except OSError as error:
+        except (OSError, ValueError, KeyError, TypeError) as error:
             progress("extension retention: cleanup failed; verified new snapshot is retained: " + str(error))
 
 
@@ -407,6 +414,8 @@ def extend_train_session(source_work, source_backup, work, backup, manifest, con
     def publish(files, destination, run_identity, updates):
         trim_frozen_metrics(Path(files) / "metrics.jsonl", updates)
         published = c.runtime().publish_packed(files, destination, run_identity, updates)
+        from alignment_transfer_s2ut.training_metrics import publish_summary
+        publish_summary(files, published, run_identity, updates)
         prune_target(destination, run_identity, keep_last, milestones)
         return published
     with extension_recovery_files():
@@ -417,6 +426,9 @@ def extend_train_session(source_work, source_backup, work, backup, manifest, con
                 freeze_files(work, work / "checkpoint_last.pt", frozen)
                 publish(frozen, backup, identity, source_updates)
         if last["step"] >= target_updates:
+            from alignment_transfer_s2ut.training_metrics import publish_summary
+            if target is not None:
+                publish_summary(work, target[0], identity, last["step"])
             return dict(status="COMPLETE", durable_updates=last["step"], lineage=str(work / "extension-lineage.json"))
         config_run = dict(kind="tt2", checkpoint="checkpoint_last.pt", resume_args=[],
             command=[target_command[0], str(control), "_worker", "--plan", str(work / "extension-plan.json")],
@@ -425,8 +437,10 @@ def extend_train_session(source_work, source_backup, work, backup, manifest, con
             import subprocess
             env = dict(env, PYTHONPATH=runtime_path + os.pathsep + os.environ.get("PYTHONPATH", ""))
             return subprocess.Popen(arguments, env=env)
-        return run_continuous(config_run, work=work, backup=backup, identity=identity, completed=last["step"],
-            total=target_updates, seconds=0, inspect_checkpoint=c.inspect_checkpoint, publish=publish, popen=launch)
+        from alignment_transfer_s2ut.training_metrics import live_metrics
+        with live_metrics(work):
+            return run_continuous(config_run, work=work, backup=backup, identity=identity, completed=last["step"],
+                total=target_updates, seconds=0, inspect_checkpoint=c.inspect_checkpoint, publish=publish, popen=launch)
 
 
 def report(work, output):

@@ -19,3 +19,5 @@
 15. **Scope ablationとhead制限:** single-layerで全層teacherを読むときも対応層を選び、native benchmarkでは記録されたselected-head teacherを拒否して全head平均を維持する。比較の`--allow-scope-ablation`はscopeだけを独立変数として明示する分析用optionであり、学習・resumeのcontractや他の照合を緩めない。GPU接続試験の3方式保存/復元・VRAM出力はtiny 2層用で、本番6層の実測とは区別する。
 
 16. **単層・head ablationの整合性:** 旧single-layer teacherでも対応層を検査し、legacyではteacher/studentのhead選択を照合する。記録のない旧packetは最終層・全head平均に限り互換性を維持する。診断の`--layer`は同じ層のprior/coverage/heatmapを選び、teacherのhead選択を記録する。モデル・loss・学習予算・保存runtimeは変更しない。
+
+17. **T2TT lossの観測:** 延長の親processだけでローカルmetricsを追記読みし、実lossを既存loggerへ出す。verified ZIP公開後にfreeze済みmetricsとbest checkpointから小さなサマリーを添付する。元trainer/control・科学的設定・snapshot頻度は維持する。サマリーは診断用で、ZIP/receiptによる復旧や本学習の成否を置き換えない。
