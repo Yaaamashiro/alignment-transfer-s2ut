@@ -13,6 +13,16 @@ class Tokenizer(ABC):
     @abstractmethod
     def encode(self, text): ...
 
+    @abstractmethod
+    def decode(self, indices): ...
+
+    @abstractmethod
+    def encode_with_spans(self, text): ...
+
+    @property
+    @abstractmethod
+    def fingerprint(self): ...
+
 
 class CharacterTokenizer(Tokenizer):
     def __init__(self, vocabulary):
@@ -36,6 +46,9 @@ class CharacterTokenizer(Tokenizer):
 
     def encode(self, text):
         return [self.indices.get(c, UNK) for c in self.tokenize(text)]
+
+    def encode_with_spans(self, text):
+        return [(token, i, i + 1) for i, token in enumerate(self.encode(text))]
 
     def decode(self, indices):
         return "".join(" " if self.vocabulary[i] == "<space>" else self.vocabulary[i]

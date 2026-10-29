@@ -21,3 +21,5 @@
 16. **単層・head ablationの整合性:** 旧single-layer teacherでも対応層を検査し、legacyではteacher/studentのhead選択を照合する。記録のない旧packetは最終層・全head平均に限り互換性を維持する。診断の`--layer`は同じ層のprior/coverage/heatmapを選び、teacherのhead選択を記録する。モデル・loss・学習予算・保存runtimeは変更しない。
 
 17. **T2TT lossの観測:** 延長の親processだけでローカルmetricsを追記読みし、実lossを既存loggerへ出す。verified ZIP公開後にfreeze済みmetricsとbest checkpointから小さなサマリーを添付する。元trainer/control・科学的設定・snapshot頻度は維持する。サマリーは診断用で、ZIP/receiptによる復旧や本学習の成否を置き換えない。
+
+18. **Tokenizer比較:** [SentencePiece T2TT](SENTENCEPIECE.md)はtrain-onlyの日英別Unigram/identity/8000目標。Transformer backbone・学習/評価条件・データ・CTC/unit/S2UTを維持し、語彙に依存するembedding/projection行数と系列長だけが変わる。元characterをseedせず独立stageで0から学習する。元codepoint spanを保存してCTC文字時刻をsubwordへ集約し、投影式は維持する。held-out UNKの完全round-tripは保証せず、元位置を検査・未知文字数を報告する。literal U+2581/NULは暗黙変換やデータ除外をせず停止する。実GPU200k・実コーパスの語彙数/長さ・性能は未測定。

@@ -147,12 +147,14 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
         expected = {"split": row["split"], "manifest_hash": identity,
                     "text_hash": digest([row["ja_text"], row["en_text"]])}
         mt_meta, mt = mt_store.get(pair, expected)
+        from .tokenization.alignment import attention_token_spans, aggregate_ctc_spans
+        src_token_spans, tgt_token_spans, token_meta = attention_token_spans(mt_meta, mt, row["ja_text"], row["en_text"])
         from .alignment.layers import attention_spec
         spec = attention_spec(mt_meta)
         if ("attention_layers" in mt) != spec["all_layers"]:
             raise ValueError("attention layer payload and extraction specification disagree")
         if spec["all_layers"]:
-            if spec["decoder_layers"] != config.decoder_layers or mt["attention_layers"].shape != (config.decoder_layers, len(row["en_text"]), len(row["ja_text"])):
+            if spec["decoder_layers"] != config.decoder_layers or mt["attention_layers"].shape != (config.decoder_layers, len(tgt_token_spans), len(src_token_spans)):
                 raise ValueError("T2TT / S2UT decoder layer count or attention dimensions mismatch")
             if not np.array_equal(mt["attention"], mt["attention_layers"][-1]):
                 raise ValueError("compatibility attention must match the final layer")
@@ -169,8 +171,6 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
         for meta in (source_meta, target_meta, units_meta):
             if meta["ja_audio_hash"] != file_hash(row["ja_audio"]) or meta["en_audio_hash"] != file_hash(row["en_audio"]):
                 raise ValueError("stale speech artifact")
-        if mt["attention"].shape != (len(row["en_text"]), len(row["ja_text"])):
-            raise ValueError("attention dimensions differ from original codepoints")
         if mt_meta["mt_architecture_hash"] != architecture_hash:
             raise ValueError("T2TT / S2UT architecture mismatch")
         if source["spans"].shape != (len(row["ja_text"]), 2) or target["spans"].shape != (len(row["en_text"]), 2):
@@ -184,17 +184,22 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
                 "ctc_config_hash": digest(acoustic_identity[:2]),
                 "unit_config_hash": units_meta["unit_config_hash"],
                 "units_hash": file_hash(units_store.path(pair)), "backend": mt_meta["backend"],
-                **spec, "attention_spec_hash": digest(spec)}
+                **spec, "attention_spec_hash": digest(spec), **token_meta}
         arrays = {"mt_attention_layers": mt["attention_layers"]} if spec["all_layers"] else {}
+        src_spans, tgt_spans = source["spans"], target["spans"]
+        if token_meta:
+            src_spans, tgt_spans = aggregate_ctc_spans(src_spans,src_token_spans), aggregate_ctc_spans(tgt_spans,tgt_token_spans)
+            arrays.update(source_token_spans=src_token_spans,target_token_spans=tgt_token_spans,
+                          source_codepoint_spans=source["spans"],target_codepoint_spans=target["spans"])
         expected_meta = meta
         if resume and output_store.path(pair).is_file():
             old_meta, old_packet = output_store.get(pair)
             if "attention_spec_hash" not in old_meta:
-                if spec != dict(all_layers=False, layer=-1, heads=None) or not np.array_equal(old_packet["mt_attention"],mt["attention"]):
+                if token_meta or spec != dict(all_layers=False, layer=-1, heads=None) or not np.array_equal(old_packet["mt_attention"],mt["attention"]):
                     raise ValueError("legacy teacher cannot prove the requested attention extraction specification")
                 expected_meta = {k:v for k,v in meta.items() if k not in {*spec,"attention_spec_hash"}}
         if not existing(output_store, row, expected_meta, resume):
-            output_store.put(pair, meta, {"mt_attention": mt["attention"], "source_spans": source["spans"],
-                             "target_spans": target["spans"], "source_duration": source["duration"],
+            output_store.put(pair, meta, {"mt_attention": mt["attention"], "source_spans": src_spans,
+                             "target_spans": tgt_spans, "source_duration": source["duration"],
                              "unit_spans": units["unit_spans"], "reduced_units": units["reduced_units"], **arrays}, overwrite)
         progress("teacher packet", index + 1, len(rows))

@@ -137,8 +137,8 @@ def _plot(matrices, pair_id, path, overwrite):
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
     for axis, (name, matrix) in zip(axes.flat, matrices.items()):
         heatmap = axis.imshow(matrix, aspect="auto", interpolation="nearest", vmin=0, vmax=1)
-        axis.set(title=name, xlabel="Source character" if name == "t2tt" else "Acoustic encoder position",
-                 ylabel="Target character" if name == "t2tt" else "Reduced target unit")
+        axis.set(title=name, xlabel="Source text token" if name == "t2tt" else "Acoustic encoder position",
+                 ylabel="Target text token" if name == "t2tt" else "Reduced target unit")
         axis.xaxis.set_major_locator(MaxNLocator(integer=True))
         axis.yaxis.set_major_locator(MaxNLocator(integer=True))
     fig.colorbar(heatmap, ax=axes.ravel().tolist(), label="Probability")

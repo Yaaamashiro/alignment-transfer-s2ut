@@ -39,6 +39,8 @@ S2UTの学習スイッチがすべてFalseでも、既定の`RUN_T2TT_EXTENSION=
 
 延長中のtrain/dev lossとLRはNotebookの`[T2TT loss]`ログで確認できる。Driveの各検証済みsnapshotには`metrics-summary.json`も保存し、大きなZIPを取得せず履歴を読める。すでに実行中の旧processには自動反映されず、次の通常再開から適用する。
 
+SentencePiece版の比較は`T2TT_TOKENIZER='sentencepiece'`を選び、6.1a-Sから独立stageの`t2tt-spm-200k`を0から学習する。trainだけから日英別Unigram・各8000目標・identityで語彙を作り、同じdev/固定300件で評価する。characterの保存先とモデルを保持し、SPM teacherは別に生成する。[SentencePiece実験の手順](docs/SENTENCEPIECE.md)
+
 200kを評価するだけなら`RUN_T2TT_EXTENSION=False`、`USE_EXTENDED_T2TT=True`。20kを選ぶ場合は`USE_EXTENDED_T2TT=False`にし、直下の保存先セルも再実行する。ASR-BLEUを測る場合は、最初から`GENERATE_WAVEFORMS=True`と`ASR_BLEU=True`を指定する。
 
 音声ZIPが未準備なら、CPUで`PREPARE_AUDIO_PACKS=True`にして入力準備まで実行し、GPUへ切り替えてFalseへ戻す。作業・checkpoint・pair artifactはVMへ保存し、固定revisionのbenchmark runtimeで検証付きZIPをDriveへ保存する。切断後は同じコードrevision・設定・保存先で上から再実行する。[保存・再開の詳細](docs/COLAB_RUNTIME.md)

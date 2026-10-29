@@ -6,6 +6,7 @@ from ..data.manifest import load_manifest, manifest_hash
 from ..io import digest, file_hash, read_json, write_json, write_jsonl
 from ..progress import progress
 from ..tokenization.character import CharacterTokenizer, PAD, BOS, EOS
+from ..tokenization.factory import tokenizers_from_checkpoint
 from ..training import load_checkpoint, checkpoint_model
 
 
@@ -80,8 +81,7 @@ def evaluate_t2tt(args):
         return previous
     if not args.resume and not args.overwrite and (output.exists() or predictions_path.exists()):
         raise FileExistsError(output)
-    source = CharacterTokenizer(saved["source_vocabulary"])
-    target = CharacterTokenizer(saved["target_vocabulary"])
+    source, target = tokenizers_from_checkpoint(saved)
     model, predictions = None, []
     for index, row in enumerate(rows):
         cache = output.parent / (output.stem + "-cache") / (digest(row["pair_id"]) + ".json")

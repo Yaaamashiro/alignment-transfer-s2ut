@@ -179,6 +179,9 @@ def verify_state(work, expected_step=None):
                        "target_vocabulary", "recipe", "auxiliary", "train_hash", "dev_hash", "method", "transfer",
                        "teacher_signature", "unit_config_hash")
     contract = {key: last[key] for key in contract_fields}
+    if "tokenizers" in last:
+        contract["tokenizers"] = last["tokenizers"]
+        contract_fields = (*contract_fields, "tokenizers")
     experiment = read_json(work / "experiment.json")
     if (digest(contract) != last["contract_hash"] or best["contract_hash"] != last["contract_hash"] or
             digest({k: best[k] for k in contract_fields}) != last["contract_hash"] or
@@ -450,7 +453,7 @@ def report(work, output):
     if not rows or rows[-1]["step"] != last["step"]:
         gaps.append({"checkpoint_step": last["step"], "last_metric_step": rows[-1]["step"] if rows else None})
     result = dict(updates=last["step"], rows=len(rows), continuity_warnings=gaps,
-                  milestones=read_json(work / "extension-milestones.json"))
+                  milestones=read_json(work / "extension-milestones.json") if (work / "extension-milestones.json").is_file() else {})
     output.mkdir(parents=True, exist_ok=True)
     write_json(output / "learning-curve.json", result, overwrite=True)
     import matplotlib
@@ -460,7 +463,8 @@ def report(work, output):
     for axis, field in zip(axes, ("train/main_loss", "dev/main_loss", "train/learning_rate")):
         selected = [r for r in rows if field in r]
         axis.plot([r["step"] for r in selected], [r[field] for r in selected])
-        axis.axvline(read_json(work / "extension-lineage.json")["source_updates"], color="gray", linestyle="--")
+        if (work / "extension-lineage.json").is_file():
+            axis.axvline(read_json(work / "extension-lineage.json")["source_updates"], color="gray", linestyle="--")
         axis.set_ylabel(field)
     axes[-1].set_xlabel("optimizer update")
     figure.tight_layout(); figure.savefig(output / "learning-curve.png"); plt.close(figure)

@@ -70,6 +70,11 @@ def parser_for(stage):
         parser.add_argument("--prior-smoothing", type=float, default=0.05)
         parser.add_argument("--source-mapping", choices=["frontend", "uniform"], default="frontend")
         parser.add_argument("--monotonic-sigma", type=float, default=0.1)
+    if stage == "train_t2tt":
+        parser.add_argument("--tokenizer", choices=["character", "sentencepiece"], default="character")
+        parser.add_argument("--source-vocab-size", type=int, default=8000)
+        parser.add_argument("--target-vocab-size", type=int, default=8000)
+        parser.add_argument("--sentencepiece-model-type", choices=["unigram"], default="unigram")
     if stage == "train_s2ut":
         parser.add_argument("--trainer", choices=["fairseq", "legacy"], default="fairseq",
                             help="native benchmark-matched training is the research default")

@@ -13,6 +13,7 @@ from .data.audio import features
 from .data.manifest import load_manifest, manifest_hash
 from .io import ArtifactStore, atomic_write, digest, file_hash, write_json
 from .tokenization.character import CharacterTokenizer, PAD, EOS
+from .tokenization.factory import fit_tokenizers, tokenizers_from_checkpoint, tokenizer_metadata, save_diagnostics
 from .s2ut.model import build_model
 from .guidance.attention import alignment_kl, beta_at, entropy, layer_kl_sums, layer_row_counts
 from .alignment.projection import project_packet, project_packet_layers
@@ -43,6 +44,8 @@ def load_checkpoint(path, device="cpu"):
 
 
 def checkpoint_model(checkpoint, device="cpu"):
+    if checkpoint["modality"] == "text":
+        tokenizers_from_checkpoint(checkpoint)  # Validate embedded models/vocabulary before loading weights.
     config = BackboneConfig(**checkpoint["backbone"])
     seed_all(checkpoint["recipe"]["seed"])
     model = build_model(config, checkpoint["modality"], checkpoint["source_vocabulary"],
@@ -141,6 +144,9 @@ def prior_builder(rows, store, units_store, config, identity, backend, device,
         if consistent is not None and signature != consistent:
             raise ValueError("mixed teacher artifacts")
         spec = validate_teacher_selection(meta, packet, config.decoder_layers, all_layers, layer, heads)
+        if any(k in meta for k in ("tokenizer_type","source_tokenizer_spec","target_tokenizer_spec","source_tokenizer_hash","target_tokenizer_hash")) or any(k in packet for k in ("source_token_spans","target_token_spans")):
+            from .tokenization.alignment import attention_token_spans
+            attention_token_spans(meta,packet,row["ja_text"],row["en_text"],"mt_attention")
         if not all_layers and spec["all_layers"]:
             packet = {**packet, "mt_attention": packet["mt_attention_layers"][layer]}
         consistent = signature
@@ -211,8 +217,7 @@ def train(args, modality):
     if not train_rows or not dev_rows:
         raise ValueError("both train and dev splits are required; test cannot be used for selection")
     identity = manifest_hash(rows)
-    source_tokenizer = CharacterTokenizer.fit(rows, "ja_text")
-    target_tokenizer = CharacterTokenizer.fit(rows, "en_text")
+    source_tokenizer, target_tokenizer = fit_tokenizers(rows, args, modality)
     if (args.loader_workers < 0 or args.prefetch_batches < 1 or not math.isfinite(args.cache_gb) or
             not math.isfinite(args.cache_reserve_gb) or args.cache_gb <= 0 or args.cache_reserve_gb < 0):
         raise ValueError("invalid input worker, prefetch or cache settings")
@@ -273,7 +278,8 @@ def train(args, modality):
                 "recipe": recipe, "auxiliary": auxiliary,
                 "train_hash": manifest_hash(train_rows), "dev_hash": manifest_hash(dev_rows),
                 "method": method, "transfer": transfer, "teacher_signature": teacher_signature,
-                "unit_config_hash": unit_config_hash}
+                "unit_config_hash": unit_config_hash,
+                **(tokenizer_metadata(source_tokenizer, target_tokenizer) if modality == "text" else {})}
     input_pipeline = {key: getattr(args, key) for key in
                       ("loader_workers", "prefetch_batches", "cache_dir", "cache_gb", "cache_reserve_gb", "pin_memory")}
     root = Path(args.output)
@@ -303,6 +309,8 @@ def train(args, modality):
         torch.set_rng_state(saved["torch_rng"])
         if torch.cuda.is_available() and saved["cuda_rng"] is not None:
             torch.cuda.set_rng_state_all(saved["cuda_rng"])
+    if modality == "text":
+        save_diagnostics(root, rows, source_tokenizer, target_tokenizer)
     write_json(root / "experiment.json", {**contract, "input_pipeline": input_pipeline, "contract_hash": digest(contract),
                "initialization_hash": initial_hash, "checkpoint_selection": "dev/main_loss with beta=0",
                "planned_max_updates": args.max_updates}, overwrite=args.resume or args.overwrite)
@@ -536,8 +544,7 @@ def extract_attention(args):
     if saved["train_hash"] != manifest_hash([r for r in rows if r["split"] == "train"]):
         raise ValueError("T2TT training pairs differ from the S2UT train split")
     identity = manifest_hash(rows)
-    source = CharacterTokenizer(saved["source_vocabulary"])
-    target = CharacterTokenizer(saved["target_vocabulary"])
+    source, target = tokenizers_from_checkpoint(saved)
     model = checkpoint_model(saved, args.device).eval()
     if not -saved["backbone"]["decoder_layers"] <= args.layer < saved["backbone"]["decoder_layers"]:
         raise ValueError("alignment layer out of range")
@@ -552,6 +559,11 @@ def extract_attention(args):
                 "mt_checkpoint_hash": checkpoint_hash, "mt_architecture_hash": digest(saved["backbone"]),
                 "tokenizer_hash": digest([source.fingerprint, target.fingerprint]), "layer": args.layer,
                 "heads": args.heads, "teacher_forcing": True, "training_split": "train"}
+    subwords = "tokenizers" in saved
+    if subwords:
+        common.update(tokenizer_type="sentencepiece", source_tokenizer_hash=source.fingerprint,
+                      target_tokenizer_hash=target.fingerprint, source_tokenizer_spec=source.spec, target_tokenizer_spec=target.spec,
+                      token_span_unit="unicode-codepoint")
     if all_layers:
         common.pop("layer")
         common.update(all_layers=True, decoder_layers=layer_factor, layer_indices=list(range(layer_factor)))
@@ -590,12 +602,16 @@ def extract_attention(args):
         unchanged_checkpoint()
         forwards += 1
         for index, (row, meta) in enumerate(pending):
-            matrix = matrices[index, ..., :len(row["en_text"]), :len(row["ja_text"])]
+            src_tokens, tgt_tokens = source.encode_with_spans(row["ja_text"]), target.encode_with_spans(row["en_text"])
+            matrix = matrices[index, ..., :len(tgt_tokens), :len(src_tokens)]
             # Held-out codepoints outside the train vocabulary remain invalid.
             src_valid = np.asarray(source.encode(row["ja_text"])) != 3
             tgt_valid = np.asarray(target.encode(row["en_text"])) != 3
             matrix = matrix * tgt_valid[:, None] * src_valid[None, :]
             arrays = {"attention_layers": matrix, "attention": matrix[-1]} if all_layers else {"attention": matrix}
+            if subwords:
+                arrays.update(source_token_spans=np.array([p[1:] for p in src_tokens], dtype=np.int64).reshape(-1,2),
+                              target_token_spans=np.array([p[1:] for p in tgt_tokens], dtype=np.int64).reshape(-1,2))
             details = dict(attention_shape=list(matrix.shape), attention_dtype=str(matrix.dtype), decoder_layers=saved["backbone"]["decoder_layers"], all_layers=all_layers)
             store.put(row["pair_id"], {**meta, **details}, arrays, args.overwrite)
             completed += 1
@@ -614,13 +630,19 @@ def extract_attention(args):
             cached_meta, cached = store.verify_for_resume(row["pair_id"], meta)
             if cached_meta.get("all_layers", False) != all_layers:
                 raise ValueError("attention all_layers scope differs on resume")
-            if all_layers and cached["attention_layers"].shape != (layer_factor, len(row["en_text"]), len(row["ja_text"])):
+            expected_shape = (len(target.encode(row["en_text"])), len(source.encode(row["ja_text"])))
+            if cached["attention"].shape != expected_shape or all_layers and cached["attention_layers"].shape != (layer_factor, *expected_shape):
                 raise ValueError("invalid all-layer attention shape on resume")
+            if subwords:
+                for key, tokenizer, field in (("source_token_spans",source,"ja_text"),("target_token_spans",target,"en_text")):
+                    expected_spans=np.array([p[1:] for p in tokenizer.encode_with_spans(row[field])],dtype=np.int64).reshape(-1,2)
+                    if key not in cached or not np.array_equal(cached[key],expected_spans):
+                        raise ValueError("SentencePiece token spans changed on resume")
             completed += 1
             reused += 1
             report()
             continue
-        src_len, tgt_len = len(row["ja_text"]), len(row["en_text"]) + 1
+        src_len, tgt_len = len(source.encode(row["ja_text"])), len(target.encode(row["en_text"])) + 1
         if src_len + tgt_len > max_tokens or layer_factor * src_len * tgt_len > max_cells:
             raise ValueError("pair exceeds attention batch budget: " + row["pair_id"] +
                              "; increase --max-tokens/--max-attention-cells")

@@ -154,8 +154,8 @@ def publish_summary(files, snapshot, identity, updates):
                 if source in row:
                     point[target] = row[source]
             history.append(point)
-        lineage = read_json(files / "extension-lineage.json")
-        plan = read_json(files / "extension-plan.json")
+        lineage = read_json(files / "extension-lineage.json") if (files / "extension-lineage.json").is_file() else {"source_updates":0}
+        plan = read_json(files / "extension-plan.json") if (files / "extension-plan.json").is_file() else {"target_updates":read_json(files / "experiment.json")["planned_max_updates"]}
         result = dict(kind=KIND, schema_version=1, current_update=updates, durable_update=updates,
             source_updates=lineage["source_updates"], target_updates=plan["target_updates"],
             latest_train_update=rows[-1]["step"], latest_train_loss=rows[-1].get("train/main_loss"),

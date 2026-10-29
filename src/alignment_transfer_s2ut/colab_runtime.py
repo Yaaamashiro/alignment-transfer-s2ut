@@ -18,7 +18,8 @@ from .io import digest, file_hash, read_json, write_json
 from .progress import progress
 
 BENCHMARK_REVISION = "4361e55a99c7f4ea3a00c5c138f6820c34a07d06"
-EXTRA_RECOVERY = ("native-run.json", "native-dev.jsonl", "checkpoint_best.pt", "experiment.json", "metrics.jsonl")
+EXTRA_RECOVERY = ("native-run.json", "native-dev.jsonl", "checkpoint_best.pt", "experiment.json", "metrics.jsonl",
+                  "tokenization.json", "tokenizers/ja.model", "tokenizers/ja.vocab", "tokenizers/en.model", "tokenizers/en.vocab")
 
 
 @lru_cache(maxsize=1)
@@ -190,7 +191,7 @@ def identity_for(command, output):
             "benchmark_revision": BENCHMARK_REVISION}
 
 
-def train_session(command, work, backup):
+def train_session(command, work, backup, *, popen=None, publish=None):
     bench = runtime()
     from direct_s2st.session_runtime import run_continuous
     work, backup = session_paths(work, backup)
@@ -233,7 +234,8 @@ def train_session(command, work, backup):
     os.environ.setdefault("S2ST_BACKUP_MAX_GB", "1024")
     with recovery_files():
         return run_continuous(config, work=work, backup=backup, identity=identity, completed=completed,
-                              total=total, seconds=0, inspect_checkpoint=inspect_checkpoint, publish=bench.publish_packed)
+                              total=total, seconds=0, inspect_checkpoint=inspect_checkpoint, publish=publish or bench.publish_packed,
+                              **({"popen":popen} if popen is not None else {}))
 
 
 def stage_session(command, work, backup, interval=600):

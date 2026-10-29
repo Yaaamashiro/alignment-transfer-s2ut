@@ -45,7 +45,7 @@ def inspect_environment(native=False, benchmark=False, cuda=False):
                             ("PyYAML", "yaml"), ("soundfile", "soundfile"), ("scipy", "scipy"),
                             ("filelock", "filelock"), ("transformers", "transformers"),
                             ("joblib", "joblib"), ("scikit-learn", "sklearn"),
-                            ("sentencepiece", "sentencepiece"), ("sacrebleu", "sacrebleu"),
+                            ("sentencepiece", "sentencepiece"), ("protobuf", "google.protobuf"), ("sacrebleu", "sacrebleu"),
                             ("matplotlib", "matplotlib")):
         def load(package=package, module=module):
             importlib.import_module(module)

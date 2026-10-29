@@ -1,4 +1,16 @@
-# Validation record — 2026-10-28
+# Validation record — 2026-10-29
+
+SentencePiece Unigram対応後の全suiteは **314 passed, 8 skipped**（421.75秒）。日英別train-only・固定入力順・1 thread・identity・空白保持・特殊ID・serialized model/hash・原codepoint span・UTF-8 byte offset変換を検査した。全角/結合文字/emoji/tab/LF/CR/複数空白/特殊token風の原文もround-tripし、held-out文字は語彙へ追加せずUNKとして元位置を保持した。SentencePieceのimmutable piece viewのowner lifetimeも回帰試験で保護する。
+
+最終確認でbestだけが残ったcharacter stageの保護も追加し、SPM全関連 **19 passed**（34.89秒）。last/bestどちらだけが残っていても、新SPMへの移動・上書き前に拒否する。Notebookの表示配線更新後は関連 **25 passed**（11.53秒）。全suiteの314件はその保護追加前、19件/25件は最終変更に対する関連検査の結果であり、合算して全suite件数にはしない。
+
+smokeと固定fairseq小型モデルで、SPM新規学習→同一tokenizer再開→dev生成/BLEU→single/all-layer抽出→文字CTCのsubword時刻集約→teacher prior→legacy S2UTまで実行した。native fairseqのdataset/criterion/backwardにもsubword teacherを通した。旧characterの評価・抽出・artifact無変更resumeと通常/延長保存の既存試験も成功。語彙変更・非identityモデル・asset hash変更・character/SPM混入・characterからのresume/上書きを拒否する。
+
+固定300件評価は実際の固定benchmark loader/正規化/BLEUを使用し、neural生成だけを小型fixtureで置換してSPM復元とcodepoint OOV集計を検査した。原文長別BLEU・4-gram反復・empty/unique出力の診断を追加し、既存native/normalized corpus BLEUの条件は維持した。SPM fresh runtimeで検証付きZIPを2更新で中断→VM消失を想定して復元→4更新し、連続4更新とmodel/optimizer/RNG/epoch/cursor/contractがbit一致した。tokenizer model/vocab/診断も復旧し、完了済みcheckpointを再学習しない。
+
+Colabのcharacter/SPM・20k/200k・single/all-layerの保存先/CLI/完了gateを検査。全Notebook schema/Python/HTML、74ローカル文書リンク、pip check、wheel全68 Python sourceのbyte一致も確認した。protobuf 4.25.3を追加してmodel内部設定を検証し、環境preflightへ含めた。8 skipはCUDA 7件とWindows上のPOSIX 1件。実GPUのSPM200k学習・実コーパス8000語彙生成/系列長・本評価のBLEUは未測定。
+
+人工2 train/1 dev pair（語彙要求は日英各96）の実測はsource vocabulary=24、target=19。train平均は日本語21 codepoints→13 tokens、英語21→15。devは各1未知codepointを検出し、exact round-tripができないことを明示した。これらは小型接続試験の値で、実コーパスの8000語彙実験の値ではない。本実験の値は新runの`tokenization.json`で確認する。以下は過去の検証記録。
 
 T2TT延長のloss監視・snapshot sidecarを追加し、延長・新監視・Notebook/loggerの関連検査は **56 passed**（266.56秒）。親processだけでローカルJSONLの完全な追記行を読み、train/devの測定updateを区別して出力する。書込み途中の行・監視エラー・終了時の最終出力とthread終了を確認した。小型の実verified ZIPへ添えたJSONを元のmetrics/checkpointと照合し、履歴上限・実dev値保持・source hash不変・改変したmetricsの拒否・summary保存失敗後のverified checkpoint保持・サマリー付きretentionを検査した。
 

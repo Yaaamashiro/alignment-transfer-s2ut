@@ -18,6 +18,7 @@ from .evaluation import text
 from .io import atomic_write, digest, file_hash, read_json, read_jsonl, write_json, write_jsonl
 from .progress import progress
 from .tokenization.character import CharacterTokenizer, UNK
+from .tokenization.factory import tokenizers_from_checkpoint
 from .training import load_checkpoint, checkpoint_model
 
 PURPOSE = "external_flores_fleurs_diagnostic_not_formal_benchmark"
@@ -225,7 +226,24 @@ def score_predictions(predictions):
         sentence = BLEU(tokenize="13a", lowercase=False, smooth_method="exp", effective_order=True)
         row["sentence_bleu"] = sentence.sentence_score(row["hypothesis"], [row["reference"]]).score
         row["benchmark_normalized_sentence_bleu"] = benchmark_bleu.sentence_bleu(hyp, ref)
-    return {"text_bleu": score.score,
+    diagnostics = {}
+    if all("source_text" in row for row in predictions):
+        buckets = []
+        for minimum, maximum in ((0,20),(20,40),(40,80),(80,None)):
+            selected = [r for r in predictions if len(r["source_text"]) >= minimum and (maximum is None or len(r["source_text"]) < maximum)]
+            hypotheses_bin = [r["hypothesis"] for r in selected]; references_bin = [r["reference"] for r in selected]
+            buckets.append(dict(min_source_codepoints=minimum,max_source_codepoints_exclusive=maximum,samples=len(selected),
+                text_bleu=native.corpus_score(hypotheses_bin,[references_bin]).score if selected else None,
+                benchmark_normalized_bleu=benchmark_bleu.corpus_bleu(list(map(benchmark_bleu.normalize_english,hypotheses_bin)),list(map(benchmark_bleu.normalize_english,references_bin))) if selected else None))
+        repetitions = []
+        for hypothesis in hypotheses:
+            words = hypothesis.split(); grams = [tuple(words[i:i+4]) for i in range(max(0,len(words)-3))]
+            repetitions.append((len(grams)-len(set(grams)))/max(1,len(grams)))
+        diagnostics = dict(source_length_bleu=buckets,generation_diagnostics=dict(
+            empty_hypotheses=sum(not h.strip() for h in hypotheses),unique_hypotheses=len(set(hypotheses)),
+            mean_repeated_fourgram_ratio=sum(repetitions)/max(1,len(repetitions)),
+            hypotheses_with_fourgram_repeat_ratio_at_least_half=sum(r>=.5 for r in repetitions)))
+    return {"text_bleu": score.score, **diagnostics,
             "benchmark_normalized_bleu": benchmark_bleu.corpus_bleu(normalized_hyp, normalized_ref),
             "bleu_signature": str(native.get_signature()), "brevity_penalty": score.bp,
             "hypothesis_tokens": score.sys_len, "reference_tokens": score.ref_len}
@@ -309,8 +327,7 @@ def evaluate(args, *, completed_only=False):
     saved = load_checkpoint(args.checkpoint)
     if saved["modality"] != "text" or decoding["max_chars"] > saved["backbone"]["max_target_positions"]:
         raise ValueError("compatible T2TT checkpoint required")
-    source = CharacterTokenizer(saved["source_vocabulary"])
-    target = CharacterTokenizer(saved["target_vocabulary"])
+    source, target = tokenizers_from_checkpoint(saved)
     predictions, unknown = [], Counter()
     model = None
     # Only source-only records cross the generation boundary. References enter
@@ -320,9 +337,11 @@ def evaluate(args, *, completed_only=False):
         tokens = source.encode(row["source_text"])
         if not tokens or len(tokens) > saved["backbone"]["max_source_positions"]:
             raise ValueError("source text outside checkpoint position limit: " + row["sample_id"])
-        unknown.update(ch for ch, token in zip(row["source_text"], tokens) if token == UNK)
+        spans = source.encode_with_spans(row["source_text"])
+        unknown_text = "".join(row["source_text"][b:e] for token,b,e in spans if token == UNK)
+        unknown.update(unknown_text)
         expected = {**row, "evaluation_contract_hash": digest(contract),
-                    "source_unk_characters": tokens.count(UNK)}
+                    "source_unk_characters": len(unknown_text)}
         cache = cache_root / (digest(row["sample_id"]) + ".json")
         if args.resume and cache.is_file():
             record = read_json(cache)
