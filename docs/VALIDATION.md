@@ -1,4 +1,20 @@
-# Validation record — 2026-10-29
+# Validation record
+
+## External text-only T2TT
+
+最終全suiteは **342 passed, 8 skipped**（459.38秒）。8 skipはCUDA関連7件とWindows上のPOSIX process group試験1件。以下の個別結果は全suiteへ合算しない。
+
+音声列のない4列manifestで、character/SentencePieceとsmoke/固定fairseqの各組合せを2更新学習し、dev生成・SacreBLEU・全層Attention抽出まで実行した。音声features/hash/パスresolve/存在検査を禁止した状態でも成功し、後から音声path/SHAを追加してもcheckpoint・評価・Attentionを無変更で再利用できた。text変更時の拒否、ID/split漏洩検査、従来speech hashの計算一致も確認した。
+
+後から人工音声とCTC/unit fixtureを追加し、text-v1 Attentionからspeech identityを持つteacherへ投影した。S2UT・CTC・HuBERT/unit・teacher・speech評価・音声可視化へtext-onlyを渡すと明確なaudio-requiredエラーになり、CTC/unitは外部モデル取得前に停止する。旧checkpointは元音声metadataの旧hashで照合し、既存legacy評価/抽出/artifact再利用の試験も維持した。
+
+character/SPM両方で実際の固定benchmark ZIP runtimeを使い、2更新で中断→ローカル作業消失を想定して復元→4更新を実行した。外部原本への音声列追加後もcanonical textのbytesが変わらず、連続4更新とmodel/optimizer/RNG/epoch/cursor/contractが厳密一致した。loss summaryのdurable updateも4と一致する。元データ・既存Baseline・固定benchmark sourceは変更しない。
+
+新Colabの実セルを両tokenizerで各CLI parserへ通し、専用stage・完了gate・任意Attention・canonical loggerを検査した。外部評価Notebookの既存試験4件は、先に表示される追加診断表をBLEU比較表と取り違えていたため、表の内容で識別して同じBLEU/翻訳例を検査するよう修正した。修正後の外部評価/新Notebook関連は **40 passed**（65.29秒）。既存3冊のNotebookとsource pinは変更していない。
+
+全4冊のNotebook schema/Python/HTML、80ローカル文書リンク、pip check、wheel内全70 Python sourceのbyte一致を確認した。依存追加はない。実JParaCrawl・実GPU200k学習・実コーパスBLEUは未実行で、CPU小型接続試験を品質結果として扱わない。
+
+## 2026-10-29 — SentencePiece T2TT
 
 SentencePiece Unigram対応後の全suiteは **314 passed, 8 skipped**（421.75秒）。日英別train-only・固定入力順・1 thread・identity・空白保持・特殊ID・serialized model/hash・原codepoint span・UTF-8 byte offset変換を検査した。全角/結合文字/emoji/tab/LF/CR/複数空白/特殊token風の原文もround-tripし、held-out文字は語彙へ追加せずUNKとして元位置を保持した。SentencePieceのimmutable piece viewのowner lifetimeも回帰試験で保護する。
 

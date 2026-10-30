@@ -403,12 +403,16 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
         assert not calls and skips[0][1] == "skipped"
         exec(source.replace("RUN_EXTERNAL_TEXT = False", "RUN_EXTERNAL_TEXT = True"), namespace)
     assert calls == ["restore", *(["status"] if extended else []), settings["T2TT_EXTERNAL_STAGE"], "verify"]
+    comparison = next(frame for frame in displays if frame and "Dataset" in frame[0])
+    examples = next(frame for frame in displays if frame and "Reference EN" in frame[0])
     if has_dev:
-        assert displays[0][0]["native text BLEU"] == 3.14
+        assert comparison[0]["native text BLEU"] == 3.14
+        assert comparison[0]["Dataset"] == "In-domain dev"
+        assert comparison[1]["Dataset"] == "External FLEURS/FLORES"
     else:
-        assert len(displays[0]) == 1 and displays[0][0]["Dataset"] == "External FLEURS/FLORES"
+        assert len(comparison) == 1 and comparison[0]["Dataset"] == "External FLEURS/FLORES"
         assert any(s[0] == "in-domain-dev-comparison" and s[1] == "skipped" for s in skips)
-    assert len(displays[1]) == 10 and all("Reference EN" in row for row in displays[1])
+    assert len(examples) == 10 and all("Reference EN" in row for row in examples)
 
 
 @pytest.mark.parametrize("backend", ["smoke", "fairseq"])

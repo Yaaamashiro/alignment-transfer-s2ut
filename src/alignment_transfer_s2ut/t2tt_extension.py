@@ -179,6 +179,9 @@ def verify_state(work, expected_step=None):
                        "target_vocabulary", "recipe", "auxiliary", "train_hash", "dev_hash", "method", "transfer",
                        "teacher_signature", "unit_config_hash")
     contract = {key: last[key] for key in contract_fields}
+    if "manifest_identity" in last:
+        contract_fields = (*contract_fields, "manifest_identity")
+        contract["manifest_identity"] = last["manifest_identity"]
     if "tokenizers" in last:
         contract["tokenizers"] = last["tokenizers"]
         contract_fields = (*contract_fields, "tokenizers")

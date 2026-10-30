@@ -199,9 +199,10 @@ def report(runs, logs, output, t2tt_evaluation=None):
     if t2tt_evaluation:
         teacher = read_json(t2tt_evaluation)
         experiment = read_json(Path(runs) / "annealed_t2tt" / "experiment.json")
+        expected_dev_hash = experiment.get("dev_text_hash") if teacher.get("evaluation_contract",{}).get("manifest_identity") == "text-v1" else experiment["dev_hash"]
         if (teacher["split"] != "dev" or teacher["backend"] != experiment["backend"] or
                 teacher["checkpoint_hash"] != experiment["teacher_signature"]["mt_checkpoint_hash"] or
-                teacher["evaluation_contract"]["manifest_hash"] != experiment["dev_hash"]):
+                teacher["evaluation_contract"]["manifest_hash"] != expected_dev_hash):
             raise ValueError("T2TT evaluation must match the pilot teacher checkpoint and dev split")
         if not math.isfinite(teacher["text_bleu"]):
             raise ValueError("non-finite T2TT dev text BLEU")

@@ -5,7 +5,7 @@ import torch
 import yaml
 from .io import ArtifactStore, digest, file_hash
 from .data.audio import waveform
-from .data.manifest import load_manifest, manifest_hash
+from .data.manifest import load_manifest, manifest_hash, text_manifest_hash, TEXT_IDENTITY
 from .alignment.ctc import viterbi_spans
 from .units.timing import reduce_units, frame_spans, run_spans
 from .progress import progress
@@ -31,6 +31,7 @@ def existing(store, row, expected, resume):
 
 
 def extract_units(manifest, output, config_path, device="cpu", resume=False, overwrite=False):
+    rows, store = load_manifest(manifest), ArtifactStore(output)
     config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
     pinned_model(config["hubert"])
     if config.get("layer") != 6 or config.get("clusters") != 100 or not config.get("reduce_consecutive", True):
@@ -48,7 +49,6 @@ def extract_units(manifest, output, config_path, device="cpu", resume=False, ove
                                        revision=config["hubert"]["revision"]).to(device).eval()
     processor = AutoFeatureExtractor.from_pretrained(config["hubert"]["model"],
                                                      revision=config["hubert"]["revision"])
-    rows, store = load_manifest(manifest), ArtifactStore(output)
     identity = manifest_hash(rows)
     for index, row in enumerate(rows):
         meta = provenance(row, "units", config, identity)
@@ -74,8 +74,8 @@ def extract_units(manifest, output, config_path, device="cpu", resume=False, ove
 
 
 def align_speech_text(manifest, output, config_path, device="cpu", resume=False, overwrite=False):
-    config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
     rows, store = load_manifest(manifest), ArtifactStore(output)
+    config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
     identity = manifest_hash(rows)
     from transformers import AutoProcessor, AutoModelForCTC
     for language in ("ja", "en"):
@@ -136,6 +136,7 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
     from .config import BackboneConfig
     rows = load_manifest(manifest)
     identity = manifest_hash(rows)
+    text_identity = text_manifest_hash(rows)
     mt_store, ctc_store, units_store, output_store = map(ArtifactStore,
                                                        (mt_root, alignment_root, unit_root, output))
     config = BackboneConfig.load(s2ut_config)
@@ -146,7 +147,12 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
         pair = row["pair_id"]
         expected = {"split": row["split"], "manifest_hash": identity,
                     "text_hash": digest([row["ja_text"], row["en_text"]])}
-        mt_meta, mt = mt_store.get(pair, expected)
+        mt_meta, mt = mt_store.get(pair, {key:value for key,value in expected.items() if key != "manifest_hash"})
+        if mt_meta.get("manifest_identity") == TEXT_IDENTITY:
+            if mt_meta.get("manifest_hash") != text_identity or mt_meta.get("text_manifest_hash") != text_identity:
+                raise ValueError("T2TT Attention text manifest identity differs from speech texts")
+        elif "manifest_identity" in mt_meta or mt_meta.get("manifest_hash") != identity:
+            raise ValueError("legacy T2TT Attention speech manifest identity differs")
         from .tokenization.alignment import attention_token_spans, aggregate_ctc_spans
         src_token_spans, tgt_token_spans, token_meta = attention_token_spans(mt_meta, mt, row["ja_text"], row["en_text"])
         from .alignment.layers import attention_spec
@@ -184,7 +190,8 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
                 "ctc_config_hash": digest(acoustic_identity[:2]),
                 "unit_config_hash": units_meta["unit_config_hash"],
                 "units_hash": file_hash(units_store.path(pair)), "backend": mt_meta["backend"],
-                **spec, "attention_spec_hash": digest(spec), **token_meta}
+                **spec, "attention_spec_hash": digest(spec), **token_meta,
+                **({"text_manifest_hash":mt_meta["text_manifest_hash"]} if mt_meta.get("manifest_identity") == TEXT_IDENTITY else {})}
         arrays = {"mt_attention_layers": mt["attention_layers"]} if spec["all_layers"] else {}
         src_spans, tgt_spans = source["spans"], target["spans"]
         if token_meta:

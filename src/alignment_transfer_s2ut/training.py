@@ -10,7 +10,8 @@ import torch
 from torch.nn import functional as F
 from .config import BackboneConfig
 from .data.audio import features
-from .data.manifest import load_manifest, manifest_hash
+from .data.manifest import (load_manifest, manifest_hash, text_manifest_hash, TEXT_IDENTITY,
+                            checkpoint_manifest_rows, checkpoint_manifest_hash)
 from .io import ArtifactStore, atomic_write, digest, file_hash, write_json
 from .tokenization.character import CharacterTokenizer, PAD, EOS
 from .tokenization.factory import fit_tokenizers, tokenizers_from_checkpoint, tokenizer_metadata, save_diagnostics
@@ -211,18 +212,19 @@ def train(args, modality):
     config = BackboneConfig.load(args.config)
     if args.backend == "smoke" and max(config.encoder_layers, config.decoder_layers) > 2:
         raise ValueError("smoke backend requires an explicit tiny config")
-    rows = load_manifest(args.manifest, check_audio=False)
+    rows = load_manifest(args.manifest, check_audio=False, require_audio=modality == "speech")
     train_rows = [r for r in rows if r["split"] == "train"]
     dev_rows = [r for r in rows if r["split"] == "dev"]
     if not train_rows or not dev_rows:
         raise ValueError("both train and dev splits are required; test cannot be used for selection")
-    identity = manifest_hash(rows)
+    data_hash = text_manifest_hash if modality == "text" else manifest_hash
+    identity = data_hash(rows)
     source_tokenizer, target_tokenizer = fit_tokenizers(rows, args, modality)
     if (args.loader_workers < 0 or args.prefetch_batches < 1 or not math.isfinite(args.cache_gb) or
             not math.isfinite(args.cache_reserve_gb) or args.cache_gb <= 0 or args.cache_reserve_gb < 0):
         raise ValueError("invalid input worker, prefetch or cache settings")
     cache = LocalCache(args.cache_dir, int(args.cache_gb * 1024**3), int(args.cache_reserve_gb * 1024**3),
-                       forbidden=list({Path(r[key]).parent for r in rows for key in ("ja_audio", "en_audio")}) +
+                       forbidden=(list({Path(r[key]).parent for r in rows for key in ("ja_audio", "en_audio")}) if modality == "speech" else [Path(args.manifest).resolve().parent]) +
                                  [p for p in (args.units, args.teacher) if p]) if args.cache_dir else None
     def artifact_store(path):
         return CachedArtifactStore(path, cache) if cache else ArtifactStore(path)
@@ -276,10 +278,10 @@ def train(args, modality):
                 "runtime": runtime, "implementation_hash": implementation_hash,
                 "source_vocabulary": source_vocabulary, "target_vocabulary": target_vocabulary,
                 "recipe": recipe, "auxiliary": auxiliary,
-                "train_hash": manifest_hash(train_rows), "dev_hash": manifest_hash(dev_rows),
+                "train_hash": data_hash(train_rows), "dev_hash": data_hash(dev_rows),
                 "method": method, "transfer": transfer, "teacher_signature": teacher_signature,
                 "unit_config_hash": unit_config_hash,
-                **(tokenizer_metadata(source_tokenizer, target_tokenizer) if modality == "text" else {})}
+                **({"manifest_identity":TEXT_IDENTITY, **tokenizer_metadata(source_tokenizer, target_tokenizer)} if modality == "text" else {})}
     input_pipeline = {key: getattr(args, key) for key in
                       ("loader_workers", "prefetch_batches", "cache_dir", "cache_gb", "cache_reserve_gb", "pin_memory")}
     root = Path(args.output)
@@ -313,6 +315,7 @@ def train(args, modality):
         save_diagnostics(root, rows, source_tokenizer, target_tokenizer)
     write_json(root / "experiment.json", {**contract, "input_pipeline": input_pipeline, "contract_hash": digest(contract),
                "initialization_hash": initial_hash, "checkpoint_selection": "dev/main_loss with beta=0",
+               **({"train_text_hash":text_manifest_hash(train_rows), "dev_text_hash":text_manifest_hash(dev_rows)} if modality == "speech" else {}),
                "planned_max_updates": args.max_updates}, overwrite=args.resume or args.overwrite)
     log_path = root / "metrics.jsonl"
     if not args.resume and args.overwrite and log_path.exists():
@@ -538,12 +541,11 @@ def extract_attention(args):
     unchanged_checkpoint()
     if saved["modality"] != "text":
         raise ValueError("T2TT checkpoint required")
-    # This stage uses text only. Audio identity remains in manifest_hash, but
-    # no WAV payload or per-WAV filesystem probe is needed for extraction.
-    rows = load_manifest(args.manifest, check_audio=False)
-    if saved["train_hash"] != manifest_hash([r for r in rows if r["split"] == "train"]):
+    rows = load_manifest(args.manifest, require_audio=False)
+    rows = checkpoint_manifest_rows(saved, rows, args.manifest)
+    if saved["train_hash"] != checkpoint_manifest_hash(saved, [r for r in rows if r["split"] == "train"]):
         raise ValueError("T2TT training pairs differ from the S2UT train split")
-    identity = manifest_hash(rows)
+    identity = checkpoint_manifest_hash(saved, rows)
     source, target = tokenizers_from_checkpoint(saved)
     model = checkpoint_model(saved, args.device).eval()
     if not -saved["backbone"]["decoder_layers"] <= args.layer < saved["backbone"]["decoder_layers"]:
@@ -559,6 +561,8 @@ def extract_attention(args):
                 "mt_checkpoint_hash": checkpoint_hash, "mt_architecture_hash": digest(saved["backbone"]),
                 "tokenizer_hash": digest([source.fingerprint, target.fingerprint]), "layer": args.layer,
                 "heads": args.heads, "teacher_forcing": True, "training_split": "train"}
+    if saved.get("manifest_identity") == TEXT_IDENTITY:
+        common.update(manifest_identity=TEXT_IDENTITY, text_manifest_hash=text_manifest_hash(rows))
     subwords = "tokenizers" in saved
     if subwords:
         common.update(tokenizer_type="sentencepiece", source_tokenizer_hash=source.fingerprint,

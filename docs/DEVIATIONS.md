@@ -23,3 +23,5 @@
 17. **T2TT lossの観測:** 延長の親processだけでローカルmetricsを追記読みし、実lossを既存loggerへ出す。verified ZIP公開後にfreeze済みmetricsとbest checkpointから小さなサマリーを添付する。元trainer/control・科学的設定・snapshot頻度は維持する。サマリーは診断用で、ZIP/receiptによる復旧や本学習の成否を置き換えない。
 
 18. **Tokenizer比較:** [SentencePiece T2TT](SENTENCEPIECE.md)はtrain-onlyの日英別Unigram/identity/8000目標。Transformer backbone・学習/評価条件・データ・CTC/unit/S2UTを維持し、語彙に依存するembedding/projection行数と系列長だけが変わる。元characterをseedせず独立stageで0から学習する。元codepoint spanを保存してCTC文字時刻をsubwordへ集約し、投影式は維持する。held-out UNKの完全round-tripは保証せず、元位置を検査・未知文字数を報告する。literal U+2581/NULは暗黙変換やデータ除外をせず停止する。実GPU200k・実コーパスの語彙数/長さ・性能は未測定。
+
+19. **Text-only T2TT:** [外部text manifest](TEXT_ONLY_T2TT.md)では4列だけを検査し、音声payload/pathを参照しない。新T2TTはtext-v1のtrain/dev hashを持ち、Attention→speech teacherの境界でtext identityを照合する。S2UTの既存speech hash・音声validation・Trainer/lossを維持する。旧T2TTは音声metadata込みの旧identityとして明示的に扱い、hashの移行/書換えはしない。専用Notebookはローカルのcanonical text fileを入力として同じ固定ZIP runtimeを再利用する。データfiltering・TTS・QC・S2UT学習は追加しない。

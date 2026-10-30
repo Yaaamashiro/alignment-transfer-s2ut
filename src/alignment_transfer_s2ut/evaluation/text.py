@@ -2,7 +2,7 @@
 import math
 from pathlib import Path
 import torch
-from ..data.manifest import load_manifest, manifest_hash
+from ..data.manifest import load_manifest, checkpoint_manifest_rows, checkpoint_manifest_hash, TEXT_IDENTITY
 from ..io import digest, file_hash, read_json, write_json, write_jsonl
 from ..progress import progress
 from ..tokenization.character import CharacterTokenizer, PAD, BOS, EOS
@@ -57,20 +57,22 @@ def evaluate_t2tt(args):
     if args.max_chars > saved["backbone"]["max_target_positions"]:
         raise ValueError("output limit exceeds the checkpoint target position limit")
     # Text evaluation never opens audio or any CTC/unit/teacher artifact.
-    all_rows = load_manifest(args.manifest, check_audio=False)
-    if saved["train_hash"] != manifest_hash([r for r in all_rows if r["split"] == "train"]):
+    all_rows = checkpoint_manifest_rows(saved, load_manifest(args.manifest, require_audio=False), args.manifest)
+    if saved["train_hash"] != checkpoint_manifest_hash(saved, [r for r in all_rows if r["split"] == "train"]):
         raise ValueError("T2TT training pairs differ from the manifest train split")
     rows = [r for r in all_rows if r["split"] == args.split]
     if not rows:
         raise ValueError("empty T2TT evaluation split")
-    if args.split == "dev" and saved["dev_hash"] != manifest_hash(rows):
+    if args.split == "dev" and saved["dev_hash"] != checkpoint_manifest_hash(saved, rows):
         raise ValueError("T2TT evaluation dev differs from checkpoint selection dev")
     decoding = {"beam_size": args.beam_size, "max_chars": args.max_chars, "length_penalty": args.length_penalty}
     metric = {"name": "sacrebleu", "version": bleu_version, "tokenize": "13a", "lowercase": False,
               "smooth_method": "exp", "effective_order": False}
-    contract = {"checkpoint_hash": file_hash(args.checkpoint), "manifest_hash": manifest_hash(rows),
+    contract = {"checkpoint_hash": file_hash(args.checkpoint), "manifest_hash": checkpoint_manifest_hash(saved, rows),
                 "train_hash": saved["train_hash"], "split": args.split, "decoding": decoding,
                 "metric": metric, "implementation_hash": file_hash(__file__)}
+    if saved.get("manifest_identity") == TEXT_IDENTITY:
+        contract["manifest_identity"] = TEXT_IDENTITY
     output = Path(args.output)
     predictions_path = output.with_name(output.stem + "-predictions.jsonl")
     if args.resume and output.is_file():

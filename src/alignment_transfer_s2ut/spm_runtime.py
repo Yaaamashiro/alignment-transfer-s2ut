@@ -30,12 +30,12 @@ def worker(plan):
         c.saved_checkpoint=original
 
 
-def start(command,work,backup,snapshot_updates=10000,keep_last=2):
+def start(command,work,backup,snapshot_updates=10000,keep_last=2,*,expected_tokenizer="sentencepiece"):
     command=list(map(str,command));work,backup=c.session_paths(work,backup)
     if command[1:3] != ["-m","alignment_transfer_s2ut.train_t2tt"]:
         raise ValueError("SentencePiece runtime requires the standard T2TT CLI")
     args=parser_for("train_t2tt").parse_args(command[3:])
-    if (args.tokenizer!="sentencepiece" or Path(args.output).resolve()!=work or not args.resume_if_exists or
+    if (args.tokenizer!=expected_tokenizer or Path(args.output).resolve()!=work or not args.resume_if_exists or
             snapshot_updates<1 or snapshot_updates%args.save_interval_updates or keep_last<1):
         raise ValueError("SentencePiece runtime requires independent output, resume-if-exists and aligned snapshot interval")
     checkpoint=work/"checkpoint_last.pt"
@@ -43,8 +43,10 @@ def start(command,work,backup,snapshot_updates=10000,keep_last=2):
         checkpoint=work/"checkpoint_best.pt"
     if checkpoint.is_file():
         from .training import load_checkpoint
-        if "tokenizers" not in load_checkpoint(checkpoint):
-            raise ValueError("existing character checkpoint is read-only; choose a new SentencePiece stage")
+        saved=load_checkpoint(checkpoint)
+        actual="sentencepiece" if "tokenizers" in saved else "character"
+        if actual!=expected_tokenizer:
+            raise ValueError("existing " + actual + " checkpoint is read-only; choose a new matching stage")
     # The operational plan stays outside the trainer output, which must be empty
     # for a fresh step-0 run. It is recreated from the bound command on each VM.
     plan=work.parent/(work.name+".spm-session.json")
@@ -57,7 +59,7 @@ def start(command,work,backup,snapshot_updates=10000,keep_last=2):
         publish_summary(files,saved,identity,updates)
         prune_target(destination,identity,keep_last,milestones)
         return saved
-    progress("SentencePiece T2TT: fresh stage or its own verified resume; character checkpoints are never seeded")
+    progress("T2TT: fresh stage or its own verified resume; no cross-tokenizer seeding",detail="tokenizer="+expected_tokenizer)
     with ExitStack() as stack:
         def launch(arguments,env):
             if list(arguments)!=command:

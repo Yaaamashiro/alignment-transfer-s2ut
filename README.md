@@ -29,6 +29,8 @@ T2TT層lのlearned soft alignmentをS2UT層lへ転移する。[全層転移の�
 
 ## Colabで始める
 
+音声を用意する前に外部の日英manifestでT2TTを確認する場合は、[text-only用Notebook](notebooks/colab/jparacrawl_t2tt.ipynb)と[専用手順](docs/TEXT_ONLY_T2TT.md)を使う。`pair_id/split/ja_text/en_text`の4列で学習・評価・Attention抽出ができ、後から音声列を追加しても新T2TTのtext identityは変わらない。
+
 1. [benchmark比較ノートブック](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/benchmark_comparison.ipynb)をGPUランタイムで開く。
 2. 既存実験の`BENCHMARK`・`RUN_NAME`と、今回の`ROOT`（VMローカル）・`PERSISTENT`（Drive）を設定する。
 3. 主要4条件では`ALL_LAYERS=True`で`RUN_DISTILLATION`・`RUN_TRANSFER`・`RUN_GUIDANCE`をすべてTrueにする。`RUN_MONOTONIC`は任意のcontrol。
@@ -49,6 +51,7 @@ SentencePiece版の比較は`T2TT_TOKENIZER='sentencepiece'`を選び、6.1a-S�
 
 | ノートブック | 用途 | 学習・保存 |
 |---|---|---|
+| [jparacrawl_t2tt](notebooks/colab/jparacrawl_t2tt.ipynb) | 外部text-only日英JSONLのT2TT学習・dev BLEU・Attention | 音声不要・独立stage・既存Drive ZIP復旧 |
 | [benchmark_comparison](notebooks/colab/benchmark_comparison.ipynb) | 学習済みBaselineとの本比較 | native fairseq・ローカル作業＋Drive ZIP |
 | [pilot](notebooks/colab/pilot.ipynb) | 少量実データの診断と3条件の機能検証 | 旧standalone trainer・Drive直接保存 |
 | [pipeline](notebooks/colab/pipeline.ipynb) | 前処理から5条件の評価までの実行例 | 旧standalone trainer・Drive直接保存 |
