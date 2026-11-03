@@ -42,6 +42,9 @@ def test_native_calibration_is_reproducible_and_binds_plan(calibrated):
         assert len(result["per_layer_losses"][kind])==4
         expected=calibrate_tau(result["per_layer_losses"][kind],valid_counts=result["per_layer_valid_rows"][kind])
         assert result["tau_"+kind]==expected["tau"]
+        saved=read_json(root/"analysis/alignment-calibration.json")["tau_estimates"][kind]
+        assert saved["rejected_microbatches"]==expected["rejected_microbatches"]
+        assert "rejected_batches" not in saved
     ordinary=b.make_plan(root/"baseline.json",root/"ordinary",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher",calibration=root/"analysis/again.json")
     annealed=b.make_plan(root/"baseline.json",root/"annealed",method="annealed_distillation",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher",calibration=root/"analysis/again.json")
     assert ordinary["transfer"]["calibrated"]==annealed["transfer"]["calibrated"]

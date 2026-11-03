@@ -37,7 +37,7 @@ def calibrate_tau(layer_batches, ratio=3., minimum_delta=1e-8, valid_counts=None
             estimates.append(delta / math.log(ratio))
     if not estimates:
         raise ValueError("tau calibration failure: all layer gaps are nonfinite or near zero")
-    return dict(tau=median(estimates), estimates=estimates, rejected_batches=rejected,
+    return dict(tau=median(estimates), estimates=estimates, rejected_microbatches=rejected,
                 target_ratio=ratio, minimum_delta=minimum_delta, median_definition="lower order statistic")
 
 

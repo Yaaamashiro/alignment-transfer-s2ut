@@ -92,6 +92,15 @@ def test_tau_ignores_unsupervised_layers_and_rejects_old_artifacts():
         validate_artifact({"format":"alignment-calibration-v1"},{})
 
 
+def test_tau_records_rejected_microbatch_indices_with_the_new_key():
+    result=calibrate_tau([[1.,2.,4.],[1.,1.,1.],[float("nan"),1.,2.],
+                          [float("inf"),1.,2.],[0.,0.,0.]],
+                         valid_counts=[[1,1,1],[1,1,1],[1,1,1],[1,1,1],[0,0,0]])
+    assert result["tau"]==pytest.approx(2/math.log(3))
+    assert result["rejected_microbatches"]==[1,2,3,4]
+    assert "rejected_batches" not in result
+
+
 def policy(**overrides):
     return dict(method="annealed_distillation",calibrated=dict(lambda_kl=2.,tau_kl=.4),
                 anneal_fraction=.7,anneal_schedule="cosine",**overrides)

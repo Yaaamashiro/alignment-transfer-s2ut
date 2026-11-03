@@ -2,6 +2,10 @@
 
 T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT Decoder層へ転移する研究実装。日本語→英語Direct S2STを対象に、固定fairseq/benchmarkのS2UT学習条件を揃えて比較する。Attentionをground-truth alignmentとは扱わない。
 
+\[
+\boxed{\mathcal L=\mathcal L_{\mathrm{S2UT}}+\lambda\mathcal L_{\mathrm{align}}}
+\]
+
 ## 主要4条件
 
 | Condition | 教師信号 | Forward |

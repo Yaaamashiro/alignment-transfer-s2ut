@@ -1,5 +1,14 @@
 # Validation record
 
+## 2026-11-04 — Poster notation and calibration metadata
+
+Benchmark手順の表示名をAttention-level Knowledge Distillationへ修正した。τ校正の除外indexキーを`rejected_microbatches`へ統一し、near-zero/NaN/Inf/無効層のmicrobatch indexが新キーへ保存されることと、実native校正JSONにも新キーだけが入ることを検査した。
+
+README・Method・projection・all-layer文書・主Notebookの数式を、projected teacherは\(\tilde A_l^{\mathrm{T2TT}}\)、層別KLは\(\ell_l^{\mathrm{KL}}\)、全体は\(\mathcal L=\mathcal L_{\mathrm{S2UT}}+\lambda\mathcal L_{\mathrm{align}}\)へ統一した。S2UT lossは従来のunit lossと補助lossを含み、数値演算・method ID・既存ログIDは変更しない。
+
+関連検査は **25 passed**（35.46秒）。校正の再現性・4条件の更新/再開・新キーのJSON保存を含む。lint 0件、表記/名称の残存検査、4 Notebookのschema/Python/HTML、44ローカル文書リンク、wheel全75 Python sourceのbyte一致も成功した。今回の25件は関連検査であり、直前の全suite 350件へ合算しない。長時間trainingは実行していない。
+
+
 ## 2026-11-04 — Microbatch τ and policy-driven annealing
 
 最終全suiteは **350 passed, 8 skipped**（489.24秒）。8 skipはCUDA関連7件とWindows上のPOSIX process group試験1件。以下の関連検査件数を全suiteへ合算しない。

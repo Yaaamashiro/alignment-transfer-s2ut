@@ -9,3 +9,5 @@ T2TT Decoder層lの全head平均を、S2UT Decoder層lへ対応させる。全�
 native modelはstock Attentionをcaptureする。teacherの値はcriterionのlossだけが読み、forwardのcontextはshape/scopeだけを持つ。validation/inferenceではcapture contextもteacher dataset wrapperも使わない。
 
 `alignment-train.jsonl`へ各updateの`alignment/D_l`・`alignment/w_l`・worst layer・loss・λ・τ・entropy・KL/Mask診断を保存する。別dev診断とAttention可視化も生成とは独立して行う。
+
+数式はprojected teacherを\(\tilde A_l^{\mathrm{T2TT}}\)、層別lossを\(\ell_l^{\mathrm{KL}}\) / \(\ell_l^{\mathrm{mask}}\)と書く。内部packet名・`alignment/D_l`等のログIDは維持する。全体の目的関数は\(\mathcal L=\mathcal L_{\mathrm{S2UT}}+\lambda\mathcal L_{\mathrm{align}}\)。

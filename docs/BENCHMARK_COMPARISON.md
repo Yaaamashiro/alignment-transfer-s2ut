@@ -13,7 +13,7 @@
 7. `MASK_TOP_P`を0.8/0.9/0.95から明示設定し、`RUN_ALIGNMENT_CALIBRATION=True`でλ/τを校正。
 8. `RUN_DISTILLATION=True`でKL-based Attention Distillation。
 9. `RUN_ANNEALED_DISTILLATION=True`でAnnealed KL-based Attention Distillation。
-10. `RUN_MASK_DISTILLATION=True`でMask KL-based Attention Distillation。
+10. `RUN_MASK_DISTILLATION=True`でAttention-level Knowledge Distillation。
 11. 共通のteacher-free native生成・dev評価。
 12. Baseline→KL-based Attention Distillation→Annealed KL-based Attention Distillation→Attention-level Knowledge Distillationの表、loss/layer curves、独立したdev alignment診断とAttention可視化。
 
