@@ -1,4 +1,3 @@
-from pathlib import Path
 import json
 import pytest
 from alignment_transfer_s2ut.io import write_json
@@ -32,7 +31,7 @@ def test_spm_runs_from_zero_in_independent_stage_and_preserves_controls(tmp_path
     assert ns["T2TT_CHECKPOINT"]==tmp_path/"t2tt-spm-200k/checkpoint_best.pt"
     assert ns["CTC_STAGE"]=="speech-text-alignment-200k"
     assert ns["TEACHER_ROOT"]==tmp_path/"teacher-alignment-spm-200k-all-layers"
-    assert ns["DISTILLATION"].name=="distillation-t2tt-spm-200k-all-layers"
+    assert ns["RESEARCH_ROOT"].name=="research-v2-spm-200k-all-layers"
 
 
 def test_spm_evaluation_and_attention_require_same_completed_checkpoint(tmp_path):

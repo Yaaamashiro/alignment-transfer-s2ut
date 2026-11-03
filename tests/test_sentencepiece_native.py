@@ -1,3 +1,4 @@
+from native_plan_fixture import fixture_plan
 import numpy as np
 import pytest
 import torch
@@ -14,6 +15,7 @@ from test_all_layers_native import layered_teacher
 def test_native_criterion_accepts_subword_teacher_without_changing_unit_labels(native_data):
     from fairseq import tasks
     from alignment_transfer_s2ut.s2ut import benchmark_extension  # Register the native task/criterion in standalone runs.
+    assert benchmark_extension.AlignmentTask
     root=native_data.root;layered_teacher(root)
     rows=load_manifest(root/"manifest.jsonl",check_audio=False)
     source,target=[SentencePieceTokenizer.fit(rows,field,128) for field in ("ja_text","en_text")]
@@ -29,7 +31,7 @@ def test_native_criterion_accepts_subword_teacher_without_changing_unit_labels(n
             source_tokenizer_spec=source.spec,target_tokenizer_spec=target.spec,token_span_unit="unicode-codepoint",
             tokenizer_hash=digest([source.fingerprint,target.fingerprint]))
         store.put(row["pair_id"],meta,packet,overwrite=True)
-    plan=b.make_plan(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=True)
+    plan=fixture_plan(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=True)
     write_json(root/"run/native-run.json",plan)
     cfg=b.native_config(plan["config"]);task=tasks.setup_task(cfg.task);task.load_dataset("train")
     ds=task.dataset("train");sample=ds.collater([ds[0]])
@@ -39,3 +41,5 @@ def test_native_criterion_accepts_subword_teacher_without_changing_unit_labels(n
         criterion.set_multitask_loss_weight(name,task.multitask_tasks[name].args.get_loss_weight(0))
     loss,_,_=criterion(model,sample);loss.backward()
     assert torch.isfinite(loss) and model.decoder.layers[0].encoder_attn.q_proj.weight.grad is not None
+
+__all__ = ['native_data']  # pytest fixture exports

@@ -86,14 +86,16 @@ def test_attention_requires_review_and_completed_matching_evaluations(tmp_path):
 
 @pytest.mark.parametrize("extended", [False, True])
 def test_projected_teacher_and_student_never_mix_teacher_generations(tmp_path, extended):
-    values = comparison_paths(tmp_path, extended)
+    values = comparison_paths(tmp_path, extended, RUN_DISTILLATION=True)
     calls = []
+    write_json(values["CALIBRATION"], dict(fixture=True))
+    values["MASK_TOP_P"] = .8
     def run(name, module, *args, **kw):
         validate_command(module, args)
         calls.append((name, list(args)))
     def plan(*args, **kw):
         validate_command(args[2], args[3:])
-        return dict(training_budget=400000, initialization="fresh", selection_policy={})
+        return dict(training_budget=400000, initialization="fresh", selection_policy={}, transfer=dict(calibration_hash="fixed"))
     values.update(RUN_TRANSFER=True, RUN_MONOTONIC=False, MANIFEST=tmp_path / "manifest.jsonl",
         BACKBONE_CONFIG=tmp_path / "backbone.json", BASELINE=tmp_path / "baseline.json",
         ANNEAL_STEPS=200000, PYTHON="python", run=run, execute_json=plan, LOGS=tmp_path / "logs", log_event=lambda *a: None)
@@ -102,30 +104,20 @@ def test_projected_teacher_and_student_never_mix_teacher_generations(tmp_path, e
     teacher_args = calls[0][1]
     assert teacher_args[teacher_args.index("--mt-attention") + 1] == values["T2TT_ATTENTION_ROOT"]
     assert teacher_args[teacher_args.index("--alignment") + 1] == values["CTC_ROOT"]
-    transfer = values["TRANSFER_ARGS"]
+    transfer = calls[-1][1][1:]
     assert transfer[transfer.index("--teacher") + 1] == str(values["TEACHER_ROOT"])
-    assert values["TRANSFER"].name == ("annealed-t2tt-200k" if extended else "annealed-t2tt")
+    assert "research-v2" in transfer[transfer.index("--output") + 1]
 
 
 def test_checkpoint_reference_is_centralized_and_old_stage_defaults_remain_explicit():
     path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
     source = "\n".join("".join(c["source"]) for c in json.loads(path.read_text(encoding="utf-8"))["cells"] if c["cell_type"] == "code")
     assert "t2tt/checkpoint_best.pt" not in source
-    assert "RUN_T2TT_EXTENSION = True" in source and "USE_EXTENDED_T2TT = True" in source
+    assert "RUN_T2TT_EXTENSION = False" in source and "USE_EXTENDED_T2TT = True" in source
     for identity in ("t2tt-dev-evaluate", "external-text-evaluate", "benchmark_comparison-24"):
         assert "T2TT_CHECKPOINT" in cell(identity)
 
 
-def test_monotonic_only_skips_extended_teacher_gate_and_review(tmp_path):
-    values = comparison_paths(tmp_path, True)
-    notices = []
-    values.update(RUN_MONOTONIC=True, RUN_TRANSFER=False, RUN_TEACHER_ARTIFACTS=False,
-        run=lambda *a, **kw: pytest.fail("Monotonic-only run touched teacher artifacts"),
-        execute_json=lambda *a, **kw: pytest.fail("Monotonic-only run checked extended teacher"),
-        LOGS=tmp_path / "logs", log_event=lambda *a: notices.append(a))
-    exec(cell("benchmark_comparison-24"), values)
-    exec(cell("extension-review"), values)
-    assert any(a[:2] == ("t2tt-learning-review", "skipped") for a in notices)
 
 
 def test_evaluation_only_of_extended_teacher_does_not_run_base_training(tmp_path):

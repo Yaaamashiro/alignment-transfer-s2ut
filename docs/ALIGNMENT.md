@@ -22,9 +22,9 @@ source token spanと`F`個の音声時間binのoverlapをrow normalizeして`M_s
 
 `--source-mapping uniform`は従来の音声長/Fによる等分割。smoke backendではcentered STFTとstride 4のtest frontendに対応した別の時刻式を使う。各選択はcheckpointの再開契約・実験比較に含まれる。
 
-`A_T = M_tgt @ A_MT @ M_src`を有効rowで再正規化する。source/targetのinvalid span、未知文字を除く。paddingへepsilon質量を加えない。lossではlogに入れる値のみepsilonで安定化する。無効unit rowとEOSではguidance biasを0とする。
+`A_T = M_tgt @ A_MT @ M_src`を有効rowで再正規化する。source/targetのinvalid span、未知文字を除く。paddingへepsilon質量を加えない。lossではlogに入れる値のみepsilonで安定化する。無効unit rowとEOSはalignment lossから除外する。
 
-Guidance用のuniform混合は投影後に行う。CTC blankの扱いや元のtoken spanを変更せず、raw priorと平滑化後priorを診断で別々に観測できる。
+主比較はraw projected priorをlossだけへ使い、forwardへのbias注入やuniform混合は行わない。過去の平滑化ビューは診断に残るが、本学習のpriorとは区別する。CTC blankや元token spanは変更しない。
 
 teacher生成CLIは時刻spanとMT attentionを持つ**projection packet**を保存する。denseなU×F行列は学習のCPU先読みと可視化時に生成する。これはencoder長を前処理で固定しないための設計である。
 

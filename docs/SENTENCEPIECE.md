@@ -20,7 +20,7 @@ CharacterとSentencePieceの違いだけを調べるT2TT実験。旧characterの
 | Attention | `t2tt-attention-spm-200k` |
 | teacher | `teacher-alignment-spm-200k` |
 | audit | `diagnostics-spm-200k` / `audit-spm-200k` |
-| Annealed / Distillation / Guidance | 各run名に`spm-200k`を含む |
+| Distillation / Annealed Distillation / Mask Distillation | `research-v2-spm-200k-all-layers`配下の独立stage |
 
 全層modeのAttention・teacher・audit・S2UTは、さらに`-all-layers`を付ける。CTCは既存`speech-text-alignment-200k`、unitは既存保存先を使い、入力・設定hashが同じ場合だけ再利用する。stageは`PERSISTENT/stages/`以下、ローカルは`ROOT/`以下。characterの`t2tt`・`t2tt-200k`を指定すると混入/上書きを拒否する。
 
@@ -58,7 +58,7 @@ Attentionは`[T_subword,S_subword]`、全層なら`[L,T_subword,S_subword]`。�
 
 CTC forced alignmentは元文字単位のまま。同じsubwordに含まれる有効文字の最初のstart/最後のendへ集約する。空白・句読点等のinvalid文字は無視し、有効文字がなければ`[-1,-1]`。teacherには集約時刻と元CTC時刻・token spanを両方保持する。
 
-projectionは従来の`M_tgt @ A_MT @ M_src`で、最終priorはHuBERT reduced units × speech encoder positions。S2UTのunit語彙・構成・loss・Guidance/Distillation係数は変更しない。対応層転移と全head平均も維持する。native fairseq criterionへの接続も検査する。
+projectionは従来の`M_tgt @ A_MT @ M_src`で、最終priorはHuBERT reduced units × speech encoder positions。S2UTのunit語彙・構成・task lossは変更しない。現在の3条件のλ/τは独立したcalibration artifactから解決する。対応層転移と全head平均も維持する。native fairseq criterionへの接続も検査する。
 
 legacy character artifactはAttention shapeが原文長と一致した場合だけ1 codepoint/tokenとして受理する。SPMはspanが必須。type/spec/hash/shapeの矛盾、characterとSPMの混合、tokenizerが変わったresumeは拒否する。
 

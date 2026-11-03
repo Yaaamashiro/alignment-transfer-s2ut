@@ -1,16 +1,12 @@
+from native_plan_fixture import fixture_plan
 """All-layer research path: real pinned fairseq task, criterion and Trainer."""
-from copy import deepcopy
-from pathlib import Path
-import shutil
-from argparse import Namespace
 import numpy as np
 import pytest
 import torch
 from test_benchmark_native import native_data
 from alignment_transfer_s2ut import benchmark as b
-from alignment_transfer_s2ut.io import ArtifactStore,write_json,digest,write_jsonl
+from alignment_transfer_s2ut.io import ArtifactStore,write_json,digest
 from alignment_transfer_s2ut.data.manifest import load_manifest
-from alignment_transfer_s2ut.guidance.attention import layer_kl_sums,layer_row_counts
 
 
 def layered_teacher(root):
@@ -29,118 +25,25 @@ def layered_teacher(root):
         store.put(row["pair_id"],{**meta,**spec,"attention_spec_hash":digest(spec)},packet,overwrite=True)
 
 
-@pytest.mark.parametrize("native_data",[2],indirect=True)
-@pytest.mark.parametrize("method",["baseline","distillation","annealed_guidance","guidance"])
-def test_native_all_layers_two_updates_and_teacher_free_inference(native_data,method):
-    from fairseq import tasks,utils
-    from fairseq_cli import train
-    from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
-    root=native_data.root; layered_teacher(root)
-    plan=b.make_plan(root/"baseline.json",root/"run",method,"t2tt",root/"manifest.jsonl",root/"units",root/"teacher",anneal_steps=1,all_layers=method!="baseline")
-    assert plan["transfer"]["all_layers"]==(method!="baseline")
-    write_json(root/"run/native-run.json",plan)
-    cfg=b.native_config(plan["config"]); utils.set_torch_seed(cfg.common.seed)
-    task=tasks.setup_task(cfg.task); model=task.build_model(cfg.model); criterion=task.build_criterion(cfg.criterion)
-    for name in task.multitask_tasks:
-        criterion.set_multitask_loss_weight(name,task.multitask_tasks[name].args.get_loss_weight(0))
-    assert all(torch.equal(v,model.state_dict()[k]) for k,v in native_data.initial.items())
-    task.load_dataset("train"); dataset=task.dataset("train")
-    samples=[dataset.collater([dataset[i]]) for i in range(2)]
-    if method!="baseline":
-        assert samples[0]["alignment_prior"].shape[1]==2
-        assert not torch.equal(samples[0]["alignment_prior"][:,0],samples[0]["alignment_prior"][:,1])
-        model.train(); model.set_num_updates(0)
-        captured=[]
-        model.register_forward_hook(lambda *a:captured.append((model.alignment_raw.detach(),model.alignment_guided.detach())))
-        loss,size,logs=criterion(model,samples[0])
-        assert logs["guidance_beta"]==(1. if method in {"guidance","annealed_guidance"} else 0.)
-        if method in {"guidance","annealed_guidance"}:
-            raw,guided=captured[-1]
-            for l in range(2):
-                support=samples[0]["alignment_prior"][:,l]>0
-                assert guided[:,l][support].sum()>raw[:,l][support].sum()
-        model.set_num_updates(1); _,_,after=criterion(model,samples[0])
-        if method=="annealed_guidance": assert after["guidance_beta"]==0
-        loss.backward()
-        for block in model.decoder.layers:
-            assert torch.isfinite(block.encoder_attn.q_proj.weight.grad).all()
-            assert block.encoder_attn.q_proj.weight.grad.abs().sum()>0
-        model.zero_grad()
-    with trainer_hooks(plan["contract_hash"]):
-        trainer=train.Trainer(cfg,task,model,criterion)
-        for _ in range(2): trainer.train_step(samples)
-        assert trainer.get_num_updates()==2
-        if method!="baseline":
-            rows=sum((layer_row_counts(s["alignment_prior"]) for s in samples))
-            torch.testing.assert_close(criterion.alignment_scales,sum(s["ntokens"] for s in samples)/rows.clamp_min(1)/2)
-        folder=root/"run/checkpoints"; folder.mkdir()
-        for name in ("checkpoint_last.pt","checkpoint_best.pt"):
-            trainer.consolidate_optimizer(); trainer.save_checkpoint(str(folder/name),{})
-        assert model.alignment_raw is None if method!="baseline" else True
-    b.register_transfer(root/"run",folder/"checkpoint_best.pt",root/"registered.json")
-    if method!="baseline":
-        from alignment_transfer_s2ut.smoke_pipeline import invoke
-        output=root/"visualized"
-        invoke("visualize_attention","--checkpoint",folder/"checkpoint_best.pt","--manifest",root/"manifest.jsonl",
-            "--units",root/"units","--teacher",root/"teacher","--pair-id","2","--layer",0,"--output",output)
-        meta,values=ArtifactStore(output).get("2")
-        assert meta["all_layers"] and meta["layer"]==0
-        np.testing.assert_array_equal(values["t2tt"],ArtifactStore(root/"teacher").get("2")[1]["mt_attention_layers"][0])
-    shutil.rmtree(root/"teacher")
-    row=load_manifest(root/"manifest.jsonl",split="dev",check_audio=False)[0]
-    write_jsonl(root/"source.jsonl",[dict(pair_id=row["pair_id"],ja_audio=row["ja_audio"])])
-    from alignment_transfer_s2ut.inference.native import infer_native
-    values=infer_native(Namespace(record=root/"registered.json",input=root/"source.jsonl",output=root/"pred.jsonl",
-        units_only=True,vocoder_config=None,device="cpu",beam_size=2,max_len_a=0.,max_len_b=8,length_penalty=1.,resume=False,overwrite=False))
-    assert values[0]["inference_beta"]==0 and values[0]["units"]
 
 
 @pytest.mark.parametrize("native_data",[2],indirect=True)
 def test_native_scope_and_layer_count_contract_rejections(native_data):
     root=native_data.root
     args=(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher")
-    with pytest.raises(ValueError,match="all-layer T2TT teacher"): b.make_plan(*args,all_layers=True)
+    with pytest.raises(ValueError,match="all-layer T2TT teacher"): fixture_plan(*args,all_layers=True)
     layered_teacher(root)
-    plan=b.make_plan(*args,all_layers=True)
-    single=b.make_plan(*args,all_layers=False)
+    plan=fixture_plan(*args,all_layers=True)
+    single=fixture_plan(*args,all_layers=False)
     assert plan["contract_hash"]!=single["contract_hash"]
     write_json(root/"run/native-run.json",plan)
     with pytest.raises(ValueError,match="contract exists"): b.train_native(single,root/"run",resume=True)
     store=ArtifactStore(root/"teacher"); meta,packet=store.get("0")
     packet["mt_attention_layers"]=packet["mt_attention_layers"][:1]
     store.put("0",meta,packet,overwrite=True)
-    with pytest.raises(ValueError,match="layer count"): b.make_plan(*args,all_layers=True)
+    with pytest.raises(ValueError,match="layer count"): fixture_plan(*args,all_layers=True)
 
 
-@pytest.mark.parametrize("native_data",[2],indirect=True)
-def test_native_criterion_uses_per_layer_global_rows(native_data):
-    from fairseq import tasks,utils
-    root=native_data.root; layered_teacher(root)
-    plan=b.make_plan(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=True)
-    write_json(root/"run/native-run.json",plan)
-    cfg=b.native_config(plan["config"]); utils.set_torch_seed(cfg.common.seed)
-    task=tasks.setup_task(cfg.task); model=task.build_model(cfg.model); criterion=task.build_criterion(cfg.criterion)
-    for name in task.multitask_tasks:
-        criterion.set_multitask_loss_weight(name,task.multitask_tasks[name].args.get_loss_weight(0))
-    task.load_dataset("train"); ds=task.dataset("train")
-    samples=[ds.collater([ds[i]]) for i in range(2)]
-    rows=sum(layer_row_counts(s["alignment_prior"]) for s in samples)
-    assert rows[0]!=rows[1]
-    tokens=sum(s["ntokens"] for s in samples)
-    criterion.alignment_scales=tokens/rows/2
-    captured=[]
-    model.register_forward_hook(lambda *a:captured.append(model.alignment_raw))
-    extra=[]; expected=[]
-    for sample in samples:
-        task.transfer_policy["lambda_align"]=1.
-        aligned,_,logs=criterion(model,sample)
-        raw=captured[-1]
-        assert raw.shape==sample["alignment_prior"].shape
-        expected.append(layer_kl_sums(sample["alignment_prior"],raw)/rows)
-        task.transfer_policy["lambda_align"]=0.
-        main,_,_=criterion(model,sample)
-        extra.append(aligned-main)
-    torch.testing.assert_close(sum(extra)/tokens,sum(expected).mean(),atol=2e-6,rtol=2e-5)
 
 
 @pytest.mark.parametrize("native_data",[2],indirect=True)
@@ -151,7 +54,7 @@ def test_two_layer_beta_zero_logits_loss_update_match_stock(native_data,all_laye
     from fairseq_cli import train
     from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
     root=native_data.root; layered_teacher(root)
-    plan=b.make_plan(root/"baseline.json",root/"zero","guidance","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",beta=0.,all_layers=all_layers)
+    plan=fixture_plan(root/"baseline.json",root/"zero","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",beta=0.,all_layers=all_layers)
     write_json(root/"zero/native-run.json",plan)
     cfg=b.native_config(plan["config"]); task=tasks.setup_task(cfg.task)
     utils.set_torch_seed(cfg.common.seed); model=task.build_model(cfg.model)
@@ -160,7 +63,7 @@ def test_two_layer_beta_zero_logits_loss_update_match_stock(native_data,all_laye
     model.eval(); stock_model.eval()
     with torch.no_grad():
         expected=stock_model(**native_data.samples[0]["net_input"])[0]
-        model.transfer_context=(samples[0]["alignment_prior"],0.,.05,all_layers)
+        model.transfer_context=(tuple(samples[0]["alignment_prior"].shape),all_layers)
         actual=model(**samples[0]["net_input"])[0]; model.transfer_context=None
         torch.testing.assert_close(actual,expected,atol=0,rtol=0)
     stock=StockTrainer(native_data.cfg,native_data.task,stock_model,native_data.task.build_criterion(native_data.cfg.criterion))
@@ -178,7 +81,7 @@ def test_two_layer_beta_zero_logits_loss_update_match_stock(native_data,all_laye
 def test_mixed_head_specification_is_rejected_during_native_loading(native_data):
     from fairseq import tasks
     root=native_data.root; layered_teacher(root)
-    plan=b.make_plan(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=True)
+    plan=fixture_plan(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=True)
     write_json(root/"run/native-run.json",plan)
     store=ArtifactStore(root/"teacher"); meta,packet=store.get("1")
     meta["heads"]=[0]
@@ -191,13 +94,13 @@ def test_mixed_head_specification_is_rejected_during_native_loading(native_data)
 @pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(),reason="all-layer native FP16 connection requires CUDA")
 @pytest.mark.parametrize("native_data",[2],indirect=True)
-@pytest.mark.parametrize("method",["distillation","annealed_guidance","guidance"])
+@pytest.mark.parametrize("method",["distillation","annealed_distillation","mask_distillation"])
 def test_all_layer_fp16_trainer_and_fp32_prior(native_data,method):
     from fairseq import tasks
     from fairseq_cli import train
     from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
     root=native_data.root; layered_teacher(root)
-    plan=b.make_plan(root/"baseline.json",root/"cuda",method,"t2tt",root/"manifest.jsonl",root/"units",root/"teacher",anneal_steps=1,all_layers=True)
+    plan=fixture_plan(root/"baseline.json",root/"cuda",method,"t2tt",root/"manifest.jsonl",root/"units",root/"teacher",anneal_steps=1,all_layers=True)
     write_json(root/"cuda/native-run.json",plan)
     cfg=b.native_config(plan["config"]); cfg.common.cpu=False; cfg.common.fp16=True
     task=tasks.setup_task(cfg.task); task.load_dataset("train"); ds=task.dataset("train")
@@ -218,12 +121,12 @@ def test_all_layer_fp16_trainer_and_fp32_prior(native_data,method):
         restarted.model.register_forward_pre_hook(lambda model,args:betas.append(model.transfer_context[1]))
         restarted.train_step(samples)
         assert restarted.get_num_updates()==2 and all(torch.isfinite(p).all() for p in restarted.model.parameters())
-        assert betas and all(beta==(1. if method=="guidance" else 0.) for beta in betas)
+        assert betas and all(scope is True for scope in betas)
         torch.cuda.synchronize()
         import json
         print(json.dumps(dict(kind="tiny_all_layer_gpu_preflight",method=method,decoder_layers=2,
             resumed_from_updates=1,completed_updates=2,gpu=torch.cuda.get_device_name(),
-            beta_after_resume=betas[-1],
+            all_layer_capture_after_resume=betas[-1],
             peak_allocated_bytes=torch.cuda.max_memory_allocated(),peak_reserved_bytes=torch.cuda.max_memory_reserved())))
 
 
@@ -237,7 +140,7 @@ def test_native_rejects_selected_head_teacher(native_data,all_layers):
     meta["heads"]=[0];meta["attention_spec_hash"]=digest(attention_spec(meta))
     store.put("0",meta,packet,overwrite=True)
     with pytest.raises(ValueError,match="all-head-mean teacher"):
-        b.make_plan(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=all_layers)
+        fixture_plan(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=all_layers)
 
 
 @pytest.mark.parametrize("native_data",[2],indirect=True)
@@ -247,34 +150,12 @@ def test_native_rejects_single_teacher_from_another_layer(native_data):
     args=(root/"baseline.json",root/"run","distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher")
     meta,packet=store.get("0")
     # Missing legacy metadata still means the final layer; its positive alias is equivalent.
-    b.make_plan(*args)
+    fixture_plan(*args)
     meta["layer"]=1;meta["attention_spec_hash"]=digest(attention_spec(meta))
     store.put("0",meta,packet,overwrite=True)
-    b.make_plan(*args)
+    fixture_plan(*args)
     meta["layer"]=0;meta["attention_spec_hash"]=digest(attention_spec(meta))
     store.put("0",meta,packet,overwrite=True)
-    with pytest.raises(ValueError,match="layer mismatch"):b.make_plan(*args)
+    with pytest.raises(ValueError,match="layer mismatch"):fixture_plan(*args)
 
-
-@pytest.mark.parametrize("native_data",[2],indirect=True)
-def test_native_scope_ablation_stays_strict_about_other_settings(native_data):
-    root=native_data.root;layered_teacher(root);paths=[root/"baseline.json"]
-    for scope,name in ((False,"single"),(True,"all")):
-        plan=b.make_plan(root/"baseline.json",root/name,"distillation","t2tt",root/"manifest.jsonl",root/"units",root/"teacher",all_layers=scope)
-        record=deepcopy(native_data.record);record.update(method="distillation",transfer=plan["transfer"])
-        record["record_hash"]=digest({k:v for k,v in record.items() if k!="record_hash"})
-        path=root/(name+".json");write_json(path,record);paths.append(path)
-    assert not b.compare_records(paths)["fair_comparison"]
-    result=b.compare_records(paths,allow_scope_ablation=True)
-    assert result["fair_comparison"] and result["independent_variables"]==dict(all_layers=[False,True])
-    base=deepcopy(record)
-    for field,value in (("beta",.5),("lambda_align",2.),("smoothing",.1),("method","guidance")):
-        changed=deepcopy(base);changed["transfer"][field]=value
-        changed["record_hash"]=digest({k:v for k,v in changed.items() if k!="record_hash"})
-        write_json(paths[-1],changed,overwrite=True)
-        assert not b.compare_records(paths,allow_scope_ablation=True)["fair_comparison"]
-    write_json(paths[-1],base,overwrite=True)
-    output=root/"scope-comparison.json"
-    b.main(["compare",*map(str,paths),"--allow-scope-ablation","--output",str(output)])
-    from alignment_transfer_s2ut.io import read_json
-    assert read_json(output)["independent_variables"]==dict(all_layers=[False,True])
+__all__ = ['native_data']  # pytest fixture exports

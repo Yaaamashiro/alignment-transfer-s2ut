@@ -6,11 +6,10 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import shutil
-import sys
 import zipfile
 import torch
 import yaml
-from .io import atomic_write, digest, file_hash, read_json, write_json, read_jsonl, write_jsonl, local_path
+from .io import atomic_write, digest, file_hash, read_json, write_json, local_path
 from .progress import progress
 
 REVISION = "3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99"
@@ -320,22 +319,20 @@ def read_record(path, verify_data=True):
     return record
 
 
-def make_plan(baseline, output, method="annealed_guidance", prior_type="t2tt", manifest=None,
-              units=None, teacher=None, anneal_steps=200000, beta=1., lambda_align=1., smoothing=.05, all_layers=False):
+def make_plan(baseline, output, method="distillation", prior_type="t2tt", manifest=None,
+              units=None, teacher=None, anneal_steps=None, beta=None, lambda_align=None, smoothing=0., all_layers=True,
+              *, calibration=None, mask_top_p=None, for_calibration=False):
     record = read_record(baseline)
     if any(Path(output).resolve().is_relative_to(root) for root in
            (Path(record["data"]).resolve(), Path(record["checkpoint"]).resolve().parent)):
         raise ValueError("training output must be outside registered benchmark inputs")
-    if method not in {"baseline", "distillation", "guidance", "annealed_guidance"} or prior_type not in {"t2tt", "monotonic"}:
+    if method not in {"baseline", "distillation", "annealed_distillation", "mask_distillation"} or prior_type != "t2tt":
         raise ValueError("unknown alignment condition")
     budget = record["training_budget"]
-    if method == "annealed_guidance" and not 1 <= anneal_steps < budget:
-        raise ValueError("annealing must leave a teacher-free tail within the baseline training budget")
-    if method != "baseline" and (not manifest or not units or prior_type == "t2tt" and not teacher):
-        raise ValueError("transfer training needs the full matching manifest/units and T2TT teacher when selected")
-    import math
-    if any(not math.isfinite(v) or v < 0 for v in (beta, lambda_align, smoothing)) or smoothing > 1:
-        raise ValueError("invalid transfer coefficient")
+    if any(v is not None for v in (anneal_steps, beta, lambda_align)) or smoothing != 0:
+        raise ValueError("native research uses calibrated loss coefficients; guidance overrides were removed")
+    if method != "baseline" and (not manifest or not units or not teacher):
+        raise ValueError("distillation needs full matching manifest, units and T2TT teacher")
     cfg = deepcopy(record["config"])
     cfg["optimization"]["max_update"] = budget
     cfg["checkpoint"]["save_dir"] = str((Path(output).resolve() / "checkpoints"))
@@ -349,8 +346,9 @@ def make_plan(baseline, output, method="annealed_guidance", prior_type="t2tt", m
     cfg["common"]["wandb_project"] = None
     if scientific_config(cfg) != record["scientific_config"]:
         raise ValueError("scientific configuration differs from the registered baseline")
-    transfer = {"method": method, "prior_type": prior_type, "all_layers": bool(all_layers), "anneal_steps": anneal_steps, "beta": beta,
-                "lambda_align": lambda_align, "smoothing": smoothing, "manifest": str(Path(manifest).resolve()) if manifest else None,
+    transfer = {"method": method, "prior_type": prior_type, "all_layers": bool(all_layers),
+                "aggregation": "worst_layer", "anneal_fraction": .8, "anneal_schedule": "cosine",
+                "manifest": str(Path(manifest).resolve()) if manifest else None,
                 "units": str(Path(units).resolve()) if units else None, "teacher": str(Path(teacher).resolve()) if teacher else None}
     if method != "baseline":
         transfer["artifacts"] = artifact_contract(record, manifest, units, teacher, prior_type, all_layers)
@@ -367,14 +365,27 @@ def make_plan(baseline, output, method="annealed_guidance", prior_type="t2tt", m
             "initialization": "fresh native fairseq seed; no baseline weights loaded"}
     plan["implementation_hash"] = digest({str(p.relative_to(Path(__file__).parent)): file_hash(p)
                                          for p in sorted(Path(__file__).parent.rglob("*.py"))})
+    if for_calibration:
+        plan["calibration_only"] = True
+    if method != "baseline" and not for_calibration:
+        if not calibration:
+            raise ValueError("native distillation requires --calibration; run top-p diagnostics and calibration first")
+        from .alignment.calibration import validate_artifact
+        value = read_json(calibration)
+        transfer["calibrated"] = validate_artifact(value, plan)
+        if mask_top_p is not None and mask_top_p != value["selected_top_p"]:
+            raise ValueError("mask top-p differs from calibrated selection")
+        transfer.update(calibration_hash=file_hash(calibration), calibration_artifact_hash=value["artifact_hash"],
+                        mask_top_p=value["selected_top_p"])
     plan["contract_hash"] = digest(plan)
     return plan
 
 
 def train_native(plan, output, resume=False):
+    if plan.get("calibration_only"):
+        raise ValueError("calibration-only plan cannot start training")
     from .s2ut.fairseq_extension import verify_fairseq
     verify_fairseq()
-    from omegaconf import OmegaConf
     from fairseq_cli import train
     from fairseq.distributed import utils as distributed_utils
     from .s2ut import benchmark_extension
@@ -442,9 +453,12 @@ def compare_records(paths, evaluations=None, allow_scope_ablation=False):
     if scope_varies and not allow_scope_ablation:
         differences["transfer/all_layers"] = [t.get("all_layers",False) for t in transfers]
     if scope_varies and allow_scope_ablation:
-        for key in ("method","prior_type","anneal_steps","beta","lambda_align","smoothing","artifacts"):
+        for key in ("method","prior_type","calibrated","calibration_hash","mask_top_p","artifacts"):
             if any(t.get(key) != transfers[0].get(key) for t in transfers[1:]):
                 differences["ablation/"+key]=[t.get(key) for t in transfers]
+    for key in ("calibration_hash", "calibrated", "mask_top_p", "aggregation", "anneal_fraction", "anneal_schedule"):
+        if transfers and any(t.get(key) != transfers[0].get(key) for t in transfers[1:]):
+            differences["transfer/" + key] = [t.get(key) for t in transfers]
     signatures = [t.get("artifacts",{}).get("teacher_signature") for t in transfers if t.get("prior_type","t2tt")=="t2tt"]
     if signatures and any(s != signatures[0] for s in signatures[1:]):
         differences["transfer/teacher_signature"] = signatures
@@ -485,16 +499,14 @@ def main(argv=None):
         child = sub.add_parser(action)
         child.add_argument("--baseline", required=True)
         child.add_argument("--output", required=True)
-        child.add_argument("--method", choices=["baseline", "distillation", "guidance", "annealed_guidance"], default="annealed_guidance")
-        child.add_argument("--prior-type", choices=["t2tt", "monotonic"], default="t2tt")
+        child.add_argument("--method", choices=["baseline", "distillation", "annealed_distillation", "mask_distillation"], default="distillation")
+        child.add_argument("--prior-type", choices=["t2tt"], default="t2tt")
         for field in ("manifest", "units", "teacher"):
             child.add_argument("--" + field)
-        child.add_argument("--anneal-steps", type=int, default=200000)
-        child.add_argument("--beta", type=float, default=1.)
-        child.add_argument("--lambda-align", type=float, default=1.)
-        child.add_argument("--smoothing", type=float, default=.05)
+        child.add_argument("--calibration")
+        child.add_argument("--mask-top-p", type=float)
         child.add_argument("--resume", action="store_true")
-        child.add_argument("--all-layers", action="store_true")
+        child.add_argument("--all-layers", action="store_true", default=True)
     child = sub.add_parser("register-transfer")
     for field in ("run", "checkpoint", "output"):
         child.add_argument("--" + field, required=True)
@@ -542,7 +554,7 @@ def main(argv=None):
         return
     else:
         result = make_plan(args.baseline, args.output, args.method, args.prior_type, args.manifest,
-                           args.units, args.teacher, args.anneal_steps, args.beta, args.lambda_align, args.smoothing, args.all_layers)
+                           args.units, args.teacher, all_layers=args.all_layers, calibration=args.calibration, mask_top_p=args.mask_top_p)
         if args.action == "train":
             result = train_native(result, args.output, args.resume)
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))

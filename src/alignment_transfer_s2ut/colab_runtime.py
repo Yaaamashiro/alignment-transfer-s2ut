@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
@@ -18,7 +17,7 @@ from .io import digest, file_hash, read_json, write_json
 from .progress import progress
 
 BENCHMARK_REVISION = "4361e55a99c7f4ea3a00c5c138f6820c34a07d06"
-EXTRA_RECOVERY = ("native-run.json", "native-dev.jsonl", "checkpoint_best.pt", "experiment.json", "metrics.jsonl",
+EXTRA_RECOVERY = ("native-run.json", "native-dev.jsonl", "alignment-train.jsonl", "checkpoint_best.pt", "experiment.json", "metrics.jsonl",
                   "tokenization.json", "tokenizers/ja.model", "tokenizers/ja.vocab", "tokenizers/en.model", "tokenizers/en.vocab")
 
 

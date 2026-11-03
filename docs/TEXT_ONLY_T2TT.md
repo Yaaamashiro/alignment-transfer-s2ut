@@ -96,7 +96,7 @@ tokenizerのCLI既定はcharacter。SentencePieceでは`--tokenizer sentencepiec
 | dev JSON/predictions/cache | `ROOT/dev-<tokenizer>/`と同名Drive stage |
 | Attention | `ROOT/attention-<tokenizer>[-all-layers]/`と同名Drive stage |
 
-既存benchmark/pilot/pipelineのNotebookは変更せず、固定revisionも維持する。外部text用Notebookだけを新しいsourceへ固定する。
+text-only追加時には既存Notebookのrevisionを維持した。現在の主benchmark Notebookはloss-only研究設計へ更新されているが、この外部text用Notebookの独立した学習・保存経路は変わらない。
 
 ## 変更ファイル
 

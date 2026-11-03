@@ -20,16 +20,17 @@ from .fairseq_extension import AlignmentS2UT, s2ut_architecture_fisher
 from ..benchmark import read_record, artifact_contract
 from ..config import BackboneConfig
 from ..data.manifest import load_manifest
-from ..io import ArtifactStore, read_json, write_jsonl, read_jsonl, atomic_write
-from ..guidance.attention import alignment_kl, beta_at, layer_kl_sums, layer_row_counts, entropy
+from ..io import ArtifactStore, read_json, write_jsonl, read_jsonl
+from ..alignment.losses import loss_and_logs
 from ..training import prior_builder
 
 
 class AlignmentDataset(BaseWrapperDataset):
     """Native audio transforms, sorting and token batches; deterministic CPU priors."""
-    def __init__(self, dataset, policy):
+    def __init__(self, dataset, policy, diagnostic=False):
         super().__init__(dataset)
         self.policy = policy
+        self.diagnostic = diagnostic
         self.rows = {r["pair_id"]: r for r in load_manifest(policy["manifest"], check_audio=False)}
         if not hasattr(dataset, "ids") or any(pair not in self.rows for pair in dataset.ids):
             raise ValueError("alignment training requires one matching native train dataset")
@@ -41,7 +42,7 @@ class AlignmentDataset(BaseWrapperDataset):
         native = self.dataset[index]
         item = native[0] if isinstance(native, tuple) else native
         row = self.rows[self.dataset.ids[index]]
-        if row["split"] != "train":
+        if row["split"] != "train" and not self.diagnostic:
             raise ValueError("alignment prior requested outside train")
         meta, unit = self.units.get(row["pair_id"], {"unit_config_hash": self.policy["artifacts"]["unit_config_hash"]})
         expected = torch.tensor(unit["reduced_units"], dtype=torch.long) + 4
@@ -88,6 +89,7 @@ class AlignmentTask(SpeechToSpeechTask):
         plan = read_json(args.alignment_config)
         record = read_record(plan["baseline_record"])
         self.transfer_policy = plan["transfer"]
+        self.training_budget = plan["training_budget"]
         policy = self.transfer_policy
         if artifact_contract(record, policy["manifest"], policy["units"], policy["teacher"], policy["prior_type"], policy.get("all_layers",False)) != policy["artifacts"]:
             raise ValueError("alignment artifact contract changed")
@@ -113,20 +115,20 @@ class BenchmarkTransferModel(AlignmentS2UT):
     def forward(self, src_tokens, src_lengths, prev_output_tokens, tgt_speaker=None, return_all_hiddens=False):
         if self.transfer_context is None:
             return super().forward(src_tokens, src_lengths, prev_output_tokens, tgt_speaker, return_all_hiddens)
-        prior, beta, smoothing, all_layers = self.transfer_context
+        prior_shape, all_layers = self.transfer_context
         self.alignment_raw = self.alignment_guided = None
         encoded = self.encoder(src_tokens, src_lengths=src_lengths, tgt_speaker=tgt_speaker,
                                return_all_hiddens=return_all_hiddens)
-        if prior.ndim != (4 if all_layers else 3) or prior.size(0) != prev_output_tokens.size(0) or prior.size(-1) != encoded["encoder_out"][0].size(0) or prior.size(-2) != prev_output_tokens.size(1):
+        if len(prior_shape) != (4 if all_layers else 3) or prior_shape[0] != prev_output_tokens.size(0) or prior_shape[-1] != encoded["encoder_out"][0].size(0) or prior_shape[-2] != prev_output_tokens.size(1):
             raise ValueError("prepared prior and native encoder/decoder lengths disagree")
         adapters = [block.encoder_attn for block in self.decoder.layers]
-        if all_layers and prior.size(1) != len(adapters):
+        if all_layers and prior_shape[1] != len(adapters):
             raise ValueError("prior decoder layer count mismatch")
         selected = adapters if all_layers else adapters[-1:]
         for i,adapter in enumerate(selected):
             adapter.raw_attention = adapter.guided_attention = None
-            adapter.transfer_capture, adapter.transfer_prior = True, prior[:,i] if all_layers else prior
-            adapter.transfer_beta, adapter.transfer_smoothing, adapter.transfer_heads = beta, smoothing, None
+            adapter.transfer_capture, adapter.transfer_prior = True, None
+            adapter.transfer_beta, adapter.transfer_smoothing, adapter.transfer_heads = 0., 0., None
         try:
             output = self.decoder(prev_output_tokens, encoder_out=encoded)
             self.alignment_raw = torch.stack([a.raw_attention for a in selected],1) if all_layers else selected[0].raw_attention
@@ -149,61 +151,57 @@ def architecture(args):
 
 @register_criterion("speech_to_unit_alignment", dataclass=RdropLabelSmoothedCrossEntropyCriterionConfig)
 class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
-    alignment_scale = 1.
-    alignment_scales = None
-
-    def forward(self, model, sample, reduce=True):
-        if not model.training:
-            # Exactly the stock speech_to_unit validation loss and multitask path.
-            return super().forward(model, sample, reduce)
+    def components(self, model, sample, reduce=True):
         if self.rdrop_alpha > 0 or self.rdrop_alpha_mtl > 0:
             raise ValueError("alignment recipe does not support R-Drop duplication")
         policy = self.task.transfer_policy
-        beta = beta_at(model.alignment_updates, policy["method"], policy["beta"], policy["beta"], 0., policy["anneal_steps"])
-        all_layers = policy.get("all_layers",False)
-        model.transfer_context = (sample["alignment_prior"].float(), beta, policy["smoothing"], all_layers)
+        # Capture stock all-head attention; never give adapters a teacher/bias.
+        model.transfer_context = (tuple(sample["alignment_prior"].shape), policy.get("all_layers", False))
         try:
             loss, size, logs = super().forward(model, sample, reduce)
-            if all_layers:
-                prior=sample["alignment_prior"]
-                sums=layer_kl_sums(prior,model.alignment_raw)
-                counts=layer_row_counts(prior)
-                scales = self.alignment_scales if self.alignment_scales is not None else size/counts.clamp_min(1)/len(counts)
-                if policy["method"]=="distillation":
-                    loss = loss + policy["lambda_align"] * (sums * scales.to(sums.device)).sum()
-                for l in range(len(sums)):
-                    logs[f"alignment_kl_sum_layer_{l}"]=sums[l].detach()
-                    logs[f"alignment_rows_layer_{l}"]=counts[l].detach()
-                logs.update(guidance_beta=beta,loss=loss.detach(),alignment_layers=len(sums))
-                return loss,size,logs
-            kl_sum = alignment_kl(sample["alignment_prior"].float(), model.alignment_raw, reduction="sum")
-            if policy["method"] == "distillation":
-                loss = loss + policy["lambda_align"] * kl_sum * self.alignment_scale
-            logs.update(alignment_kl_sum=kl_sum.detach(), alignment_rows=(sample["alignment_prior"].sum(-1) > 0).sum(),
-                        guidance_beta=beta)
-            logs["loss"] = loss.detach()
-            return loss, size, logs
+            return loss, size, logs, model.alignment_raw
         finally:
             model.transfer_context = None
-            model.alignment_raw = None
-            model.alignment_guided = None
+            model.alignment_raw = model.alignment_guided = None
+
+    def forward(self, model, sample, reduce=True):
+        if not model.training:
+            return super().forward(model, sample, reduce)
+        task_loss, size, logs, raw = self.components(model, sample, reduce)
+        policy = self.task.transfer_policy
+        lengths = model.encoder.subsample.get_out_seq_lens_tensor(sample["net_input"]["src_lengths"])
+        padding = torch.arange(raw.size(-1), device=raw.device)[None] >= lengths[:,None]
+        alignment, diagnostics = loss_and_logs(sample["alignment_prior"], raw, policy,
+            model.alignment_updates, self.task.training_budget, padding)
+        loss = task_loss + size * alignment
+        logs.update(diagnostics)
+        logs.update(loss=loss.detach(), alignment_metric_weight=size)
+        return loss, size, logs
 
     @classmethod
     def reduce_metrics(cls, logging_outputs):
         super().reduce_metrics(logging_outputs)
-        count = sum(log.get("alignment_rows", 0) for log in logging_outputs)
-        if count:
-            metrics.log_scalar("alignment_kl", sum(log.get("alignment_kl_sum", 0) for log in logging_outputs) / count, count)
-        layers=max((log.get("alignment_layers",0) for log in logging_outputs),default=0)
-        means=[]
-        for l in range(layers):
-            rows=sum(log.get(f"alignment_rows_layer_{l}",0) for log in logging_outputs)
-            value=sum(log.get(f"alignment_kl_sum_layer_{l}",0) for log in logging_outputs)/max(1,rows)
-            means.append(value)
-            metrics.log_scalar(f"alignment/kl_layer_{l}",value,max(1,rows))
-        if means:
-            metrics.log_scalar("alignment/kl_mean",sum(means)/layers)
-            metrics.log_scalar("alignment_kl",sum(means)/layers)
+        weighted = [log for log in logging_outputs if "alignment_metric_weight" in log]
+        if weighted:
+            total = sum(log["alignment_metric_weight"] for log in weighted)
+            for key in weighted[0]:
+                if key.startswith("alignment/"):
+                    if key == "alignment/worst_layer":
+                        continue
+                    if key.startswith(("alignment/selected_frames_", "alignment/valid_rows_")):
+                        metrics.log_scalar(key, sum(log.get(key,0) for log in weighted))
+                        continue
+                    metrics.log_scalar(key, sum(log.get(key, 0) * log["alignment_metric_weight"] for log in weighted) / total, total)
+            layer_keys=sorted((k for k in weighted[0] if k.startswith("alignment/D_")),key=lambda k:int(k.rsplit("_",1)[1]))
+            values=[sum(float(log[key]) * log["alignment_metric_weight"] for log in weighted)/total for key in layer_keys]
+            metrics.log_scalar("alignment/worst_layer", max(range(len(values)),key=values.__getitem__))
+            for layer in range(len(values)):
+                fraction=sum(log["alignment_metric_weight"] for log in weighted if log["alignment/worst_layer"]==layer)/total
+                metrics.log_scalar(f"alignment/worst_layer_fraction_{layer}",fraction,total)
+        main = [log for log in logging_outputs if "native_main_loss_sum" in log]
+        if main:
+            count = sum(log["sample_size"] for log in main)
+            metrics.log_scalar("train/main_loss", sum(log["native_main_loss_sum"] for log in main) / count, count)
 
 
 def rng_state(model):
@@ -270,18 +268,26 @@ def completed_step(trainer, samples, step, max_retries=32):
 
 @contextmanager
 def trainer_hooks(contract_hash, selection_policy=None):
-    """Native Trainer with only provenance and global valid-row KL normalization."""
+    """Native Trainer with provenance, logging and stock microbatch accumulation."""
     from fairseq_cli import train
     original = train.Trainer
     original_load = checkpoint_utils.load_checkpoint_to_cpu
     original_validate_save = train.validate_and_save
+    original_forward = SpeechToUnitMultitaskTaskCriterion.forward
     original_compute = SpeechToUnitMultitaskTaskCriterion.compute_loss
     selection_policy = selection_policy or {"mode": "native"}
     def compute(self, *args, **kwargs):
         result = original_compute(self, *args, **kwargs)
-        self.native_main_loss_sum = result[0].detach()
+        self.native_main_loss_sum = result[0].detach().clone()
         return result
+    def forward(self, *args, **kwargs):
+        loss, size, logs = original_forward(self, *args, **kwargs)
+        logs["native_main_loss_sum"] = self.native_main_loss_sum
+        if not isinstance(self, AlignmentCriterion):
+            metrics.log_scalar("train/main_loss", float(self.native_main_loss_sum) / size, size)
+        return loss, size, logs
     SpeechToUnitMultitaskTaskCriterion.compute_loss = compute
+    SpeechToUnitMultitaskTaskCriterion.forward = forward
     class Trainer(original):
         selection_state = None
         validation_main = None
@@ -293,21 +299,24 @@ def trainer_hooks(contract_hash, selection_policy=None):
             return converted
 
         def train_step(self, samples, *args, **kwargs):
-            if isinstance(self.criterion, AlignmentCriterion):
-                tokens = sum(s["target"].size(0) if self.criterion.sentence_avg else s["ntokens"] for s in samples if s)
-                if self.criterion.task.transfer_policy.get("all_layers",False):
-                    layers=len(self.model.decoder.layers)
-                    rows=sum((layer_row_counts(s["alignment_prior"]).cpu() for s in samples if s),torch.zeros(layers))
-                    self.criterion.alignment_scales=tokens/rows.clamp_min(1)/layers
-                else:
-                    rows = sum(int((s["alignment_prior"].sum(-1) > 0).sum()) for s in samples if s)
-                    # Native Trainer divides by total main tokens. This factor retains
-                    # lambda * sum(KL) / all valid rows across accumulated microbatches.
-                    self.criterion.alignment_scale = tokens / max(1, rows)
             step = lambda values: super(Trainer, self).train_step(values, raise_oom=True)
-            if os.environ.get("S2ST_TRAIN_STAGING"):
-                return step(samples)  # The pinned benchmark runtime owns overflow retries.
-            return completed_step(self, samples, step)
+            result = step(samples) if os.environ.get("S2ST_TRAIN_STAGING") else completed_step(self, samples, step)
+            if result is not None:
+                path = Path(self.cfg.checkpoint.save_dir).parent / "alignment-train.jsonl"
+                row = {"step": self.get_num_updates(), **{k: float(v) for k, v in result.items()
+                    if k.startswith(("alignment/", "train/")) and isinstance(v, (int, float))}}
+                if "alignment/worst_layer" in row:
+                    row["alignment/worst_layer"] = int(row["alignment/worst_layer"])
+                row.update({"train/total_loss": float(result.get("loss", 0)) * math.log(2),
+                    "train/learning_rate": self.get_lr(), "train/gradient_norm": float(result.get("gnorm", 0))})
+                if "train/main_loss" not in row:
+                    row["train/main_loss"] = float(result.get("nll_loss", 0)) * math.log(2)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                import json
+                with path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(row, allow_nan=False) + "\n")
+                    stream.flush()
+            return result
 
         def valid_step(self, *args, **kwargs):
             result = super().valid_step(*args, **kwargs)
@@ -412,3 +421,4 @@ def trainer_hooks(contract_hash, selection_policy=None):
         train.Trainer, checkpoint_utils.load_checkpoint_to_cpu = original, original_load
         train.validate_and_save = original_validate_save
         SpeechToUnitMultitaskTaskCriterion.compute_loss = original_compute
+        SpeechToUnitMultitaskTaskCriterion.forward = original_forward

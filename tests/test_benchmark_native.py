@@ -1,7 +1,7 @@
+from native_plan_fixture import fixture_plan
 """Real pinned fairseq Trainer updates with a separately trained baseline."""
 from argparse import Namespace
 from copy import deepcopy
-import json
 from pathlib import Path
 import shutil
 import numpy as np
@@ -102,7 +102,6 @@ def native_data(tmp_path, request):
     trainer.save_checkpoint(str(root / "baseline/checkpoints/checkpoint_best.pt"), {"s2st_recipe_fingerprint": fingerprint})
     record = b.register_baseline(root / "baseline/checkpoints/checkpoint_best.pt", data, root / "recipe.json",
                                  root / "metadata.json", root / "baseline.json")
-    from alignment_transfer_s2ut.config import BackboneConfig
     from alignment_transfer_s2ut.units.timing import frame_spans, reduce_units, run_spans
     canonical = load_manifest(root / "manifest.jsonl")
     unit_store, teacher_store = ArtifactStore(root / "units"), ArtifactStore(root / "teacher")
@@ -133,7 +132,7 @@ def test_native_registration_plan_updates_and_teacher_free_validation(native_dat
     from fairseq_cli import train
     from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks, AlignmentCriterion
     root = native_data.root
-    plan = b.make_plan(root / "baseline.json", root / "transfer", "annealed_guidance", "t2tt",
+    plan = fixture_plan(root / "baseline.json", root / "transfer", "annealed_distillation", "t2tt",
                        root / "manifest.jsonl", root / "units", root / "teacher", anneal_steps=1)
     assert b.scientific_config(plan["config"]) == native_data.record["scientific_config"]
     assert plan["config"]["checkpoint"]["restore_file"] == "checkpoint_last.pt"
@@ -200,7 +199,7 @@ def test_native_beta_zero_matches_stock_trainer_update(native_data):
     from fairseq_cli import train
     from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
     root = native_data.root
-    plan = b.make_plan(root / "baseline.json", root / "zero", "guidance", "t2tt",
+    plan = fixture_plan(root / "baseline.json", root / "zero", "distillation", "t2tt",
                        root / "manifest.jsonl", root / "units", root / "teacher", beta=0.)
     write_json(root / "zero/native-run.json", plan)
     cfg = b.native_config(plan["config"])
@@ -235,7 +234,7 @@ def test_native_benchmark_runtime_freezes_complete_training_state(native_data, b
     monkeypatch.setenv("S2ST_BACKUP_MIN_SECONDS", "600")
     monkeypatch.setenv("S2ST_TRAIN_READERS", "1")
     monkeypatch.setenv("S2ST_TRAIN_ADAPTIVE_BATCH", "0")
-    plan = b.make_plan(root / "baseline.json", root / "runtime", "guidance", "t2tt",
+    plan = fixture_plan(root / "baseline.json", root / "runtime", "distillation", "t2tt",
                        root / "manifest.jsonl", root / "units", root / "teacher", beta=0.)
     write_json(root / "runtime/native-run.json", plan)
     cfg = b.native_config(plan["config"])
@@ -253,6 +252,7 @@ def test_native_benchmark_runtime_freezes_complete_training_state(native_data, b
         assert len(ready) == 1 and read_json(ready[0])["updates"] == 1
         frozen = ready[0].parent / "files"
         assert (frozen / "native-run.json").is_file()
+        assert (frozen / "alignment-train.jsonl").is_file()
         saved = b.load_native(frozen / "checkpoints/checkpoint_last.pt")
         assert saved["extra_state"]["alignment_contract_hash"] == plan["contract_hash"]
         assert "s2st_performance" in saved["extra_state"] and saved["last_optimizer_state"]
@@ -301,7 +301,7 @@ def test_native_report_only_selection_and_full_dev(native_data, monkeypatch):
     from fairseq_cli import train
     from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
     root = native_data.root
-    plan = b.make_plan(root / "baseline.json", root / "reported", method="baseline")
+    plan = fixture_plan(root / "baseline.json", root / "reported", method="baseline")
     cfg = b.native_config(plan["config"])
     task = native_data.task
     trainer_state = {"epoch": 1, "iterations_in_epoch": 1}
@@ -327,7 +327,7 @@ def test_native_report_only_selection_and_full_dev(native_data, monkeypatch):
 def test_native_comparison_rejects_unknown_differences(native_data):
     root = native_data.root
     other = deepcopy(native_data.record)
-    other["method"] = "annealed_guidance"
+    other["method"] = "annealed_distillation"
     other["scientific_config"]["optimizer"]["adam_betas"] = "(0.9,0.999)"
     other["record_hash"] = digest({k: v for k, v in other.items() if k != "record_hash"})
     write_json(root / "different.json", other)
@@ -338,7 +338,7 @@ def test_native_comparison_rejects_unknown_differences(native_data):
 def test_comparison_requires_matching_generation_and_checkpoint(native_data):
     root = native_data.root
     other = deepcopy(native_data.record)
-    other["method"] = "annealed_guidance"
+    other["method"] = "annealed_distillation"
     other["record_hash"] = digest({k: v for k, v in other.items() if k != "record_hash"})
     write_json(root / "transfer.json", other)
     contract = {"manifest_hash": "dev", "inference_config": {"beam_size": 10}, "vocoder_hash": "vocoder",
@@ -391,7 +391,7 @@ def test_registration_rejects_changed_data_and_recipe(native_data):
     root = native_data.root
     assert b.read_record(root / "baseline.json")["checkpoint_updates"] == 2
     with pytest.raises(ValueError, match="outside registered"):
-        b.make_plan(root / "baseline.json", root / "prepared/transfer", method="baseline")
+        fixture_plan(root / "baseline.json", root / "prepared/transfer", method="baseline")
     metadata = read_json(root / "metadata.json")
     metadata["training_fingerprint"] = "wrong"
     write_json(root / "bad-metadata.json", metadata)
@@ -411,7 +411,7 @@ def test_native_fp16_trainer_and_fp32_prior(native_data):
     from fairseq_cli import train
     from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
     root = native_data.root
-    plan = b.make_plan(root / "baseline.json", root / "cuda", "annealed_guidance", "t2tt",
+    plan = fixture_plan(root / "baseline.json", root / "cuda", "annealed_distillation", "t2tt",
                        root / "manifest.jsonl", root / "units", root / "teacher", anneal_steps=1)
     write_json(root / "cuda/native-run.json", plan)
     cfg = b.native_config(plan["config"])
@@ -467,3 +467,5 @@ def test_full_manifest_and_saved_unit_import(native_data, inline_name):
     path.write_text(path.read_text(encoding="utf-8").replace("0 1 0 1 0 1", "1 0 1 0 1 0"), encoding="utf-8")
     with pytest.raises(ValueError, match="differ from benchmark training targets"):
         import_units(canonical, unit_root, root / "prepared", root / "bad-import")
+
+__all__ = ['benchmark_runtime']  # pytest fixture exports

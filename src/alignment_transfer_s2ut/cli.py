@@ -56,7 +56,7 @@ def parser_for(stage):
         parser.add_argument("--validation-interval", type=int, default=1)
         parser.add_argument("--save-interval-updates", type=int, default=1)
         parser.add_argument("--patience", type=int, default=0)
-        parser.add_argument("--method", choices=["baseline", "distillation", "guidance", "annealed_guidance"], default="baseline")
+        parser.add_argument("--method", choices=["baseline", "distillation", "annealed_distillation", "mask_distillation", "guidance", "annealed_guidance"], default="baseline")
         parser.add_argument("--lambda-align", type=float, default=1.0)
         parser.add_argument("--beta", type=float, default=1.0)
         parser.add_argument("--beta-start", type=float, default=1.0)
@@ -79,6 +79,8 @@ def parser_for(stage):
         parser.add_argument("--trainer", choices=["fairseq", "legacy"], default="fairseq",
                             help="native benchmark-matched training is the research default")
         parser.add_argument("--baseline-record", help="registered separately trained native S2UT baseline")
+        parser.add_argument("--calibration")
+        parser.add_argument("--mask-top-p", type=float)
     if stage in {"train_t2tt", "train_s2ut", "extract_t2tt_attention", "visualize_attention"}:
         parser.add_argument("--all-layers", action="store_true", help="transfer/capture corresponding decoder layers in one forward")
         parser.add_argument("--layer", type=int, default=None if stage == "visualize_attention" else -1)
@@ -134,7 +136,7 @@ def run(stage, args):
                              "python -m alignment_transfer_s2ut.benchmark register. "
                              "The old standalone trainer requires explicit --trainer legacy.")
         allowed = {"--baseline-record", "--trainer", "--backend", "--manifest", "--units", "--teacher", "--output",
-                   "--method", "--prior-type", "--beta", "--lambda-align", "--anneal-steps", "--prior-smoothing",
+                   "--method", "--prior-type", "--calibration", "--mask-top-p",
                    "--resume", "--resume-if-exists", "--all-layers"}
         changed = args.explicit_options - allowed
         if changed:
@@ -142,8 +144,10 @@ def run(stage, args):
         from .benchmark import make_plan, train_native
         resume = args.resume or args.resume_if_exists and (Path(args.output) / "native-run.json").is_file()
         plan = make_plan(args.baseline_record, args.output, args.method, args.prior_type, args.manifest, args.units,
-                         args.teacher, args.anneal_steps, args.beta, args.lambda_align, args.prior_smoothing, args.all_layers)
+                         args.teacher, all_layers=True, calibration=args.calibration, mask_top_p=args.mask_top_p)
         return train_native(plan, args.output, resume)
+    if stage == "train_s2ut" and args.method in {"annealed_distillation", "mask_distillation"}:
+        raise ValueError("calibrated research methods require native --trainer fairseq and --baseline-record")
     if getattr(args, "resume_if_exists", False):
         args.resume = (Path(args.output) / "checkpoint_last.pt").is_file()
     if getattr(args, "resume", False) and args.overwrite:

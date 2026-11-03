@@ -51,6 +51,7 @@ def native_inputs(args, saved, row):
     args.teacher = args.teacher or transfer.get("teacher")
     normalized = {**saved,"modality":"speech","backend":"fairseq","backbone":config.asdict(),"recipe":{},
                   "transfer":transfer,"method":transfer["method"],"step":b.checkpoint_updates(saved)}
+    args.beta = 0.  # Native research capture is observational; no teacher injection.
     return normalized,model,values
 
 
@@ -101,12 +102,18 @@ def visualize(args):
                     prior[0, :count].cpu().numpy(),
                 "transferred": prior[0, :count].cpu().numpy(),
                 "raw_s2ut": raw[0, :count].cpu().numpy(), "guided_s2ut": guided[0, :count].cpu().numpy()}
+    if transfer.get("aggregation") == "worst_layer":
+        from ..alignment.losses import top_p_mask
+        matrices.pop("guided_s2ut")
+        matrices["teacher_region_mask"] = top_p_mask(prior, transfer["mask_top_p"])[0,:count].cpu().numpy()
     metadata = {"split": row["split"], "checkpoint": str(Path(args.checkpoint).resolve()),
                 "checkpoint_hash": file_hash(args.checkpoint), "method": saved["method"], "step": saved["step"],
                 "beta": args.beta, "lambda": saved["transfer"].get("lambda_align", 0),
                 "source_text": row["ja_text"], "target_text": row["en_text"], "layer": layer, "heads": heads,"all_layers":all_layers,
                 "prior_type": prior_type, "source_mapping": transfer.get("source_mapping", "uniform"),
                 "prior_smoothing": transfer.get("prior_smoothing", 0)}
+    if transfer.get("aggregation") == "worst_layer":
+        metadata.update(calibration_hash=transfer["calibration_hash"], calibrated=transfer["calibrated"],mask_top_p=transfer["mask_top_p"])
     store = ArtifactStore(args.output)
     store.put(row["pair_id"], metadata, matrices, args.overwrite)
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)

@@ -1,5 +1,24 @@
 # Validation record
 
+## 2026-11-03 — Calibrated loss-only layer-wise distillation
+
+最終全suiteは **337 passed, 8 skipped**（494.94秒）。8 skipはCUDA関連7件とWindows上のPOSIX process group試験1件。以下はこの検証の内容で、過去の結果と合算しない。
+
+主比較をBaseline、Distillation、Annealed Distillation、Mask Distillationへ変更した。KLのteacher detach/valid row、stable top-pとpadding除外・包含関係・最低1 frame、Mask mass 1/0.7→loss 0/0.3、LogSumExpの数値安定性とsoftmax勾配、cosine scheduleの0/0.8T/後半を検査した。native forwardのcontextはshape/scopeだけを持ち、異なるpriorでもlogitsがbit一致する。
+
+実際の固定fairseq 2層モデルでtop-p診断→τ/λ校正→4条件の2更新、1更新で保存→resume→2更新を実行した。calibration中のAdam.stepを禁止し、モデルstate・update 0・未蓄積gradを確認した。再校正のJSONが一致し、Distillation/Annealed Distillationは同じλKL/τKLを共有する。校正α/λを変更したartifactによるresumeは拒否した。near-zero層差・非finite値・zero gradientにfallbackしない。
+
+native criterionのloss差を`sample_size * lambda * worst-layer LogSumExp`へ直接照合し、λ=0のAnnealed tailはtask lossと一致した。旧global-row/layer-mean・native Guidance/Monotonic配線の試験を新定義へ置き換えた。単層/全層のzero-supervisionでstock fairseqのlogits/loss/update一致を維持し、checkpoint/recipe/data登録・FP16 overflow保護・verified ZIP・source-only generatorの既存試験を残した。standalone legacyの歴史的Guidanceは主比較から隔離する。
+
+各条件で独立したteacher-forced dev診断、層別KL/Mask mass/weight分布、loss/layer curvesを実行した。Maskのnative checkpointからraw Attentionとteacher region maskのPNG/NPZを出力した。teacher directoryを削除してもnative validationとforwardが通り、生成器へteacherを渡さない。新per-update JSONLが既存freeze/ZIPへ入ることも検査した。
+
+Notebookの実セルをCLI parserへ通し、4条件の順序・共通入力/校正/予算・同一推論/評価を検査した。学習/校正スイッチの既定False、top-p未選択時の停止、保存済み診断/校正stageの復元配線を確認した。READMEと主要研究文書を新しい式・method名・microbatch定義へ統一した。
+
+変更Python 20ファイルのpyflakesは0件、全sourceのAST、新CLI import/help、4冊のNotebook schema/Python/HTML、44ローカル文書リンク、pip check、wheel内全74 Python sourceのbyte一致を確認した。lint toolはoutputsへ隔離し、project依存は追加していない。
+
+Windows環境にはfairseqのcompiled batch samplerがないため、calibrationのtiny統合試験に限り、元tiny Baseline fixtureと同じsingleton batch samplerを使う。productionにsampler fallbackはなく、Colabのcompiled sampler preflightを維持する。実CUDAでのcalibration・FP16学習・VRAM、実コーパスのtop-p選択/校正値・長時間training・BLEU改善は未検証。本番trainingは実行していない。
+
+
 ## External text-only T2TT
 
 最終全suiteは **342 passed, 8 skipped**（459.38秒）。8 skipはCUDA関連7件とWindows上のPOSIX process group試験1件。以下の個別結果は全suiteへ合算しない。

@@ -1,5 +1,7 @@
 # 実データ診断とStrong S2UT Pilot
 
+この文書はhistorical standalone経路の説明です。現在の主比較は[native研究フロー](BENCHMARK_COMPARISON.md)を使用してください。
+
 この少量pilotは独立trainer（`--trainer legacy`）による機能診断。既存benchmarkで学習したモデルを固定Baselineに使う比較は[BENCHMARK_COMPARISON](BENCHMARK_COMPARISON.md)と専用Colabを使用する。
 
 [Colabで開く](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/pilot.ipynb)

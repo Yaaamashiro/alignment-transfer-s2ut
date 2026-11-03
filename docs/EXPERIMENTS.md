@@ -1,85 +1,24 @@
 # Experiments
 
-主要4条件はBaseline / All-layer Distillation（soft supervision）/ All-layer Annealed Guidance（temporary direct guidance）/ All-layer Guidance（persistent direct guidance）。全転移条件で同じteacher・初期化方針・データ・Baseline完了budgetを使う。旧single-layer条件とMonotonic controlは残す。[実行と正規化](ALL_LAYER_TRANSFER.md)。
+主要比較は次の順とする。
 
-既存benchmark Baselineとの本比較は[BENCHMARK_COMPARISON](BENCHMARK_COMPARISON.md)を使用する。学習・推論設定は登録checkpointから取得し、下表の既定値を上書きしない。以下は`--trainer legacy`を明示する独立trainerの実験仕様。
+| Condition | Alignment supervision | Forward | Coefficients |
+|---|---|---|---|
+| Baseline | なし | raw Attention | なし |
+| Distillation | 層別KL + worst-layer LogSumExp | raw Attention | calibrated λKL / τKL |
+| Annealed Distillation | 同じKL・集約 | raw Attention | 同じλKL / τKL、0.8Tまでcosine減衰 |
+| Mask Distillation | 明示top-p regionのstudent mass + 同じ集約 | raw Attention | calibrated λmask / τmask |
 
-## 共通レシピ
+同じ登録Baselineのfresh initialization policy、data、all-head/all-layer teacher、学習予算、optimizer、scheduler、precision、logical batch、checkpoint selection、生成と評価を使う。学習済みBaseline重みを転移条件へseedしない。学習予算Tは登録済みBaselineから取得し、Notebookから変更しない。
 
-| 引数 | 既定値 |
-|---|---|
-| backend | fairseq |
-| seed | 1 |
-| optimizer | Adam, betas=(0.9,0.98), eps=1e-8 |
-| learning-rate | 0.0005 |
-| warmup-updates / warmup-init-lr | 10000 / 1e-7 |
-| scheduler | linear warmup → inverse square root |
-| batch-size | 8 |
-| max-tokens | 20000（source/targetのpadded長×batch数の上限） |
-| update-frequency | 4 |
-| clip-norm | 10 |
-| label-smoothing | 0.2、fairseqのV−1規約 |
-| max-updates | 2（明示的に本学習の更新数へ変更する） |
-| validation-interval | 1 |
-| save-interval-updates | 1 |
-| patience | 0（early stoppingなし、正数ならdev非改善回数） |
-| checkpoint selection | teacher-free dev/main_loss最小 |
-| inference | beam 5, length penalty 1, max units 1000, beta 0 |
-| recipe | controlled（strongは明示指定） |
-| prior-type / prior-smoothing | t2tt / 0.05 |
-| source-mapping / monotonic-sigma | frontend / 0.1 |
+1. 全層teacherを再利用/構築する。
+2. 固定train subsetのtop-p診断を表示する。
+3. ユーザーがMASK_TOP_Pを明示選択する。
+4. 同じ初期化でλ/τを校正し、JSONを3条件で共有する。
+5. 専用stageで各条件を学習する。
+6. 同じsource-only native生成とdev評価へ通す。
+7. 独立したteacher-forced dev診断で層別KL・Mask mass・weight分布・Attentionを調べる。
 
-入力の並列読み込みは[STREAMING](STREAMING.md)を参照。worker数・先読み数・cache設定は`input_pipeline`へ記録し、学習順・目的関数を変更しない。通常CLIは同期読み込み、pilot/Colabは2 workerの先読みを使用する。
+translation評価はASR-BLEU/UERと既存経路を共用する。TERは既存評価が提供する場合だけ報告する。testは校正・top-p選択・checkpoint selectionに使わない。BLEU改善を接続テストから主張しない。
 
-同じS2UT source/target frontend、units、seed、全recipe引数、最大更新数、早期停止、vocoder、checkpoint選択、推論設定を4条件で共通化する。変更点はmethodと転移係数のみ。trainとdevの対訳/音声path fingerprint、unit config、初期stateのhashを`experiment.json`へ保存する。
-
-## Strong recipe
-
-`--recipe strong`は[strong.yaml](../configs/recipes/strong.yaml)を既定値とする。独立したrun directoryでBaseline / Annealed Monotonic / Annealed T2TTを比較する。controlledのcheckpointからstrongへresumeすることはできない。
-
-| 要素 | strong設定 |
-|---|---|
-| source character decoder | encoder layer 6、weight 8.0 |
-| target character decoder | encoder layer 8、weight 8.0 |
-| decoder target CTC | decoder_layer 3、weight 1.6、blank/BOS 0、zero_infinity=false |
-| character aux architecture | native Transformer decoder 2層、dim 256、FFN 2048、heads 4、dropout 0.3 |
-| character aux loss | label smoothing 0.2、EOSあり |
-| CTC vocabulary | train EnglishのみのUnigram、最大1000 pieces、identity normalization |
-| features | waveform×32768、utterance CMVN、trainのみSpecAugment |
-| SpecAugment | freq mask 1×27、time mask 1×100、time p=1、time warpなし |
-
-目的関数の補助部分は`8*source_char_CE_sum + 8*target_char_CE_sum + 1.6*decoder_CTC_sum`。main CEと加算後、optimizer更新内のmain unit token総数で割る。補助taskごとに文字数で正規化しない。CTCはEOS/PADなしのSP target、入力長はEOSを含むunit target長。繰返しlabelを含めてCTC targetが収まらないsampleは停止し、lossを黙って0にしない。
-
-参照する層indexはupstream fairseqの規約を保持する。encoder statesはlayer出力のみ、decoder `inner_states[0]`はembedding。従って`decoder_ctc_layer: 3`は`inner_states[2]`を参照する。
-
-`--recipe-config PATH`で完全なstrong YAMLを指定できる。tinyモデルではencoder参照層・補助decoder次元も明示的に下げる。time warpは保存済みalignment時刻を変えるため拒否する。学習済みSP model・train-only文字語彙・recipeはcheckpointへ内包し、推論では音声にCMVNを適用して補助decoderを呼ばない。
-
-`max_tokens`はtoken bucket samplerではなく、決定的shuffleで選んだbatchを必要に応じて縮める上限。1 sampleだけで超える場合は停止する。4条件とも同じsample順とbatchを使う。
-
-長時間の本学習では、たとえば全条件で`--validation-interval 1000 --save-interval-updates 1000`へ変更し、dev評価とcheckpoint I/Oの頻度を抑える。最後の更新と各validation時にもcheckpointを保存する。再開は最後に保存された更新から行う。
-
-## 再開
-
-`--resume`で`checkpoint_last.pt`を読み、モデル、Adam、RNG、epoch/permutation内のcursor、dev最良値、非改善回数を復元する。同一CPU条件では途中終了からの再開と連続学習のparameter一致をtestする。CUDAのkernel差や非決定性についてbit一致は保証しない。
-
-architecture、語彙、train/dev pair、backend、optimizer recipe、method/係数、teacher identityが変わるresumeを拒否する。最大更新数の延長は許可する。annealingは独立した`anneal_steps`で固定され、resumeでresetしない。早期停止済みrunは同じpatienceのまま自動で再始動しない。checkpointは信頼済みローカルファイルのみ読み込む。
-
-実装ソースのhashとPython/Torch/NumPy versionも保存し、異なる実装・runtimeでの再開を拒否する。新しいColabランタイムでも同じrepository commitと環境を復元する。`compare_experiments`で4条件の制御変数を検証できる。
-
-`compare_experiments`はbaselineを含む2条件以上を受け付け、同じmethodでもprior-typeが異なる対照実験に対応する。recipe・補助語彙/SP model・初期重み・timing・平滑化・観測layer/headを照合し、同一methodのprior比較ではbeta scheduleなども照合する。T2TT teacher identityはT2TT priorのrun同士で照合する。単調priorはteacher identityを持たない。
-
-実モデルのGPU統合テストは`AT_S2UT_GPU_MANIFEST=/path/to/tiny-real-manifest.jsonl python -m pytest -m gpu -q`で実行する。少数のtrain/devを含む実音声manifest、CUDA、固定CTC/HuBERT/vocoder取得環境が必要。strongのBaseline / Annealed Monotonic / Annealed T2TTを2更新ずつ学習し、teacherを削除してdev音声から公式vocoderで生成する。通常テストでは実行もモデル取得もしない。[専用pilot notebook](PILOT.md)は選択済みのtrain/devから接続試験用manifestも生成する。
-
-## Logging
-
-`metrics.jsonl`に`train/main_loss, train/alignment_loss, train/total_loss, dev/main_loss, dev/alignment_loss, alignment/teacher_entropy, alignment/student_entropy, alignment/kl_teacher_student, guidance/beta, distillation/lambda`とarchitectureを保存する。devのmain lossは全条件でpriorを適用せず計算する。dev teacher artifactが存在する場合はKLも診断用に計算し、存在しなければ`dev/alignment_loss=null`とする。checkpoint選択へKL/total lossを使わない。
-
-strongでは重み適用後の補助lossを`train/auxiliary_source_letter, train/auxiliary_target_letter, train/auxiliary_decoder_target_ctc`へ保存する。KLとteacher entropyは更新内の全有効rowで集約し、student entropyは全非padding target tokenで集約する。
-
-`input/data_wait_seconds, input/optimization_seconds, input/loader_workers`で入力待ちと更新処理を記録する。CUDA更新の計測は終了同期を含み、validation/checkpoint時間は別。pilot summaryへ合算する。
-
-## 評価と可視化
-
-Unit error rateと固定ASRによるASR-BLEUをCLIで計算する。ASR-BLEUはsacrebleuのsignatureとASRのconfig hashを保存する。ID集合、checkpoint、vocoder、推論設定の混入を拒否する。testは選択やearly stoppingへ利用しない。人工smoke出力のASR-BLEUは拒否する。
-
-`visualize_attention`は同一sampleの4種類のmatrixを保存する。matrix軸はT2TTではtext token、それ以外ではreduced unit / encoder frame。metadataにpair_id、split、checkpoint、method、step、beta、lambda、原文/訳文、layer/headを含む。
+旧GuidanceとAnnealed Guidanceは主比較から除外した。過去の実験を読むためのstandalone legacy経路と歴史的検証記録は残るが、現在のnative研究条件ではない。[手順](BENCHMARK_COMPARISON.md)・[数式](METHOD.md)を参照。

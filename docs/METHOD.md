@@ -1,30 +1,80 @@
 # Method
 
-主要比較では`--all-layers`で対応層のlearned soft alignmentを転移する。
+T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT Decoder層へlossとして転移する。Attentionをground-truth alignmentとは扱わない。比較順はBaseline、Distillation、Annealed Distillation、Mask Distillation。
+
+## Teacherとforward
+
+各層で全headを平均したT2TT Attentionを、既存のCTC文字時刻・HuBERT unit timing・source/target mappingで投影する。
 
 \[
-A^{T2TT}_l \rightarrow A^{S2UT}_l,\qquad
-L_{align}=\frac1L\sum_{l=1}^{L}\frac{\sum_m KLsum_{m,l}}{\max(1,N_l)}.
+P_l=M_{tgt}A_l^{T2TT}M_{src}.
 \]
 
-投影済みteacherを`A^T_l`、S2UTのraw Attentionを`A^S_l`とすると、各層の有効row平均を用いた`L_align = (1/L) sum_l D_KL(A^T_l || A^S_l)`に相当する。`N_l`は同じoptimizer update内の全microbatchで数えた層別有効row数。層ごとのmeanを層平均し、betaをLで割らない。以下の選択層の説明はsingle-layer互換modeを指す。[全層の実行手順](ALL_LAYER_TRANSFER.md)。
+対応はT2TT層l→S2UT層lで、最終層の複製ではない。teacherはdetachする。S2UT contextは常にstock fairseqのraw Attention `softmax(Z)`から計算する。teacherの内容・biasをforwardへ渡さない。native capture contextはshapeとscopeだけを持つ。validationとsource-only generationにはそのcontextもない。
 
-T2TTとS2UTは同じ対訳pairとtrain splitから学習する。語彙もtrainのみから作成し、devは共通のcheckpoint選択、testは最終評価に使う。T2TTのパラメータをS2UTへコピーしない。
+## 4条件
 
-T2TTのteacher-forced cross-attentionを`A_MT[T,S]`とする。最終decoder層、head平均が既定値。出力側EOS、source/target padding、未知の文字を除外する。任意のdecoder層とhead集合を指定できる。
+Baselineは元のtask lossだけ。task lossにはnative `speech_to_unit`のunit lossと、元Baselineの補助lossを含める。
 
-時刻spanから`M_src[S,F]`と`M_tgt[U,T]`を構成し、`A_T = M_tgt A_MT M_src`を計算する。各有効rowは確率分布である。invalid rowは全0とし、KLにもpriorにも寄与しない。
+Distillationでは、teacher rowに確率massがあるtarget unitだけを使う。paddingとEOSは投影priorのzero rowとして除外する。
 
-Distillationはhead平均後のraw S2UT attentionに`KL(A_T || A_S)`を適用する。teacherはdetachし、KLは有効unit rowで平均する。main lossはEOSを含む非padding target tokenのfairseq式label-smoothed CEである。
+\[
+D_l^{KL}=\frac{1}{N_l}\sum_{u\in V_l}D_{KL}(P_{l,u}\parallel A_{l,u}^{S2UT}).
+\]
 
-gradient accumulationでは、各microbatchのKLの**和**を、同じoptimizer更新内の全microbatchに含まれる有効unit row総数で割る。microbatchごとの平均を等重みで平均しない。全rowが無効ならKLは0。main CEは同じ更新内の非padding unit token総数で正規化する。
+Annealed Distillationのforward・KL・初期λ・τはDistillationと同一。差はcosine scheduleだけ。
 
-Guidanceは選択層の全headのlogitへ同じpriorを加え、そのsoftmaxから**実際のcontext**を計算する。raw/guidedを別々に保持する。`--heads`はalignment観測・KLのhead選択であり、priorは選択層全headへ作用する。`beta=0`はnative fairseq pathを呼ぶ。uniform priorはlogitに共通定数を加えるため元のattentionと一致する（丸め誤差を除く）。
+\[
+T_a=0.8T,\quad \lambda_t=\lambda_{KL}\frac{1+\cos(\pi t/T_a)}2\ (0\le t<T_a),\qquad \lambda_t=0\ (t\ge T_a).
+\]
 
-Guidanceでは有効なacoustic位置上のuniform分布`U`を使い、`P' = (1-alpha) A_T + alpha U`としてから`softmax(Z + beta log(P' + 1e-8))`を計算する。`--prior-smoothing 0.05`が既定値。padding、EOS、全0の無効rowへ質量を与えない。Distillationの教師は平滑化前の`A_T`。`--prior-smoothing 0`で平滑化を無効化できる。
+`t`は現在までの完了update数（最初のforwardはt=0）。最後の20%はtask lossだけで更新する。teacherの参照は別途診断値を計算するために残り得るが、forwardへ注入せず、alignmentの勾配寄与は0になる。
 
-`--prior-type monotonic`は、各target unit runの中心時刻をtarget音声長で、source frontend supportの中心時刻をsource音声長で正規化し、距離にGaussian kernel（`--monotonic-sigma 0.1`）を適用する。行を正規化した同じ形のpriorをGuidance/KLへ渡す。unit時刻と音声長だけを使い、T2TT・transcript・CTC alignmentを参照しない。Baseline / Annealed Monotonic / Annealed T2TTを同じレシピで比較することで、単なる単調性の誘導と翻訳Attention由来の効果を区別する。
+Mask Distillationはteacherのsource確率を降順にstable sortし、累積massが明示選択したp以上になる最小集合Bを作る。同値なら元source indexの昇順。source paddingは除外し、有効rowは最低1 frame、無効rowは0 frame。teacher確率0のframeは選ばない。
 
-Annealed Guidanceは完了更新数`step`について`beta_start + min(step/anneal_steps,1)*(beta_end-beta_start)`。推論・devのcheckpoint選択は全方式で常に`beta=0`とする。通常Guidanceも推論時はteacher-freeであり、train/inference間にpriorの有無の差がある。
+\[
+D_l^{mask}=1-\frac1{N_l}\sum_{u\in V_l}\sum_f B_{l,u,f}A_{l,u,f}^{S2UT}.
+\]
 
-Cross-Attentionを正解アラインメントとは仮定せず、learned soft alignment / routing patternとして解釈する。効果の主張には複数seedによる実データの翻訳性能・収束速度・attention解析が必要である。
+teacher region内のstudent massが1なら0、0.7なら0.3になる。
+
+## 層集約とnative gradient accumulation
+
+\[
+L_{align}=\tau[\operatorname{logsumexp}_l(D_l/\tau)-\log L],\qquad
+w_l=\operatorname{softmax}_l(D_l/\tau).
+\]
+
+`torch.logsumexp`を使い、最大値で中心化して大きなlossでの勾配精度も保つ。層数はDecoderから取得する。全rowが無効の層はそのmicrobatchの集約から除外し、全層が無効なら停止する。
+
+このLogSumExpは**criterionへ渡された現在のmicrobatchごと**に計算する。criterionは `task_sum + sample_size * lambda_t * L_align` を返し、stock Trainerが既存logical batchのtotal sample sizeで正規化する。従ってalignmentはsample-sizeで重み付けたmicrobatch LogSumExpの平均。logical batch全体の層lossを先に集めたLogSumExpとは異なる。全microbatch graph保持、二重forward、update_frequency変更は行わない。
+
+## 学習前の校正
+
+trainの固定順16 logical batches、元Baselineと同じfresh initialization seed・データ変換・precision・logical batchを使う。モデルはtrain modeでdropout条件を保存し、virtual batch indexに対しseed+indexを使って再生する。optimizer updateは0。最初のpassでτを求め、同じ初期化・入力・RNGへ戻して勾配を測る。calibrationだけの2 passであり、本学習のforward数は増やさない。
+
+\[
+\Delta=D_{max}-D_{median},\quad \tau=\operatorname{median}_{batch}\frac{\Delta}{\ln3}.
+\]
+
+偶数個のmedianはPyTorchと同じlower order statistic。near-zero差（明記した1e-8）、NaN、Infのbatchは除外し、全て無効なら停止する。手動τへのfallbackはない。KLとMaskを独立に校正する。τ推定のD_lは、各logical batch内のmicrobatch D_lをsample sizeで加重平均した代表値。λ測定には本学習と同じmicrobatch LogSumExpの勾配を使う。
+
+Cross-Attentionのq/k/v/out projectionを含む全parameterについて、native logical task gradientと、上記microbatch集約後のalignment gradientを別々に`autograd.grad`で取得する。
+
+\[
+\lambda=\operatorname{median}_{batch}\left(0.5\frac{\|\nabla_{\theta_{CA}}L_{task}\|_2}{\|\nabla_{\theta_{CA}}L_{align}\|_2}\right).
+\]
+
+各microbatchの勾配だけを順に加算しgraphを保持しない。0/非finite normは停止条件。KLとMaskは別λ、Annealed Distillationは通常Distillationと同じλKL・τKLを必ず使う。
+
+## Top-pとcontract
+
+teacher-only分析はp=0.8/0.9/0.95についてcoverageのmean/median/p25/p75/p90、source長別・層別集計、valid row数、selected frame数、entropyとの相関、分布histogramを保存する。十分なteacher massを保ちつつregionが過度に広くならない候補をユーザーが選ぶ。学習は自動選択しない。
+
+calibration JSONはimplementation、teacher、prepared data、Baseline登録、fresh model hash、seed、pair順/hash、batch数、各層loss、gradient norm、weight、top-p診断と選択pを保持する。training contractはファイルhashと内容hashを含める。異なるartifactでのresumeは拒否する。
+
+実装は`alignment/losses.py`、`alignment/calibration.py`、`alignment_calibration.py`、`s2ut/benchmark_extension.py`。
+
+## ログの集約
+
+各updateのD_lとw_lは、microbatchの実測値をnative sample sizeで加重平均する。保存するworst layer indexはこの平均D_lのargmaxで、microbatchごとの最悪層の頻度も別fieldに保存する。selected frame数とvalid row数はmicrobatch間で合計する。これらの集計値を、本学習で計算していないlogical-batch LogSumExpと解釈しない。

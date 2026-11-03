@@ -1,35 +1,18 @@
-# All runs in a comparison share one controlled/strong recipe and timing/smoothing.
-all_layer_distillation:
-  method: distillation
-  all_layers: true
-  lambda_align: 1.0
-all_layer_annealed_guidance:
-  method: annealed_guidance
-  all_layers: true
-  beta_start: 1.0
-  beta_end: 0.0
-  anneal_steps: 10000
-all_layer_guidance:
-  method: guidance
-  all_layers: true
-  beta: 1.0
+# Ordered primary comparison. Coefficients are resolved from one calibration artifact.
 baseline:
   method: baseline
 distillation:
   method: distillation
-  lambda_align: 1.0
-guidance:
-  method: guidance
-  beta: 1.0
-annealed_guidance:
-  method: annealed_guidance
-  beta_start: 1.0
-  beta_end: 0.0
-  anneal_steps: 10000
-annealed_monotonic:
-  method: annealed_guidance
-  prior_type: monotonic
-  monotonic_sigma: 0.1
-  beta_start: 1.0
-  beta_end: 0.0
-  anneal_steps: 10000
+  all_layers: true
+  aggregation: worst_layer
+annealed_distillation:
+  method: annealed_distillation
+  all_layers: true
+  aggregation: worst_layer
+  anneal_fraction: 0.8
+  anneal_schedule: cosine
+mask_distillation:
+  method: mask_distillation
+  all_layers: true
+  aggregation: worst_layer
+  mask_type: top_p

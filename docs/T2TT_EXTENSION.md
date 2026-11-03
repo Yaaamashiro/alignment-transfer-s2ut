@@ -9,7 +9,7 @@
 1. Driveを接続し、学習時と同じ `ROOT`・`PERSISTENT`・`BENCHMARK` を設定する。
 2. 設定と直下のT2TT保存先セルを実行する。既定は下表のとおり。
 3. セクション2で環境検査、3〜5で元と同じ入力・Baseline metadata・manifest・backboneを準備する。
-4. **6.1a** を実行する。初回はverified 20kからseedし、2回目以降は200k stage自身から再開する。
+4. 延長する場合だけ`RUN_T2TT_EXTENSION=True`（既定False）にし、**6.1a** を実行する。初回はverified 20kからseedし、2回目以降は200k stage自身から再開する。
 5. **6.1b** で200k完了を検証し、選択したbestのin-domain dev BLEUを測る。
 6. **6.1c** の `RUN_EXTERNAL_TEXT=True` で、同じ保存済み8C 300件の外部BLEUと翻訳例を表示する。
 7. **6.1d** でloss/LRの曲線と、保存済み20k・200k-bestの比較表を確認する。
