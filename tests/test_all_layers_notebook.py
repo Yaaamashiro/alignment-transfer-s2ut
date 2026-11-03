@@ -38,7 +38,7 @@ def test_four_primary_conditions_share_inputs_and_evaluation(tmp_path,monkeypatc
     ns.update(GENERATE_WAVEFORMS=False,ASR_BLEU=False)
     calls.clear();exec(cell('benchmark_comparison-30'),ns)
     assert len([c for c in calls if c[2][0]=='infer'])==4
-    labels=('Baseline','Distillation','Annealed Distillation','Mask Distillation')
+    labels=('Baseline','KL-based Attention Distillation','Annealed KL-based Attention Distillation','Attention-level Knowledge Distillation')
     assert [tables[0].index('| '+label+' |') for label in labels]==sorted(tables[0].index('| '+label+' |') for label in labels)
 
 
@@ -50,14 +50,14 @@ def test_research_switches_default_off_and_explicit_selection_required(tmp_path)
     ns.update(log_event=lambda *a:skips.append(a),LOGS=tmp_path/'logs')
     exec(cell('benchmark_comparison-28'),ns)
     assert len(skips)==3
-    ns['RESEARCH_CONDITIONS']=[('mask_distillation','Mask Distillation',True)]
+    ns['RESEARCH_CONDITIONS']=[('mask_distillation','Attention-level Knowledge Distillation',True)]
     ns['MASK_TOP_P']=None
     with pytest.raises(ValueError,match='calibration'):exec(cell('benchmark_comparison-28'),ns)
 
 
 def test_all_layer_paths_and_new_stages_are_separate_from_old_runs(tmp_path):
     ns=comparison_paths(tmp_path,True,True)
-    assert ns['RESEARCH_ROOT'].name.startswith('research-v2')
+    assert ns['RESEARCH_ROOT'].name.startswith('research-v3')
     assert '-all-layers' in str(ns['TEACHER_ROOT'])
     assert ns['CALIBRATION'].parent!=ns['TOPP_REPORT'].parent
     source='\n'.join(cell(name) for name in ('benchmark_comparison-06','t2tt-active-paths','benchmark_comparison-28','benchmark_comparison-30'))
@@ -101,7 +101,7 @@ def test_top_p_review_calibration_and_saved_stage_restoration(tmp_path,monkeypat
     assert calls[-1][0]=='calibrate' and calls[-1][calls[-1].index('--mask-top-p')+1]=='0.9'
     # A fresh VM can restore both verified stage commands with run switches off.
     for name in ('top-p','calibration'):
-        marker=ns['PERSISTENT']/'stages'/('research-v2-'+name+ns['SCOPE_SUFFIX'])/'pack/snapshot.json'
+        marker=ns['PERSISTENT']/'stages'/('research-v3-'+name+ns['SCOPE_SUFFIX'])/'pack/snapshot.json'
         marker.parent.mkdir(parents=True);marker.touch()
     calls.clear();ns['RUN_ALIGNMENT_CALIBRATION']=False
     exec(cell('alignment-calibration'),ns)

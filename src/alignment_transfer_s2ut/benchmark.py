@@ -11,6 +11,8 @@ import torch
 import yaml
 from .io import atomic_write, digest, file_hash, read_json, write_json, local_path
 from .progress import progress
+from .experiment_conditions import load_conditions
+from .alignment.losses import METHOD_LABELS
 
 REVISION = "3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99"
 ARCHITECTURES = {"s2ut_transformer_fisher", "benchmark_alignment_s2ut_fisher"}
@@ -346,8 +348,11 @@ def make_plan(baseline, output, method="distillation", prior_type="t2tt", manife
     cfg["common"]["wandb_project"] = None
     if scientific_config(cfg) != record["scientific_config"]:
         raise ValueError("scientific configuration differs from the registered baseline")
+    conditions = load_conditions()
+    annealing = conditions["annealed_distillation"]
     transfer = {"method": method, "prior_type": prior_type, "all_layers": bool(all_layers),
-                "aggregation": "worst_layer", "anneal_fraction": .8, "anneal_schedule": "cosine",
+                "aggregation": "worst_layer", "conditions_hash": digest(conditions),
+                "anneal_fraction": annealing["anneal_fraction"], "anneal_schedule": annealing["anneal_schedule"],
                 "manifest": str(Path(manifest).resolve()) if manifest else None,
                 "units": str(Path(units).resolve()) if units else None, "teacher": str(Path(teacher).resolve()) if teacher else None}
     if method != "baseline":
@@ -456,14 +461,14 @@ def compare_records(paths, evaluations=None, allow_scope_ablation=False):
         for key in ("method","prior_type","calibrated","calibration_hash","mask_top_p","artifacts"):
             if any(t.get(key) != transfers[0].get(key) for t in transfers[1:]):
                 differences["ablation/"+key]=[t.get(key) for t in transfers]
-    for key in ("calibration_hash", "calibrated", "mask_top_p", "aggregation", "anneal_fraction", "anneal_schedule"):
+    for key in ("calibration_hash", "calibrated", "mask_top_p", "aggregation", "conditions_hash", "anneal_fraction", "anneal_schedule"):
         if transfers and any(t.get(key) != transfers[0].get(key) for t in transfers[1:]):
             differences["transfer/" + key] = [t.get(key) for t in transfers]
     signatures = [t.get("artifacts",{}).get("teacher_signature") for t in transfers if t.get("prior_type","t2tt")=="t2tt"]
     if signatures and any(s != signatures[0] for s in signatures[1:]):
         differences["transfer/teacher_signature"] = signatures
     result = {"fair_comparison": not differences, "differences": differences,
-              "models": [{"method": r["method"], "checkpoint_hash": r["checkpoint_hash"],
+              "models": [{"method": r["method"], "display_name": METHOD_LABELS.get(r["method"],r["method"]), "checkpoint_hash": r["checkpoint_hash"],
                            "checkpoint_updates": r["checkpoint_updates"], "training_budget": r["training_budget"]} for r in records]}
     if allow_scope_ablation:
         result["independent_variables"]={"all_layers":[t.get("all_layers",False) for t in transfers]} if scope_varies else {}

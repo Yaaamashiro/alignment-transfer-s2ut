@@ -20,7 +20,7 @@ CharacterとSentencePieceの違いだけを調べるT2TT実験。旧characterの
 | Attention | `t2tt-attention-spm-200k` |
 | teacher | `teacher-alignment-spm-200k` |
 | audit | `diagnostics-spm-200k` / `audit-spm-200k` |
-| Distillation / Annealed Distillation / Mask Distillation | `research-v2-spm-200k-all-layers`配下の独立stage |
+| KL-based Attention Distillation / Annealed KL-based Attention Distillation / Attention-level Knowledge Distillation | `research-v3-spm-200k-all-layers`配下の独立stage |
 
 全層modeのAttention・teacher・audit・S2UTは、さらに`-all-layers`を付ける。CTCは既存`speech-text-alignment-200k`、unitは既存保存先を使い、入力・設定hashが同じ場合だけ再利用する。stageは`PERSISTENT/stages/`以下、ローカルは`ROOT/`以下。characterの`t2tt`・`t2tt-200k`を指定すると混入/上書きを拒否する。
 

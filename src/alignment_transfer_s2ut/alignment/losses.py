@@ -3,6 +3,12 @@ import math
 import torch
 
 METHODS = ("baseline", "distillation", "annealed_distillation", "mask_distillation")
+METHOD_LABELS = {
+    "baseline": "Baseline",
+    "distillation": "KL-based Attention Distillation",
+    "annealed_distillation": "Annealed KL-based Attention Distillation",
+    "mask_distillation": "Attention-level Knowledge Distillation",
+}
 
 
 def distributions(teacher, student, source_padding=None):
@@ -72,7 +78,7 @@ def worst_layer(losses, tau, counts=None):
     return loss, torch.softmax(logits, 0)
 
 
-def lambda_at(step, method, initial, total_updates, anneal_fraction=.8, training=True):
+def lambda_at(step, method, initial, total_updates, anneal_fraction, training=True):
     if method not in METHODS or not math.isfinite(initial) or initial < 0 or total_updates < 1 or not 0 < anneal_fraction <= 1:
         raise ValueError("invalid distillation schedule")
     if not training or method == "baseline":
@@ -85,18 +91,29 @@ def lambda_at(step, method, initial, total_updates, anneal_fraction=.8, training
     return initial * (1 + math.cos(math.pi * max(0, step) / end)) / 2
 
 
+def annealing_policy(policy):
+    fraction = policy["anneal_fraction"]
+    if policy["anneal_schedule"] != "cosine":
+        raise ValueError("anneal_schedule must be cosine")
+    if isinstance(fraction, bool) or not isinstance(fraction, (int,float)) or not math.isfinite(fraction) or not 0 < fraction <= 1:
+        raise ValueError("anneal_fraction must be finite and in (0,1]")
+    return fraction
+
+
 def loss_and_logs(teacher, student, policy, step, budget, source_padding=None):
     kind = "mask" if policy["method"] == "mask_distillation" else "kl"
     parameters = policy["calibrated"]
     tau = parameters["tau_" + kind]
-    coefficient = lambda_at(step, policy["method"], parameters["lambda_" + kind], budget)
+    fraction = annealing_policy(policy)
+    coefficient = lambda_at(step, policy["method"], parameters["lambda_" + kind], budget, fraction)
     stats = layer_statistics(teacher, student, kind, policy.get("mask_top_p"), source_padding)
     loss, weights = worst_layer(stats["losses"], tau, stats["counts"])
+    valid_layers = stats["counts"] > 0
     logs = {"alignment/loss": loss.detach(), "alignment/lambda": coefficient, "alignment/tau": tau,
             "alignment/worst_layer": int(stats["losses"].masked_fill(stats["counts"] == 0, -torch.inf).argmax()),
-            "alignment/teacher_entropy": stats["teacher_entropy"].mean().detach(),
-            "alignment/student_entropy": stats["student_entropy"].mean().detach(),
-            "alignment/kl_mean": stats["kl"].mean().detach(), "alignment/kl_worst": stats["kl"].max().detach()}
+            "alignment/teacher_entropy": stats["teacher_entropy"][valid_layers].mean().detach(),
+            "alignment/student_entropy": stats["student_entropy"][valid_layers].mean().detach(),
+            "alignment/kl_mean": stats["kl"][valid_layers].mean().detach(), "alignment/kl_worst": stats["kl"][valid_layers].max().detach()}
     for layer in range(len(weights)):
         logs.update({f"alignment/D_{layer}": stats["losses"][layer].detach(),
                      f"alignment/w_{layer}": weights[layer].detach(), f"alignment/kl_layer_{layer}": stats["kl"][layer].detach(),
@@ -107,8 +124,8 @@ def loss_and_logs(teacher, student, policy, step, budget, source_padding=None):
     if kind == "mask":
         logs["alignment/top_p"] = policy["mask_top_p"]
     if policy["method"] == "annealed_distillation":
-        end = .8 * budget
+        end = fraction * budget
         logs.update({"alignment/annealing_progress": min(1., step / end),
-                     "alignment/teacher_free_start": math.ceil(end) if step >= end else -1,
-                     "alignment/teacher_free_phase": float(step >= end)})
+                     "alignment/task_only_start": math.ceil(end) if step >= end else -1,
+                     "alignment/task_only_phase": float(step >= end)})
     return coefficient * loss, logs

@@ -7,9 +7,9 @@ T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT D
 | Condition | 教師信号 | Forward |
 |---|---|---|
 | Baseline | なし | raw Attention |
-| Distillation | 層別KL | raw Attention |
-| Annealed Distillation | 同じKL、校正λを0.8Tまでcosine減衰 | raw Attention |
-| Mask Distillation | 明示top-p領域内のstudent Attention mass | raw Attention |
+| KL-based Attention Distillation | 層別KL | raw Attention |
+| Annealed KL-based Attention Distillation | 同じKL、校正λを0.8Tまでcosine減衰 | raw Attention |
+| Attention-level Knowledge Distillation | 明示top-p領域内のstudent Attention mass | raw Attention |
 
 3条件とも校正したworst-layer LogSumExpで層lossを集約する。T2TT層l→S2UT層l、全head平均、既存の両側modality projectionを維持する。validation/inferenceはteacher-free。
 
@@ -21,7 +21,7 @@ T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT D
 2. T2TT checkpoint・dev翻訳を確認し、全層Attentionとprojected teacherを準備/再利用する。
 3. top-p診断を見て`MASK_TOP_P`を明示選択する。
 4. λ/τ calibrationを実行する。
-5. 必要な学習スイッチを有効にし、Distillation → Annealed Distillation → Mask Distillationの順に実行する。
+5. 必要な学習スイッチを有効にし、KL-based Attention Distillation → Annealed KL-based Attention Distillation → Attention-level Knowledge Distillationの順に実行する。
 6. 共通評価・比較表・loss/layer diagnosticsを確認する。
 
 本学習スイッチは既定False。λ/τを手動設定せず、3条件で同じcalibration artifactを共有する。作業はVM、永続化は既存benchmark方式の検証付きDrive ZIP。同じrevision・設定・保存先で再実行すると保存済み更新から再開する。

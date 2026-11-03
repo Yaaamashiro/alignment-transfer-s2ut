@@ -4,7 +4,7 @@ T2TT Decoder層lの全head平均を、S2UT Decoder層lへ対応させる。全�
 
 既存teacher packetの`mt_attention_layers`・文字/subword span・CTC timing・unit timing・extraction signatureを再利用する。層数/順序/headsが一致しなければ停止する。既存single-layer形式は単層ablation/旧実験のために残るが、主要4条件のNotebookはall-layerに固定する。
 
-新しい3条件はDistillation、Annealed Distillation、Mask Distillation。層ごとのvalid-row meanをworst-layer LogSumExpで集約する。単純layer meanは主比較へ使わない。[式・microbatch定義・校正](METHOD.md)を参照。
+新しい3条件はKL-based Attention Distillation、Annealed KL-based Attention Distillation、Attention-level Knowledge Distillation。層ごとのvalid-row meanをworst-layer LogSumExpで集約する。単純layer meanは主比較へ使わない。[式・microbatch定義・校正](METHOD.md)を参照。
 
 native modelはstock Attentionをcaptureする。teacherの値はcriterionのlossだけが読み、forwardのcontextはshape/scopeだけを持つ。validation/inferenceではcapture contextもteacher dataset wrapperも使わない。
 

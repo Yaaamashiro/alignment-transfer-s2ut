@@ -51,3 +51,5 @@ python -m alignment_transfer_s2ut.alignment_report curves \
 ## Historical standalone tools
 
 `--trainer legacy`、smoke backend、旧pilot/pipelineは過去のcontrolled実験・回帰検査用。旧Guidance名が残るのはこの隔離経路だけで、新しい主要比較には使わない。学習済みrunの再開は元source revisionを保持する。研究用の入口はnative benchmark Notebookと上記4条件である。
+
+校正にはmicrobatch単位のv2 JSONが必要。旧v1 JSONや既存runを上書きせず、新しい出力先でtop-p/calibrationから再実行する。Annealingを変える場合はcanonical `configs/experiments/conditions.yaml`のfraction/scheduleを変更し、別runを使う。

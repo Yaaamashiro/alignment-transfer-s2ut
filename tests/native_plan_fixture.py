@@ -13,7 +13,7 @@ def fixture_plan(baseline,output,method="distillation",prior_type="t2tt",manifes
                  anneal_steps=None,beta=None,lambda_align=None,smoothing=0.,all_layers=False):
     if method=="baseline":return b.make_plan(baseline,output,method)
     plan=b.make_plan(baseline,output,method,prior_type,manifest,units,teacher,all_layers=all_layers,for_calibration=True)
-    value=dict(format="alignment-calibration-v1",runtime=runtime_identity(),binding=binding(plan),implementation_hash=plan["implementation_hash"],
+    value=dict(format="alignment-calibration-v2",tau_calibration_unit="microbatch",runtime=runtime_identity(),binding=binding(plan),implementation_hash=plan["implementation_hash"],
         lambda_kl=1.,lambda_mask=1.,tau_kl=.4,tau_mask=.4,selected_top_p=.8,synthetic_test_fixture=True)
     value["artifact_hash"]=digest(value)
     path=Path(output).with_suffix(".calibration.json");write_json(path,value,overwrite=True)

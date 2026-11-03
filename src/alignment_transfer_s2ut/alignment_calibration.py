@@ -146,6 +146,8 @@ def calibrate(plan, output, analysis, top_p, batches=16, alpha=.5, ratio=3.):
     from fairseq import utils
     from .training import file_tensor_hash
     layer_batches = {"kl":[], "mask":[]}
+    layer_counts = {"kl":[], "mask":[]}
+    microbatches = []
     norms = {"kl":[], "mask":[]}
     observations, ids = [], []
     with native_session(plan, Path(output).parent / "calibration-session") as (trainer, model, criterion, extension):
@@ -157,19 +159,18 @@ def calibrate(plan, output, analysis, top_p, batches=16, alpha=.5, ratio=3.):
             for index, samples in enumerate(logical_batches(trainer, batches)):
                 utils.set_torch_seed(trainer.cfg.common.seed + index)
                 ids.append(sample_ids(trainer, samples))
-                total = sum(s["target"].size(0) if criterion.sentence_avg else s["ntokens"] for s in samples)
-                values = {"kl":None, "mask":None}
-                for sample in samples:
+                for micro_index, sample in enumerate(samples):
                     _, size, _, raw = criterion.components(model, sample)
-                    for kind in values:
-                        losses = layer_statistics(sample["alignment_prior"], raw, kind, top_p)["losses"].cpu().double()
-                        values[kind] = losses * size/total if values[kind] is None else values[kind] + losses * size/total
-                for kind in values:
-                    layer_batches[kind].append(values[kind].tolist())
+                    microbatches.append(dict(logical_batch_index=index, microbatch_index=micro_index,
+                        pair_ids=ids[-1][micro_index], sample_size=int(size)))
+                    for kind in layer_batches:
+                        stats = layer_statistics(sample["alignment_prior"], raw, kind, top_p)
+                        layer_batches[kind].append(stats["losses"].cpu().double().tolist())
+                        layer_counts[kind].append(stats["counts"].cpu().tolist())
                 progress("calibration: layer scale", index+1, batches)
         if ids != report["calibration_pair_ids"]:
             raise ValueError("diagnostic/calibration sample order differs")
-        temperatures = {kind:calibrate_tau(values, ratio) for kind,values in layer_batches.items()}
+        temperatures = {kind:calibrate_tau(values, ratio, valid_counts=layer_counts[kind]) for kind,values in layer_batches.items()}
         extension.restore_rng(model, rng)
         for index, samples in enumerate(logical_batches(trainer, batches)):
             utils.set_torch_seed(trainer.cfg.common.seed + index)
@@ -201,13 +202,14 @@ def calibrate(plan, output, analysis, top_p, batches=16, alpha=.5, ratio=3.):
         if after != initial or trainer.get_num_updates() != 0 or any(p.grad is not None for p in model.parameters()):
             raise RuntimeError("calibration changed model/update/gradient state")
         extension.restore_rng(model, rng)
-    result = dict(format="alignment-calibration-v1", runtime=runtime_identity(), binding=binding(plan), implementation_hash=plan["implementation_hash"],
+    result = dict(format="alignment-calibration-v2", tau_calibration_unit="microbatch", runtime=runtime_identity(), binding=binding(plan), implementation_hash=plan["implementation_hash"],
         initialization_identity=initial, baseline_checkpoint_identity=b.read_record(plan["baseline_record"])["checkpoint_hash"],
         seed=plan["config"]["common"]["seed"], calibration_pair_ids=ids, calibration_pair_hash=digest(ids),
         number_of_batches=batches, alpha=alpha,target_worst_median_ratio=ratio,
+        number_of_microbatches=len(microbatches), microbatches=microbatches,
         lambda_kl=calibrate_lambda(norms["kl"],alpha),lambda_mask=calibrate_lambda(norms["mask"],alpha),
         tau_kl=temperatures["kl"]["tau"],tau_mask=temperatures["mask"]["tau"], tau_estimates=temperatures,
-        per_layer_losses=layer_batches,per_batch=observations,top_p_diagnostics=report,
+        per_layer_losses=layer_batches,per_layer_valid_rows=layer_counts,per_batch=observations,top_p_diagnostics=report,
         selected_top_p=top_p, optimizer_updates=0, normalization="token-weighted microbatch LogSumExp; native logical accumulation")
     return write_result(output,result)
 

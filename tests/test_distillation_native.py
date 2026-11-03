@@ -7,6 +7,7 @@ from test_benchmark_native import native_data
 from test_all_layers_native import layered_teacher
 from alignment_transfer_s2ut import benchmark as b, alignment_calibration as c
 from alignment_transfer_s2ut.io import write_json, read_json, file_hash, digest, ArtifactStore
+from alignment_transfer_s2ut.alignment.calibration import calibrate_tau
 
 
 @pytest.fixture
@@ -34,12 +35,40 @@ def test_native_calibration_is_reproducible_and_binds_plan(calibrated):
     plan=b.make_plan(root/"baseline.json",root/"calibration",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher",for_calibration=True)
     repeated=c.calibrate(plan,root/"analysis/again.json",root/"analysis/top-p.json",.8,batches=2)
     assert repeated==result and result["optimizer_updates"]==0
+    assert result["tau_calibration_unit"]=="microbatch" and result["number_of_batches"]==2
+    assert result["number_of_microbatches"]==len(result["microbatches"])==4
+    assert len(result["per_batch"])==2  # Lambda remains a logical-batch gradient calibration.
+    for kind in ("kl","mask"):
+        assert len(result["per_layer_losses"][kind])==4
+        expected=calibrate_tau(result["per_layer_losses"][kind],valid_counts=result["per_layer_valid_rows"][kind])
+        assert result["tau_"+kind]==expected["tau"]
     ordinary=b.make_plan(root/"baseline.json",root/"ordinary",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher",calibration=root/"analysis/again.json")
     annealed=b.make_plan(root/"baseline.json",root/"annealed",method="annealed_distillation",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher",calibration=root/"analysis/again.json")
     assert ordinary["transfer"]["calibrated"]==annealed["transfer"]["calibrated"]
     assert file_hash(b.read_record(root/"baseline.json")["checkpoint"]) == read_json(root/"baseline.json")["checkpoint_hash"]
     with pytest.raises(ValueError,match="requires --calibration"):
         b.make_plan(root/"baseline.json",root/"missing",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher")
+
+
+@pytest.mark.parametrize("native_data",[2],indirect=True)
+def test_yaml_fraction_reaches_plan_and_changes_resume_contract(calibrated,monkeypatch):
+    import yaml
+    from alignment_transfer_s2ut.experiment_conditions import load_conditions
+    root,_=calibrated
+    arguments=dict(method="annealed_distillation",manifest=root/"manifest.jsonl",units=root/"units",
+                   teacher=root/"teacher",calibration=root/"analysis/alignment-calibration.json")
+    original=b.make_plan(root/"baseline.json",root/"fraction-run",**arguments)
+    write_json(root/"fraction-run/native-run.json",original)
+    conditions=load_conditions();conditions["annealed_distillation"]["anneal_fraction"]=.7
+    path=root/"conditions.yaml";path.write_text(yaml.safe_dump(conditions),encoding="utf-8")
+    monkeypatch.setattr(b,"load_conditions",lambda:load_conditions(path))
+    changed=b.make_plan(root/"baseline.json",root/"fraction-run",**arguments)
+    assert changed["transfer"]["anneal_fraction"]==.7
+    assert changed["transfer"]["anneal_schedule"]=="cosine"
+    assert changed["transfer"]["calibrated"]==original["transfer"]["calibrated"]
+    assert changed["contract_hash"]!=original["contract_hash"]
+    with pytest.raises(ValueError,match="contract exists"):
+        b.train_native(changed,root/"fraction-run",resume=True)
 
 
 @pytest.mark.parametrize("native_data",[2],indirect=True)

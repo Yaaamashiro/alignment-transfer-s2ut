@@ -1,6 +1,6 @@
 # Method
 
-T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT Decoder層へlossとして転移する。Attentionをground-truth alignmentとは扱わない。比較順はBaseline、Distillation、Annealed Distillation、Mask Distillation。
+T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT Decoder層へlossとして転移する。Attentionをground-truth alignmentとは扱わない。比較順はBaseline、KL-based Attention Distillation、Annealed KL-based Attention Distillation、Attention-level Knowledge Distillation。
 
 ## Teacherとforward
 
@@ -16,21 +16,21 @@ P_l=M_{tgt}A_l^{T2TT}M_{src}.
 
 Baselineは元のtask lossだけ。task lossにはnative `speech_to_unit`のunit lossと、元Baselineの補助lossを含める。
 
-Distillationでは、teacher rowに確率massがあるtarget unitだけを使う。paddingとEOSは投影priorのzero rowとして除外する。
+KL-based Attention Distillationでは、teacher rowに確率massがあるtarget unitだけを使う。paddingとEOSは投影priorのzero rowとして除外する。
 
 \[
 D_l^{KL}=\frac{1}{N_l}\sum_{u\in V_l}D_{KL}(P_{l,u}\parallel A_{l,u}^{S2UT}).
 \]
 
-Annealed Distillationのforward・KL・初期λ・τはDistillationと同一。差はcosine scheduleだけ。
+Annealed KL-based Attention Distillationのforward・KL・初期λ・τはKL-based Attention Distillationと同一。差はcosine scheduleだけ。
 
 \[
-T_a=0.8T,\quad \lambda_t=\lambda_{KL}\frac{1+\cos(\pi t/T_a)}2\ (0\le t<T_a),\qquad \lambda_t=0\ (t\ge T_a).
+T_a=fT,\quad f=\text{policy[anneal_fraction]}\ (\text{主設定 }0.8),\quad \lambda_t=\lambda_{KL}\frac{1+\cos(\pi t/T_a)}2\ (0\le t<T_a),\qquad \lambda_t=0\ (t\ge T_a).
 \]
 
-`t`は現在までの完了update数（最初のforwardはt=0）。最後の20%はtask lossだけで更新する。teacherの参照は別途診断値を計算するために残り得るが、forwardへ注入せず、alignmentの勾配寄与は0になる。
+`t`は現在までの完了update数（最初のforwardはt=0）。主設定では最後の20%をtask-only tailとして、task lossだけで更新する。teacherの参照は別途診断値を計算するために残り得るが、forwardへ注入せず、alignmentの勾配寄与は0になる。
 
-Mask Distillationはteacherのsource確率を降順にstable sortし、累積massが明示選択したp以上になる最小集合Bを作る。同値なら元source indexの昇順。source paddingは除外し、有効rowは最低1 frame、無効rowは0 frame。teacher確率0のframeは選ばない。
+Attention-level Knowledge Distillationはteacherのsource確率を降順にstable sortし、累積massが明示選択したp以上になる最小集合Bを作る。同値なら元source indexの昇順。source paddingは除外し、有効rowは最低1 frame、無効rowは0 frame。teacher確率0のframeは選ばない。
 
 \[
 D_l^{mask}=1-\frac1{N_l}\sum_{u\in V_l}\sum_f B_{l,u,f}A_{l,u,f}^{S2UT}.
@@ -54,10 +54,12 @@ w_l=\operatorname{softmax}_l(D_l/\tau).
 trainの固定順16 logical batches、元Baselineと同じfresh initialization seed・データ変換・precision・logical batchを使う。モデルはtrain modeでdropout条件を保存し、virtual batch indexに対しseed+indexを使って再生する。optimizer updateは0。最初のpassでτを求め、同じ初期化・入力・RNGへ戻して勾配を測る。calibrationだけの2 passであり、本学習のforward数は増やさない。
 
 \[
-\Delta=D_{max}-D_{median},\quad \tau=\operatorname{median}_{batch}\frac{\Delta}{\ln3}.
+\Delta_b=D_{max}^{(b)}-D_{median}^{(b)},\quad \tau=\operatorname{median}_{b\in\text{microbatches}}\frac{\Delta_b}{\ln3}.
 \]
 
-偶数個のmedianはPyTorchと同じlower order statistic。near-zero差（明記した1e-8）、NaN、Infのbatchは除外し、全て無効なら停止する。手動τへのfallbackはない。KLとMaskを独立に校正する。τ推定のD_lは、各logical batch内のmicrobatch D_lをsample sizeで加重平均した代表値。λ測定には本学習と同じmicrobatch LogSumExpの勾配を使う。
+τの校正単位は、本学習のWorst-layer lossと同じ**microbatch**。固定16 logical batchesに含まれる各microbatchのD_lから個別に候補τ_bを求め、そのmedianを採用する。層lossをlogical batch内で先に平均しない。たとえばupdate_frequency=4なら最大64候補になる。
+
+各microbatchでcounts>0の層だけを使う。偶数個のmedianはPyTorchと同じlower order statistic。near-zero差（1e-8）、NaN、Infの候補は除外し、全て無効なら停止する。手動τへのfallbackはない。KLとMaskを独立に校正する。λの勾配ノルム測定は従来どおりlogical batch単位で、本学習と同じmicrobatch LogSumExpをnative sample sizeで積算する。
 
 Cross-Attentionのq/k/v/out projectionを含む全parameterについて、native logical task gradientと、上記microbatch集約後のalignment gradientを別々に`autograd.grad`で取得する。
 
@@ -65,7 +67,7 @@ Cross-Attentionのq/k/v/out projectionを含む全parameterについて、native
 \lambda=\operatorname{median}_{batch}\left(0.5\frac{\|\nabla_{\theta_{CA}}L_{task}\|_2}{\|\nabla_{\theta_{CA}}L_{align}\|_2}\right).
 \]
 
-各microbatchの勾配だけを順に加算しgraphを保持しない。0/非finite normは停止条件。KLとMaskは別λ、Annealed Distillationは通常Distillationと同じλKL・τKLを必ず使う。
+各microbatchの勾配だけを順に加算しgraphを保持しない。0/非finite normは停止条件。KLとMaskは別λ、Annealed KL-based Attention Distillationは通常KL-based Attention Distillationと同じλKL・τKLを必ず使う。
 
 ## Top-pとcontract
 
@@ -78,3 +80,9 @@ calibration JSONはimplementation、teacher、prepared data、Baseline登録、f
 ## ログの集約
 
 各updateのD_lとw_lは、microbatchの実測値をnative sample sizeで加重平均する。保存するworst layer indexはこの平均D_lのargmaxで、microbatchごとの最悪層の頻度も別fieldに保存する。selected frame数とvalid row数はmicrobatch間で合計する。これらの集計値を、本学習で計算していないlogical-batch LogSumExpと解釈しない。
+
+## Annealing設定と診断の有効層
+
+`configs/experiments/conditions.yaml`の`anneal_fraction`と`anneal_schedule`をplanのpolicyへ読み込む。loss係数とtask-only開始/progressログは同じpolicy値を使う。scheduleはcosineだけを受理し、fractionはfiniteかつ(0,1]。設定内容のhashもtraining contractへ含めるので、変更した設定で既存checkpointをresumeしない。wheelにはこのcanonical YAMLをbuild時にそのまま同梱し、別のPython既定値は持たない。
+
+`alignment/kl_mean`・`alignment/kl_worst`・entropyの層平均、および独立したdev診断のKL平均/最大は、valid rowがある層だけで計算する。無効層のper-layer値0とvalid row数は観測用に保持する。tailのログ名は`alignment/task_only_start`と`alignment/task_only_phase`。validation/inferenceのteacher-freeという表現とは区別する。

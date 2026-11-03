@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 import torch
 from . import benchmark as b
-from .alignment.losses import layer_statistics, worst_layer
+from .alignment.losses import layer_statistics, worst_layer, METHOD_LABELS
 from .alignment_calibration import native_session, write_result
 from .io import read_json, read_jsonl, file_hash
 from .progress import progress
@@ -39,9 +39,11 @@ def _diagnose(plan,record,calibration,output,samples):
     counts=torch.stack(totals["counts"]).float()
     means={k:((torch.stack(v)*counts).sum(0)/counts.sum(0).clamp_min(1)).tolist() if k in {"kl","mask","mass"}
            else torch.stack(v).float().mean(0).tolist() for k,v in totals.items()}
+    valid_layers = counts.sum(0) > 0
+    valid_kl = torch.tensor(means["kl"])[valid_layers]
     return write_result(output,dict(format="alignment-diagnostics-v1",checkpoint_hash=record["checkpoint_hash"],
         calibration_hash=file_hash(calibration),split="dev",pair_ids=pairs,teacher_forced_diagnostic_only=True,
-        per_layer_kl=means["kl"],kl_mean=sum(means["kl"])/len(means["kl"]),kl_worst=max(means["kl"]),
+        per_layer_kl=means["kl"],kl_mean=float(valid_kl.mean()),kl_worst=float(valid_kl.max()),
         per_layer_mask_loss=means["mask"],teacher_region_mass=means["mass"],valid_rows=counts.sum(0).tolist(),
         kl_weight_distribution=means["weights"],mask_weight_distribution=means["mask_weights"],
         worst_layer_weight_distribution=means["mask_weights"] if record["method"]=="mask_distillation" else means["weights"],
@@ -66,7 +68,7 @@ def curves(runs,output):
         for axis in axes:
             axis.set_xlabel("Completed updates")
             if axis.lines:axis.legend()
-        fig.suptitle(run.name);path=output/(run.name+".png");fig.savefig(path,dpi=140);plt.close(fig);paths.append(str(path))
+        fig.suptitle(METHOD_LABELS.get(run.name,run.name));path=output/(run.name+".png");fig.savefig(path,dpi=140);plt.close(fig);paths.append(str(path))
     return dict(curves=paths)
 
 

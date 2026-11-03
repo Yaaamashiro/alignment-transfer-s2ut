@@ -1,5 +1,22 @@
 # Validation record
 
+## 2026-11-04 — Microbatch τ and policy-driven annealing
+
+最終全suiteは **350 passed, 8 skipped**（489.24秒）。8 skipはCUDA関連7件とWindows上のPOSIX process group試験1件。以下の関連検査件数を全suiteへ合算しない。
+
+レビューの5点へ対応した。τは各microbatchの有効層lossから候補を作りmedianを取る。logical batch内の層lossを先に平均しない。固定16 logical batchesの入力とλのlogical-batch gradient norm校正は維持する。artifactは`alignment-calibration-v2`/`tau_calibration_unit=microbatch`で、microbatch数・logical/micro index・pair IDs・層loss/valid row数を保存する。旧v1は明確に拒否し、元artifactを上書きしない。
+
+相反する最悪層を持つ2 microbatchを平均するとgapが0になる例で、個々の候補からはworst/median weight比3を得ることを検証した。実際のtiny native校正でも2 logical×2 microの4組からτを再計算してJSONと照合し、再実行一致・optimizer更新0・4条件の更新/再開を維持した。
+
+canonical conditions YAML→plan policy→loss/logへfraction/scheduleを接続し、Python側のfraction既定値を削除した。0.7のYAML変更がplanへ届き、減衰の中点・終了点・task-onlyログが同じ値を使い、異なる設定でresumeしないことを確認した。cosine以外、0/NaN/範囲外/boolのfractionを拒否する。
+
+無効層をKL mean/worst・entropyとdev診断平均から除外した。外向け名称はKL-based Attention Distillation、Annealed KL-based Attention Distillation、Attention-level Knowledge Distillation。内部IDは維持する。tailはtask-only、validation/inferenceはteacher-freeと表記し、ログ名もtask_onlyへ更新した。
+
+関連検査は **32 passed**（43.70秒）。変更Python 14ファイルのlintは0件。全sourceのAST・4冊のNotebook schema/Python/HTML・公開名称・44ローカル文書リンク・pip check・wheel全75 Python sourceのbyte一致も確認した。wheelにcanonical YAMLがbyte一致で含まれ、editable sourceに頼らないwheel importも通った。source archiveからwheelを再buildした場合も同じYAMLを同梱する。canonical設定の編集元は1ファイルで、wheel用のコピーはbuild時に生成する。
+
+Notebookは`research-v3-*`へ派生先を分離し、旧v2の校正/checkpointを再利用しない。Baseline・corpus・T2TT Attention・projected teacher・native recipe・ZIP runtimeは変更しない。新stageでtop-p診断と校正を実行し直す。CUDA校正/FP16/6層VRAM/実コーパス品質は未測定で、本番長時間trainingは実行していない。Windowsのtiny calibration sampler fixtureの条件は前回と同じ。
+
+
 ## 2026-11-03 — Calibrated loss-only layer-wise distillation
 
 最終全suiteは **337 passed, 8 skipped**（494.94秒）。8 skipはCUDA関連7件とWindows上のPOSIX process group試験1件。以下はこの検証の内容で、過去の結果と合算しない。

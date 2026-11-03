@@ -106,7 +106,7 @@ def test_projected_teacher_and_student_never_mix_teacher_generations(tmp_path, e
     assert teacher_args[teacher_args.index("--alignment") + 1] == values["CTC_ROOT"]
     transfer = calls[-1][1][1:]
     assert transfer[transfer.index("--teacher") + 1] == str(values["TEACHER_ROOT"])
-    assert "research-v2" in transfer[transfer.index("--output") + 1]
+    assert "research-v3" in transfer[transfer.index("--output") + 1]
 
 
 def test_checkpoint_reference_is_centralized_and_old_stage_defaults_remain_explicit():

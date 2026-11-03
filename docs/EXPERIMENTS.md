@@ -5,9 +5,9 @@
 | Condition | Alignment supervision | Forward | Coefficients |
 |---|---|---|---|
 | Baseline | なし | raw Attention | なし |
-| Distillation | 層別KL + worst-layer LogSumExp | raw Attention | calibrated λKL / τKL |
-| Annealed Distillation | 同じKL・集約 | raw Attention | 同じλKL / τKL、0.8Tまでcosine減衰 |
-| Mask Distillation | 明示top-p regionのstudent mass + 同じ集約 | raw Attention | calibrated λmask / τmask |
+| KL-based Attention Distillation | 層別KL + worst-layer LogSumExp | raw Attention | calibrated λKL / τKL |
+| Annealed KL-based Attention Distillation | 同じKL・集約 | raw Attention | 同じλKL / τKL、0.8Tまでcosine減衰 |
+| Attention-level Knowledge Distillation | 明示top-p regionのstudent mass + 同じ集約 | raw Attention | calibrated λmask / τmask |
 
 同じ登録Baselineのfresh initialization policy、data、all-head/all-layer teacher、学習予算、optimizer、scheduler、precision、logical batch、checkpoint selection、生成と評価を使う。学習済みBaseline重みを転移条件へseedしない。学習予算Tは登録済みBaselineから取得し、Notebookから変更しない。
 
@@ -22,3 +22,5 @@
 translation評価はASR-BLEU/UERと既存経路を共用する。TERは既存評価が提供する場合だけ報告する。testは校正・top-p選択・checkpoint selectionに使わない。BLEU改善を接続テストから主張しない。
 
 旧GuidanceとAnnealed Guidanceは主比較から除外した。過去の実験を読むためのstandalone legacy経路と歴史的検証記録は残るが、現在のnative研究条件ではない。[手順](BENCHMARK_COMPARISON.md)・[数式](METHOD.md)を参照。
+
+外向け名称と内部IDは、KL-based Attention Distillation=`distillation`、Annealed KL-based Attention Distillation=`annealed_distillation`、Attention-level Knowledge Distillation（top-p region）=`mask_distillation`。τはmicrobatch候補のmedian、λはlogical-batch gradient normで校正する。

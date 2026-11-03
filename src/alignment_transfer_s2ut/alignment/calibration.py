@@ -14,12 +14,22 @@ def median(values):
     return float(torch.tensor(values, dtype=torch.float64).median())
 
 
-def calibrate_tau(layer_batches, ratio=3., minimum_delta=1e-8):
+def calibrate_tau(layer_batches, ratio=3., minimum_delta=1e-8, valid_counts=None):
     if not math.isfinite(ratio) or ratio <= 1:
         raise ValueError("target worst/median ratio must exceed one")
     estimates, rejected = [], []
+    if valid_counts is not None and len(valid_counts) != len(layer_batches):
+        raise ValueError("tau layer losses/counts must have matching microbatches")
     for i, losses in enumerate(layer_batches):
         values = torch.as_tensor(losses, dtype=torch.float64)
+        if valid_counts is not None:
+            counts = torch.as_tensor(valid_counts[i])
+            if counts.shape != values.shape:
+                raise ValueError("tau layer losses/counts must have matching layers")
+            values = values[counts > 0]
+        if not values.numel():
+            rejected.append(i)
+            continue
         delta = float(values.max() - values.median())
         if not torch.isfinite(values).all() or not math.isfinite(delta) or delta <= minimum_delta:
             rejected.append(i)
@@ -55,7 +65,9 @@ def binding(plan):
 
 
 def validate_artifact(value, plan):
-    if value.get("format") != "alignment-calibration-v1" or value.get("artifact_hash") != digest({k:v for k,v in value.items() if k != "artifact_hash"}):
+    if value.get("format") != "alignment-calibration-v2" or value.get("tau_calibration_unit") != "microbatch":
+        raise ValueError("microbatch tau calibration v2 required; regenerate the calibration artifact")
+    if value.get("artifact_hash") != digest({k:v for k,v in value.items() if k != "artifact_hash"}):
         raise ValueError("corrupt alignment calibration artifact")
     if value.get("binding") != binding(plan) or value.get("implementation_hash") != plan["implementation_hash"]:
         raise ValueError("calibration data/teacher/initialization/implementation mismatch")
