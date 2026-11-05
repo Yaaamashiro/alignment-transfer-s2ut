@@ -7,7 +7,7 @@
 - ステージング36件、benchmark main上の進捗・streaming・Colab・前処理を含む関連回帰105件が成功。旧4361e55のコードで11 receipt完成＋12個目のreceipt未発行を作り、対応する24原本WAVを読めない状態で4並列へ変更して全17 ZIPを完成させた。既存12 ZIPのbyteとmtimeは変化しない。
 - 旧T2TT実装の継続では、controllerが検証したruntimeへ保存通知を接続する。復元された旧packageの実装hash・checkpoint contract・optimizer状態は維持する。旧703b7e8のコードを使う更新2→4と契約不変を確認した。
 - alignmentの最後の全suiteは375成功・10 skip・1件は追加した保存adapterのimport許可リスト不足（478.94秒）。許可リストだけを更新し、その1件を再実行して成功。最終状態は全386項目中376成功・10 skipを確認した。部分実行35件や旧コード単独1件をこの件数へ加算しない。
-- 主2 Notebookのschema/Python/HTML、全7冊のschema/Python、57文書リンク、wheel全77 Python sourceのbyte一致、新規lint警告0件と実際のruntime pin検査を確認した。
+- 主2 Notebookのschema/Python/HTML、全7冊のschema/Python、58文書リンク、wheel全77 Python sourceのbyte一致、新規lint警告0件と実際のruntime pin検査を確認した。
 - benchmarkの広い検査は638成功・7 skip・5 GPU除外・31失敗。31件は無変更の旧packageでも同じnodeが失敗した。fixtureのfairseq submodule不足、Windowsでの既存source hash overlay検査、模擬測定seconds=0を含む。WindowsのGloo 2-process試験は待機したため除外。benchmark全suite成功とは扱わない。
 - ローカル1,024 WAV・8 ZIP・各3回の中央値は1/2/4 workerで3.591/2.181/1.585秒、ZIP/sは2.228/3.668/5.046。測定内容・CPU・一時容量・変更一覧と再開手順は [AUDIO_PACKS.md](AUDIO_PACKS.md)。DriveFS性能・Colab CUDA・本コーパスの全件処理は未検証。Windowsのこのvenvではcompiled samplerとbenchmark package metadataを含むCLI環境検査は未合格で、Colabでの必須preflightを代替しない。
 
