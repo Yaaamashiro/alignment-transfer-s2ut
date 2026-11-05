@@ -11,4 +11,4 @@
 
 9. **設定と表現:** annealingのfraction/scheduleはcanonical conditions YAML→policy→loss/logの経路で統一する。tailはtask-only、validation/inferenceはteacher-freeと呼ぶ。公開名称を整理し、内部method IDは維持する。校正v2/派生stage v3は旧校正の暗黙再利用を拒否する。
 
-10. **Kokoro corpus:** 既存のsplit・ID・本文を維持し、QC合格のtrain/devで新規Baselineを学習する。固定ベンチマークのprepared validatorにはKokoroの空test TSVを扱うアダプターを用いる。Kokoroの音声対は、既存T2TTの学習・検証用JParaCrawlテキストの部分集合として照合する。
+10. **Corpus input:** コーパスとmanifestは実験IDから独立して明示指定する。split・ID・本文を維持し、train/devでBaselineを学習する。QC情報がある場合はacceptedのみを受け付ける。固定ベンチマークのprepared validatorには空test TSVを扱うアダプターを用いる。音声対とT2TTの元テキストはID・split・本文で部分集合照合する。既存Kokoroリリースの設定は任意の例とし、旧CLI名は互換入口として残す。旧runの再開では元ID・revisionを使う。

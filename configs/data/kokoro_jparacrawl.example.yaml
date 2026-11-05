@@ -1,0 +1,13 @@
+# Optional example for the existing speech release and text teacher.
+# To reuse its saved teacher, set T2TT_RUN_ID to jparacrawl-300k-t2tt-spm-v1.
+# New experiment outputs still use the experiment ID selected in the notebook.
+corpus_root: /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-jparacrawl-l4
+accepted_manifest: /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-jparacrawl-l4/manifests/releases/accepted.jsonl
+release_summary: /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-jparacrawl-l4/manifests/releases/summary.json
+expected_pairs: 217765
+teacher_source_manifest: /content/drive/MyDrive/jparacrawl-filtering/outputs/text-corpus/manifest.jsonl
+teacher_updates: 200000
+benchmark_reference_root: /content/drive/MyDrive/ja-en-direct-s2st-benchmark-data
+# All new checkpoints/artifacts go here, outside both reference repositories.
+output_root: /content/drive/MyDrive/alignment-transfer-s2ut-data
+hubert_cache: /content/huggingface

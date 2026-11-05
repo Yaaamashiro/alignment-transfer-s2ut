@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from alignment_transfer_s2ut import benchmark, benchmark_data, colab_runtime, kokoro_runtime
+from alignment_transfer_s2ut import benchmark, benchmark_data, colab_runtime, corpus_runtime, kokoro_runtime
 from alignment_transfer_s2ut.data.manifest import TEXT_IDENTITY, load_manifest, text_manifest_hash, verified_teacher_subset
 from alignment_transfer_s2ut.io import ArtifactStore, digest, file_hash, local_path, read_jsonl, write_json, write_jsonl
 from test_benchmark_colab import benchmark_runtime  # noqa: F401
@@ -16,7 +16,8 @@ from test_notebook_commands import comparison_paths, validate_command
 
 @pytest.mark.fairseq
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
-def test_kokoro_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatch, capsys, device):
+@pytest.mark.parametrize("corpus_format", ["release", "canonical"])
+def test_corpus_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatch, capsys, device, corpus_format):
     import torch
     pytest.importorskip("fairseq")
     if device == "cuda" and not torch.cuda.is_available():
@@ -38,26 +39,38 @@ def test_kokoro_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
                    ja_text=f"これは文{i}です", en_text=f"Sentence {i}.")
         if split != "test":
             for lang in ("ja", "en"):
-                relative = Path("audio/16k") / lang / "shard-001" / f"p{i}.wav"
+                relative = (Path("audio/16k") / lang / "shard-001" / f"p{i}.wav"
+                            if corpus_format == "release" else Path("recordings") / lang / f"p{i}.wav")
                 wav = corpus / relative
                 wav.parent.mkdir(parents=True, exist_ok=True)
                 sf.write(wav, np.zeros(8000 + 320 * i), 16000, subtype="PCM_16")
                 row.update({f"{lang}_wav_16k": "/old-vm/" + relative.as_posix(),
                             f"{lang}_sha256": file_hash(wav), f"{lang}_duration": (8000 + 320 * i) / 16000})
+                if corpus_format == "canonical":
+                    row[f"{lang}_audio"] = relative.as_posix()
+                    del row[f"{lang}_wav_16k"]
+        if corpus_format == "canonical":
+            del row["qc_status"]
+            del row["corpus"]
         rows.append(row)
     write_jsonl(source, rows)
     release = {"complete": True, "accepted_pairs": 4,
                **{split: {"accepted": n} for split, n in (("train", 2), ("dev", 1), ("test", 1))}}
     write_json(summary, release)
-    lock = benchmark_data.import_kokoro(source, summary, corpus, common)
+    def import_data(resume=False):
+        if corpus_format == "release":
+            return benchmark_data.import_kokoro(source, summary, corpus, common, resume=resume)
+        return benchmark_data.import_corpus(source, corpus, common, resume=resume)
+    lock = import_data()
     assert lock["total_pairs"] == 3 and lock["release_pairs"] == 4
     assert read_jsonl(common / "test.jsonl") == []
     assert read_jsonl(common / "train.jsonl")[0]["source_id"] == "p0"
-    assert benchmark_data.import_kokoro(source, summary, corpus, common, resume=True) == lock
+    assert import_data(resume=True) == lock
     packs = tmp_path / "packs"
-    assert colab_runtime.stage_kokoro(common, corpus, packs, tmp_path / "cpu", True)["status"] == "PACKED"
-    (corpus / "audio").rename(corpus / "offline")
-    staged = colab_runtime.stage_kokoro(common, corpus, packs, tmp_path / "gpu")
+    stage_audio = colab_runtime.stage_kokoro if corpus_format == "release" else colab_runtime.stage_corpus
+    assert stage_audio(common, corpus, packs, tmp_path / "cpu", True)["status"] == "PACKED"
+    (corpus / ("audio" if corpus_format == "release" else "recordings")).rename(corpus / "offline")
+    staged = stage_audio(common, corpus, packs, tmp_path / "gpu")
     assert staged["files"] == 6
     monkeypatch.setenv("S2ST_INPUT_MAP", staged["input_map"])
     monkeypatch.setenv("CORPUS_ROOT", str(corpus))
@@ -69,10 +82,12 @@ def test_kokoro_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
 
     monkeypatch.setattr(artifacts, "download_artifact", lambda *a, **kw: None)
     monkeypatch.setattr(extraction, "extractor_from_config", lambda *a: extract)
-    assert kokoro_runtime.prepare_units(common, units, tmp_path / "cache", 2) == {"shards": 2}
+    api = kokoro_runtime if corpus_format == "release" else corpus_runtime
+    assert api.prepare_units(common, units, tmp_path / "cache", 2) == {"shards": 2}
+    assert (units / ("kokoro-unit-inputs.json" if corpus_format == "release" else "unit-inputs.json")).is_file()
     monkeypatch.setattr(extraction, "extractor_from_config", lambda *a: pytest.fail("reran a committed shard"))
-    kokoro_runtime.prepare_units(common, units, tmp_path / "cache", 2)
-    prepared_lock = kokoro_runtime.prepare_s2ut(common, units, prepared)
+    api.prepare_units(common, units, tmp_path / "cache", 2)
+    prepared_lock = api.prepare_s2ut(common, units, prepared)
     assert prepared_lock["splits"] == {"train": 2, "dev": 1, "test": 0}
     with pytest.raises(ValueError, match="empty split"):
         validate_prepared(prepared)
@@ -84,7 +99,7 @@ def test_kokoro_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
     def run_session(config, *, work, backup, **kwargs):
         from direct_s2st.s2ut import fairseq_train
 
-        assert config["command"][2:4] == ["alignment_transfer_s2ut.kokoro_runtime", "_fairseq"]
+        assert config["command"][2:4] == [api.__name__, "_fairseq"]
         assert config["command"][config["command"].index("--max-tokens") + 1] == "20000"
         assert config["command"][config["command"].index("--update-freq") + 1] == "4"
         assert "--fp16" in config["command"] and kwargs["total"] == 400000
@@ -100,7 +115,7 @@ def test_kokoro_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
                 assert metadata["checkpoint_selection"] == "teacher_forced_dev_unit_loss"
                 assert metadata["max_updates"] == 400000
             mp.setattr(fairseq_train, "main", validate_worker_recipe)
-            kokoro_runtime.main()
+            api.main()
         assert (work / "s2ut-recipe-lock.json").is_file()
         best = work / "checkpoints/checkpoint_best.pt"
         best.parent.mkdir(parents=True)
@@ -109,11 +124,11 @@ def test_kokoro_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
 
     monkeypatch.setattr(paper_recipe, "preflight_dependencies", lambda: None)
     monkeypatch.setattr(benchmark_runtime, "run_session", run_session)
-    assert kokoro_runtime.baseline_session(data, tmp_path / "run", tmp_path / "backup", True)["durable_updates"] == 400000
-    verify_kokoro_comparison(tmp_path, prepared, device, capsys, benchmark_runtime)
+    assert api.baseline_session(data, tmp_path / "run", tmp_path / "backup", True)["durable_updates"] == 400000
+    verify_corpus_comparison(tmp_path, prepared, device, capsys, benchmark_runtime)
 
 
-def verify_kokoro_comparison(root, prepared, device, capsys, runtime):
+def verify_corpus_comparison(root, prepared, device, capsys, runtime):
     import torch
     from fairseq import tasks, utils
     from fairseq.trainer import Trainer

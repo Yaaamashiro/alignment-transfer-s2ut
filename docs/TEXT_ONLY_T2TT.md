@@ -82,7 +82,7 @@ tokenizerのCLI既定はcharacter。SentencePieceでは`--tokenizer sentencepiec
 
 T2TT単独でも実行できる。学習の保存先はTEXT_ROOT/t2tt-<tokenizer>、DriveはTEXT_PERSISTENT/stages/t2tt-<tokenizer>。TEXT_ROOTとTEXT_PERSISTENTはT2TT_RUN_IDから決まる。切断後は同じrevision・設定で上から再実行し、同じstageのlast/optimizer/RNG/cursorから再開する。
 
-学習済みT2TTを使う場合はRUN_T2TT=Falseにし、EVALUATE_T2TTまたはTeacherに関するスイッチを有効にする。既定値は既存JParaCrawl SentencePiece run。旧text-only Notebookは [legacy](../notebooks/legacy/jparacrawl_t2tt.ipynb) に保存している。
+学習済みT2TTを使う場合はRUN_T2TT=Falseにし、EVALUATE_T2TTまたはTeacherに関するスイッチを有効にする。T2TT_RUN_IDの既定はt2tt-001。再利用するモデルの実際のIDと元text manifestを指定する。旧text-only Notebookは [legacy](../notebooks/legacy/jparacrawl_t2tt.ipynb) に保存している。
 
 ## 変更ファイル
 

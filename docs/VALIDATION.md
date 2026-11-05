@@ -1,5 +1,13 @@
 # Validation record
 
+## 2026-11-05 — Corpus-independent inputs and experiment names
+
+- 公開Notebookの既定IDを `experiment-001` / `t2tt-001` とし、stage・Teacher・runtimeの名前を汎用化した。コーパス固有のDriveパスと固定件数は任意の設定例へ移した。入力ルート・manifest・任意のQC summaryを設定で選択し、件数はmanifestに従う。
+- 任意の相対音声パスとroot配下の絶対パスを扱う入口を追加し、元のrelease形式も維持した。旧CLIは互換入口として残す。旧runは元ID・revisionで再開する。
+- 合成音声のrelease形式とcanonical形式の両方で、ZIP staging・unit shard再利用・固定fairseq前処理・空test・Baseline登録・3条件plan・native更新・保存・再開を確認した。HuBERT推論はfixtureを使用した。
+- 全suiteは **368 passed, 10 skipped**（472.77秒）。CUDA関連とWindows固有のskipを含む。全7 Notebookのschema/Python、主2冊のHTML、53文書リンク、wheel全77 Python sourceのbyte一致、変更箇所の新規lint警告0件、pip checkを確認した。
+- Colab CUDA、実コーパス全件、本番400k更新と評価は未実行。
+
 ## 2026-11-05 — Unified training and evaluation notebooks
 
 - 学習・前処理を `training.ipynb`、推論・比較を `evaluate.ipynb` へ整理した。既存Notebookは `notebooks/legacy/` へ移し、旧フローの回帰検査を継続した。

@@ -116,9 +116,9 @@ def test_evaluation_restores_models_and_scores_without_training(tmp_path, monkey
 def test_evaluation_preprocessing_is_restore_only(tmp_path):
     source, ns = namespace(tmp_path, "evaluate")
     calls = []
-    ns.update(kokoro_common=lambda **kw: calls.append(kw),
-              kokoro_stage_audio=lambda: None, kokoro_prepare=lambda **kw: calls.append(kw),
-              kokoro_baseline=lambda **kw: calls.append(kw))
+    ns.update(corpus_common=lambda **kw: calls.append(kw),
+              corpus_stage_audio=lambda: None, corpus_prepare=lambda **kw: calls.append(kw),
+              corpus_baseline=lambda **kw: calls.append(kw))
     exec(source["restore-inputs"], ns)
     assert calls == [{"restore_only": True}] * 3
 
@@ -165,7 +165,7 @@ def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(
 
 def test_external_text_evaluation_skips_speech_restoration(tmp_path):
     source, ns = namespace(tmp_path, "evaluate")
-    ns.update(EVALUATE_S2UT=False, EVALUATE_T2TT_EXTERNAL=True)
+    ns.update(EVALUATE_S2UT=False, EVALUATE_T2TT_EXTERNAL=True, REFERENCE_BENCHMARK="saved-reference")
     output = tmp_path / "external-text" / ns["T2TT_RUN_ID"] / ns["T2TT_TOKENIZER"] / "report/text-bleu.json"
     calls = []
     def execute_json(*args, **kw):
@@ -189,3 +189,29 @@ def test_text_only_training_skips_speech_preparation(tmp_path):
     ns.update(PREPARE_AUDIO_PACKS=False, PREPARE_S2UT=False)
     exec(source["audio-staging"], ns)
     exec(source["speech-preparation"], ns)
+
+
+@pytest.mark.parametrize("name", ["training", "evaluate"])
+def test_primary_defaults_and_corpus_settings_are_independent_of_dataset_names(tmp_path, name, monkeypatch):
+    source, ns = namespace(tmp_path, name)
+    assert ns["EXPERIMENT_ID"] == "experiment-001"
+    assert ns["T2TT_RUN_ID"] == "t2tt-001"
+    assert not any(brand in "".join(source.values()).lower() for brand in ("kokoro", "jparacrawl"))
+    for key in ("CORPUS_ROOT", "S2ST_INPUT_MAP"):
+        monkeypatch.setenv(key, ns["os"].environ.get(key, ""))
+    ns.update(CORPUS_ROOT_OVERRIDE=str(tmp_path / "other-corpus"),
+              SOURCE_MANIFEST_OVERRIDE=str(tmp_path / "manifests/pairs.jsonl"),
+              RELEASE_SUMMARY_OVERRIDE="", config={})
+    ns.update(execute_json=lambda *a, **kw: {"expected_pairs": None}, execute=lambda *a, **kw: None)
+    exec(source["input-settings"], ns)
+    assert ns["CORPUS_ROOT"] == tmp_path / "other-corpus"
+    assert ns["SOURCE_MANIFEST"] == tmp_path / "manifests/pairs.jsonl"
+    assert ns["RELEASE_SUMMARY"] is None
+    ns["COMMON"] = tmp_path / "common"
+    write_json(ns["COMMON"] / "dataset-lock.json", {
+        "total_pairs": 7, "splits": {"train": {"pairs": 5}, "dev": {"pairs": 2}}, "wav_bytes_estimate": 1024})
+    exec(source["helpers"], ns)
+    calls = []
+    ns["corpus_stage"] = lambda *a, **kw: calls.append(a)
+    ns["corpus_common"]()
+    assert calls[0][2] == "corpus" and "--summary" not in calls[0]

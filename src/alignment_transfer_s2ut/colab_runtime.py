@@ -144,6 +144,10 @@ def stage_inputs(benchmark, local, create_audio=False):
 
 
 def stage_kokoro(common, corpus_root, packs, local, create_audio=False):
+    return stage_corpus(common, corpus_root, packs, local, create_audio)
+
+
+def stage_corpus(common, corpus_root, packs, local, create_audio=False):
     """Reuse the pinned benchmark's WAV ZIP receipt, staging and input map."""
     from .benchmark_data import derived_output
     runtime()
@@ -152,18 +156,18 @@ def stage_kokoro(common, corpus_root, packs, local, create_audio=False):
     packs = derived_output(packs, corpus_root, common)
     local = ensure_local(derived_output(local, corpus_root, common))
     lock = read_json(Path(common) / "dataset-lock.json")
-    if lock.get("audio_path_policy") != "kokoro-audio-16k-v1":
-        raise ValueError("Kokoro staging requires the imported Kokoro common manifests")
+    if lock.get("audio_path_policy") not in {"kokoro-audio-16k-v1", "corpus-relative-v1"}:
+        raise ValueError("corpus staging requires imported common manifests")
     if not create_audio:
         wav_bytes = lock["wav_bytes_estimate"]
-        progress("Kokoro audio staging", detail=(
-            f"WAV payload={wav_bytes / 2**30:.1f} GiB, VM free={shutil.disk_usage(local).free / 2**30:.1f} GiB; "
+        progress("corpus audio staging", detail=(
+            f"WAV payload={wav_bytes / 2**30:.1f} GiB, VM free={shutil.disk_usage(local).free / 2**30:.1f} GiB. "
             "checkpoints and derived artifacts require additional space"))
         if not (local / "input-map.json").is_file():
             capacity(local, wav_bytes)
     old_root = os.environ.get("CORPUS_ROOT")
     if old_root is not None and Path(old_root).resolve() != corpus_root:
-        raise ValueError("CORPUS_ROOT differs from the Kokoro staging root")
+        raise ValueError("CORPUS_ROOT differs from the staging root")
     os.environ["CORPUS_ROOT"] = str(corpus_root)
     try:
         rows = stage_audio(common, packs, local / "audio", splits=("train", "dev"),
@@ -249,7 +253,8 @@ def identity_for(command, output):
     output = Path(output).resolve()
     files = {}
     inputs = list(command)
-    if "alignment_transfer_s2ut.kokoro_runtime" in command and "--common" in command:
+    if any(module in command for module in ("alignment_transfer_s2ut.kokoro_runtime",
+                                           "alignment_transfer_s2ut.corpus_runtime")) and "--common" in command:
         common = Path(command[command.index("--common") + 1])
         inputs += [str(common / name) for name in ("dataset-lock.json", "train.jsonl", "dev.jsonl", "test.jsonl")]
         if "--units" in command:
@@ -455,7 +460,7 @@ def main():
         child.add_argument("--" + name, required=True)
     child.add_argument("--method", required=True,
                        choices=("distillation", "annealed_distillation", "mask_distillation"))
-    child = sub.add_parser("stage-kokoro")
+    child = sub.add_parser("stage-corpus", aliases=["stage-kokoro"])
     for name in ("common", "corpus-root", "packs", "local"):
         child.add_argument("--" + name, required=True)
     child.add_argument("--create-audio", action="store_true")
@@ -470,8 +475,8 @@ def main():
         result = stage_inputs(args.benchmark, args.local, args.create_audio)
     elif args.action == "restore-training":
         result = restore_native_training(args.work, args.backup, args.method)
-    elif args.action == "stage-kokoro":
-        result = stage_kokoro(args.common, args.corpus_root, args.packs, args.local, args.create_audio)
+    elif args.action in {"stage-corpus", "stage-kokoro"}:
+        result = stage_corpus(args.common, args.corpus_root, args.packs, args.local, args.create_audio)
     else:
         command = args.command[1:] if args.command and args.command[0] == "--" else args.command
         if not command:

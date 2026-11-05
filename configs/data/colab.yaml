@@ -1,11 +1,11 @@
-# Read-only Kokoro speech release and original JParaCrawl T2TT inputs.
-corpus_root: /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-jparacrawl-l4
-accepted_manifest: /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-jparacrawl-l4/manifests/releases/accepted.jsonl
-kokoro_expected_pairs: 217765
-teacher_source_manifest: /content/drive/MyDrive/jparacrawl-filtering/outputs/text-corpus/manifest.jsonl
-teacher_snapshot: /content/drive/MyDrive/alignment-transfer-s2ut-data/jparacrawl-300k-t2tt-spm-v1/stages/t2tt-sentencepiece/000000200000-7e93884143414abfb336f9fa04d007ee
+# Select the read-only corpus input for this experiment.
+# Leave release_summary empty for a canonical speech manifest without a QC release.
+corpus_root: ""
+accepted_manifest: ""
+release_summary: ""
+expected_pairs: null
+teacher_source_manifest: ""
 teacher_updates: 200000
-benchmark_reference_root: /content/drive/MyDrive/ja-en-direct-s2st-benchmark-data
-# All new checkpoints/artifacts go here, outside both reference repositories.
+benchmark_reference_root: ""
 output_root: /content/drive/MyDrive/alignment-transfer-s2ut-data
 hubert_cache: /content/huggingface

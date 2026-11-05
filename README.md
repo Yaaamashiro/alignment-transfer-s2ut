@@ -24,9 +24,11 @@ T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT D
 | [training.ipynb](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/training.ipynb) | T2TT・音声前処理・Baseline・Teacher・校正・転移3条件の学習 |
 | [evaluate.ipynb](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/evaluate.ipynb) | 学習済みモデルの復元・共通推論・dev評価・比較 |
 
-1. trainingを開き、実験名と実行する学習スイッチを設定する。学習済みT2TTは保存先から復元できる。
+1. trainingを開き、データ設定、実験ID、実行する学習を指定する。既定IDはexperiment-001とt2tt-001。学習済みT2TTは保存先から復元できる。
 2. 音声ZIPはCPU、学習はGPUで実行する。Baselineは400k updates。top-p診断を確認して校正し、必要な転移条件を学習する。
 3. evaluateを開き、同じEXPERIMENT_IDと比較する条件を選ぶ。
+
+コーパスルートと入力manifestは [データ設定](configs/data/colab.yaml) またはNotebookで指定する。[入力形式と設定例](docs/BENCHMARK_COMPARISON.md) を参照。
 
 同じrevision・設定・保存先で再実行すると、検証済みDrive ZIPから再開する。学習スイッチは既定False。元の実験用Notebookは [legacy](notebooks/legacy) に保存している。
 

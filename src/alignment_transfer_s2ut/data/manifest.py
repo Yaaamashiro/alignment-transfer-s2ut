@@ -1,4 +1,4 @@
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import os
 from ..io import read_jsonl, write_jsonl, digest, file_hash, local_path
 
@@ -24,6 +24,23 @@ def kokoro_audio_path(raw, root, language):
         raise ValueError(f"invalid Kokoro relative WAV path: {raw}")
     relative = Path(*parts[start:])
     return str(Path(root) / relative), relative.as_posix()
+
+
+def corpus_audio_path(raw, root, language):
+    """Resolve a declared WAV path relative to the selected read-only corpus."""
+    if not isinstance(raw, str) or not raw or any(c in raw for c in "\0\t\r\n"):
+        raise ValueError(f"missing {language} WAV path")
+    path = PurePosixPath(raw.replace("\\", "/"))
+    if ".." in path.parts or path.suffix.lower() != ".wav":
+        raise ValueError(f"invalid {language} WAV path: {raw}")
+    root = Path(root).resolve()
+    absolute = path.is_absolute() or PureWindowsPath(raw).is_absolute()
+    candidate = Path(raw) if absolute else root / str(path)
+    candidate = Path(os.path.abspath(candidate))
+    if candidate.is_relative_to(root):
+        return str(candidate), candidate.relative_to(root).as_posix()
+    # Older release manifests may contain the producer's original VM prefix.
+    return kokoro_audio_path(raw, root, language)
 
 
 def speech_audio_path(value, parent=None):

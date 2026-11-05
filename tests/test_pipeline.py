@@ -120,4 +120,4 @@ def test_reference_imports_are_limited_to_runtime_adapters():
                 assert {name.name for node in references for name in node.names} == {
                     "atomic_write_jsonl", "atomic_write_json"}
             else:
-                assert path.name in {"colab_runtime.py", "io.py", "kokoro_runtime.py"}
+                assert path.name in {"colab_runtime.py", "io.py", "kokoro_runtime.py", "corpus_runtime.py"}
