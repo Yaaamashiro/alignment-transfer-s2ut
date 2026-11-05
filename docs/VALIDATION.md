@@ -1,5 +1,11 @@
 # Validation record
 
+## 2026-11-05 — Kokoro Baseline registration with an empty test split
+
+- 合成Kokoroデータのtrain 2対、dev 1対、test 0対で前処理と `prepared_identity()`、stock fairseq Baselineの2更新、登録と再読込、転移3条件のCLI planを確認した。train/devを空にすると登録時の検証が停止する。
+- 同じデータでAnnealed条件を1更新して保存し、検証付きZIPからcheckpointを復元して2更新目を実行した。CUDA版の同じテストをBaseline NotebookのGPU事前検査に追加した。
+- 関連回帰テスト79件成功、5件スキップ。Notebookのschema・Python構文・HTML、wheel、実際の小規模prepared dataに対するNotebookの登録事前検査も確認した。Colab CUDAでの事前検査と本学習は未実行。
+
 ## 2026-11-05 — Kokoro JParaCrawl input and native Baseline
 
 - Windows CPUで全363件を実行。354成功、8スキップ、1件は新しいアダプターを許可するimport境界チェックの更新後に単独で再実行して成功。

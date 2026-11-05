@@ -5,13 +5,15 @@
 ## Kokoro JParaCrawl
 
 1. [Kokoro Baseline Notebook](../notebooks/colab/kokoro_baseline.ipynb) をCPUで開き、`PREPARE_AUDIO_PACKS=True` でQC合格リリースを取り込み、train/devのWAV ZIPをDriveに作る。既定の入力は [Colab設定](../configs/data/colab.yaml) にある。
-2. GPUへ切り替え、同じ実験名で `PREPARE_AUDIO_PACKS=False` にして最初から実行する。ZIPをVMに展開し、固定HuBERT L6/KM100 unit、補助辞書とSentencePiece CTCラベルを生成する。80-bin FBANKは固定fairseqの音声frontendがWAVから計算する。
-3. `RUN_BASELINE=True` でBaselineを学習する。固定 `paper_fisher_v1` の400,000 updates、FP16、max tokens 20,000、update frequency 4を使用する。切断後は同じ実験名とNotebook revisionで上から実行する。
+2. GPUへ切り替え、同じ実験名で `PREPARE_AUDIO_PACKS=False` にして最初から実行する。小規模データでFP16の更新・保存・再開を確認してから、ZIPをVMに展開する。固定HuBERT L6/KM100 unit、補助辞書とSentencePiece CTCラベルを生成する。80-bin FBANKは固定fairseqの音声frontendがWAVから計算する。
+3. prepared dataの登録事前検査に通ったら、`RUN_BASELINE=True` でBaselineを学習する。固定 `paper_fisher_v1` の400,000 updates、FP16、max tokens 20,000、update frequency 4を使用する。切断後は同じ実験名とNotebook revisionで上から実行する。
 4. 比較Notebookで `CORPUS_MODE='kokoro'` と同じ `KOKORO_RUN_ID` を指定し、完成した前処理とBaselineを復元する。devで選択したcheckpointを登録する。
 5. `RUN_TEACHER_ARTIFACTS=True` で6.2から6.3を実行する。JParaCrawl 300,000**対**で学習し、200,000**更新**を完了したSentencePiece T2TTを復元する。元のtrain/dev hashをcheckpointと照合し、Kokoroの217,765対それぞれのID・split・本文が元manifestと完全一致することを確認してから全層Attentionを抽出する。
 6. top-p診断、λ/τ校正、転移3条件、dev評価を下記と同じ順で実行する。
 
-Kokoroの `test.tsv` はヘッダーのみを生成する。train/dev以外の音声はZIP作成、辞書生成、学習、比較に使わない。Driveは `alignment-transfer-s2ut-data/<KOKORO_RUN_ID>/` にWAV ZIP、前処理スナップショット、Baseline、転移成果物を保存する。ステージング時はtrain/dev両言語のWAVをVMに展開するため、ログの必要容量を確認する。
+Kokoroの `test.tsv` はヘッダーのみを生成し、Baseline登録でも空を許容する。train/devは非空が必須。Driveは `alignment-transfer-s2ut-data/<KOKORO_RUN_ID>/` にWAV ZIP、前処理スナップショット、Baseline、転移成果物を保存する。
+
+今回の音声時間（日本語約687時間・英語約604時間）から、WAV本体は約138.5 GiB。ステージング前のログにmanifestから計算したWAV容量とVMの空き容量を表示する。現行手順はWAVを一括展開するため、WAVに加えてcheckpointやTeacherなどの作業領域が必要になる。4条件の学習予算は合計1,600,000 updates。所要時間は実データで計測した条件別の更新速度と評価・保存時間から見積もる。
 
 ## Colabの順序
 

@@ -7,14 +7,20 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from alignment_transfer_s2ut import benchmark_data, colab_runtime, kokoro_runtime
-from alignment_transfer_s2ut.data.manifest import TEXT_IDENTITY, text_manifest_hash, verified_teacher_subset
-from alignment_transfer_s2ut.io import ArtifactStore, file_hash, read_jsonl, write_json, write_jsonl
+from alignment_transfer_s2ut import benchmark, benchmark_data, colab_runtime, kokoro_runtime
+from alignment_transfer_s2ut.data.manifest import TEXT_IDENTITY, load_manifest, text_manifest_hash, verified_teacher_subset
+from alignment_transfer_s2ut.io import ArtifactStore, digest, file_hash, local_path, read_jsonl, write_json, write_jsonl
 from test_benchmark_colab import benchmark_runtime  # noqa: F401
 from test_notebook_commands import comparison_paths, validate_command
 
 
-def test_kokoro_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatch):
+@pytest.mark.fairseq
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.gpu)])
+def test_kokoro_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatch, capsys, device):
+    import torch
+    pytest.importorskip("fairseq")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("Kokoro native FP16 smoke requires CUDA")
     monkeypatch.delenv("CORPUS_ROOT", raising=False)
     monkeypatch.delenv("S2ST_INPUT_MAP", raising=False)
     from direct_s2st import artifacts
@@ -104,6 +110,127 @@ def test_kokoro_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
     monkeypatch.setattr(paper_recipe, "preflight_dependencies", lambda: None)
     monkeypatch.setattr(benchmark_runtime, "run_session", run_session)
     assert kokoro_runtime.baseline_session(data, tmp_path / "run", tmp_path / "backup", True)["durable_updates"] == 400000
+    verify_kokoro_comparison(tmp_path, prepared, device, capsys, benchmark_runtime)
+
+
+def verify_kokoro_comparison(root, prepared, device, capsys, runtime):
+    import torch
+    from fairseq import tasks, utils
+    from fairseq.trainer import Trainer
+    from fairseq_cli import train
+    from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
+    from native_plan_fixture import fixture_plan
+    from test_benchmark_native import tiny_fairseq_config
+
+    torch.set_num_threads(1)
+    identity = benchmark.prepared_identity(prepared)
+    assert benchmark.tsv(prepared / "test.tsv", allow_empty=True) == []
+    with pytest.raises(ValueError, match="empty/duplicate"):
+        benchmark.tsv(prepared / "test.tsv")
+    for split in ("train", "dev"):
+        tsv = prepared / f"{split}.tsv"
+        content = tsv.read_bytes()
+        tsv.write_bytes(content.splitlines(keepends=True)[0])
+        with pytest.raises(ValueError, match=f"empty/duplicate.*{split}.tsv"):
+            benchmark.prepared_identity(prepared)
+        tsv.write_bytes(content)
+
+    checkpoint = root / "tiny-baseline/checkpoints/checkpoint_best.pt"
+    checkpoint.parent.mkdir(parents=True)
+    # Keep all pinned auxiliary attachment layers while shrinking model widths.
+    cfg = tiny_fairseq_config(prepared, checkpoint.parent, decoder_layers=3, encoder_layers=8, device=device)
+    lock = {"recipe": {"fixture": True}, "command": ["direct_s2st.s2ut.fairseq_train", str(prepared)],
+            "data": identity["files"]}
+    fingerprint = benchmark.benchmark_digest(lock)
+    lock["recipe"]["training_fingerprint"] = fingerprint
+    with colab_runtime.native_inputs():
+        utils.set_torch_seed(cfg.common.seed)
+        task = tasks.setup_task(cfg.task)
+        task.load_dataset("train")
+        dataset = task.dataset("train")
+        batches = [dataset.collater([dataset[i]]) for i in range(len(dataset))]
+        stock = Trainer(cfg, task, task.build_model(cfg.model), task.build_criterion(cfg.criterion))
+        for step in (1, 2):
+            stock.train_step(batches)
+            assert stock.get_num_updates() == step
+        stock.consolidate_optimizer()
+        stock.save_checkpoint(str(checkpoint), {"s2st_recipe_fingerprint": fingerprint})
+    del stock
+    recipe, metadata, baseline = root / "tiny-recipe.json", root / "tiny-metadata.json", root / "baseline.json"
+    write_json(recipe, lock)
+    write_json(metadata, {"training_fingerprint": fingerprint, "fairseq_revision": benchmark.REVISION,
+                         "dataset_fingerprint": identity["data_lock"], "completed_updates": 2})
+    record = benchmark.register_baseline(checkpoint, prepared, recipe, metadata, baseline)
+    assert benchmark.read_record(baseline) == record
+
+    manifest, units, teacher = root / "speech.jsonl", root / "align-units", root / "teacher"
+    unit_store, teacher_store = ArtifactStore(units), ArtifactStore(teacher)
+    spec = dict(all_layers=True, decoder_layers=3, layer_indices=[0, 1, 2], heads=None)
+    for row in load_manifest(manifest):
+        pair = row["pair_id"]
+        meta, packet = unit_store.get(pair)
+        t, s = len(row["en_text"]), len(row["ja_text"])
+        attention = np.zeros((3, t, s), dtype=np.float32)
+        attention[0, :, 0] = attention[1, :, s // 2] = attention[2, :, -1] = 1
+        source_duration = sf.info(local_path(row["ja_audio"])).duration
+        source_edges = np.linspace(0, source_duration, s + 1)
+        target_edges = np.linspace(0, float(packet["duration"]), t + 1)
+        teacher_store.put(pair, {**meta, **spec, "attention_spec_hash": digest(spec),
+            "stage": "teacher_alignment", "s2ut_architecture_hash": digest(record["backbone"]),
+            "units_hash": unit_store.hash(pair), "backend": "fairseq", "mt_checkpoint_hash": "mt-fixture",
+            "tokenizer_hash": "tokenizer-fixture", "ctc_config_hash": "ctc-fixture"},
+            {"mt_attention_layers": attention, "mt_attention": attention[-1],
+             "source_spans": np.column_stack((source_edges[:-1], source_edges[1:])),
+             "target_spans": np.column_stack((target_edges[:-1], target_edges[1:])),
+             "source_duration": np.asarray(source_duration), "unit_spans": packet["unit_spans"],
+             "reduced_units": packet["reduced_units"]})
+    run = root / "transfer"
+    fixture_plan(baseline, run, manifest=manifest, units=units, teacher=teacher, all_layers=True)
+    capsys.readouterr()
+    plans = {}
+    for method in ("distillation", "annealed_distillation", "mask_distillation"):
+        benchmark.main(["plan", "--baseline", str(baseline), "--output", str(run), "--method", method,
+                        "--manifest", str(manifest), "--units", str(units), "--teacher", str(teacher),
+                        "--calibration", str(run.with_suffix(".calibration.json"))])
+        plan = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert plan["transfer"]["method"] == method and plan["training_budget"] == 2
+        assert plan["prepared"] == identity and plan["transfer"]["all_layers"]
+        plans[method] = plan
+    plan = plans["annealed_distillation"]
+    write_json(run / "native-run.json", plan)
+    cfg = benchmark.native_config(plan["config"])
+    with colab_runtime.native_inputs(), trainer_hooks(plan["contract_hash"], plan["selection_policy"]):
+        task = tasks.setup_task(cfg.task)
+        task.load_dataset("train")
+        dataset = task.dataset("train")
+        batches = [dataset.collater([dataset[i]]) for i in range(len(dataset))]
+        native = train.Trainer(cfg, task, task.build_model(cfg.model), task.build_criterion(cfg.criterion))
+        if device == "cuda":
+            sample, _ = native._prepare_sample(batches[0])
+            assert sample["net_input"]["src_tokens"].dtype == torch.float16
+            assert sample["alignment_prior"].dtype == torch.float32
+        native.train_step(batches)
+        assert native.get_num_updates() == 1
+        last = run / "checkpoints/checkpoint_last.pt"
+        last.parent.mkdir()
+        native.consolidate_optimizer()
+        native.save_checkpoint(str(last), {})
+        del native
+        backup = root / "tiny-transfer-backups"
+        snapshot_identity = {"contract_hash": plan["contract_hash"]}
+        runtime.publish_packed(last.parent, backup, snapshot_identity, 1)
+        snapshot = runtime.latest(backup, snapshot_identity)
+        assert snapshot is not None and snapshot[1]["updates"] == 1
+        restored = root / "tiny-transfer-restored"
+        runtime.restore(snapshot, restored)
+        resumed = train.Trainer(cfg, task, task.build_model(cfg.model), task.build_criterion(cfg.criterion))
+        resumed.load_checkpoint(str(restored / last.name))
+        assert resumed.get_num_updates() == 1
+        resumed.train_step(batches)
+        assert resumed.get_num_updates() == 2
+        resumed.consolidate_optimizer()
+        resumed.save_checkpoint(str(last), {})
+    assert benchmark.train_native(plan, run, resume=True)["optimizer_steps"] == 0
 
 
 def test_teacher_subset_binds_original_train_and_dev_without_mutating_speech(tmp_path):

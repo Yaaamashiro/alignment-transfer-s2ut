@@ -24,10 +24,28 @@ def yaml_file(path, value):
     path.write_text(yaml.safe_dump(value), encoding="utf-8")
 
 
+def tiny_fairseq_config(data, save_dir, decoder_layers, *, encoder_layers=1, device="cpu"):
+    from fairseq import options
+    from fairseq.dataclass.utils import convert_namespace_to_omegaconf
+
+    argv = [str(data), "--task", "speech_to_speech", "--target-is-code", "--target-code-size", "100",
+        "--criterion", "speech_to_unit", "--arch", "s2ut_transformer_fisher", "--config-yaml", "config.yaml",
+        "--multitask-config-yaml", "config_multitask.yaml", "--train-subset", "train", "--valid-subset", "dev",
+        "--encoder-layers", str(encoder_layers), "--decoder-layers", str(decoder_layers),
+        "--encoder-embed-dim", "16", "--decoder-embed-dim", "16",
+        "--encoder-ffn-embed-dim", "32", "--decoder-ffn-embed-dim", "32", "--encoder-attention-heads", "2",
+        "--decoder-attention-heads", "2", "--conv-channels", "32", "--dropout", "0", "--attention-dropout", "0",
+        "--relu-dropout", "0", "--share-decoder-input-output-embed", "--max-target-positions", "3000",
+        "--optimizer", "adam", "--adam-betas", "(0.9,0.98)", "--lr", "0.0005", "--lr-scheduler", "inverse_sqrt",
+        "--warmup-updates", "1", "--warmup-init-lr", "1e-7", "--max-update", "2", "--max-tokens", "20000", "--update-freq", "2",
+        "--num-workers", "0", "--cpu" if device == "cpu" else "--fp16",
+        "--save-dir", str(save_dir), "--save-interval-updates", "1"]
+    return convert_namespace_to_omegaconf(options.parse_args_and_arch(options.get_training_parser(), input_args=argv))
+
+
 @pytest.fixture
 def native_data(tmp_path, request):
-    from fairseq import options, tasks, utils
-    from fairseq.dataclass.utils import convert_namespace_to_omegaconf
+    from fairseq import tasks, utils
     from fairseq.trainer import Trainer
     torch.set_num_threads(1)
     root, data = tmp_path, tmp_path / "prepared"
@@ -68,17 +86,7 @@ def native_data(tmp_path, request):
     for split in ("train", "dev", "test"):
         (data / (split + ".tsv")).write_text("id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames\n" + "".join(
             f"{r['pair_id']}\t{r['ja_audio']}\t{50 + int(r['pair_id'])}\t0 1 0 1 0 1\t6\n" for r in rows if r["split"] == split), encoding="utf-8")
-    argv = [str(data), "--task", "speech_to_speech", "--target-is-code", "--target-code-size", "100",
-        "--criterion", "speech_to_unit", "--arch", "s2ut_transformer_fisher", "--config-yaml", "config.yaml",
-        "--multitask-config-yaml", "config_multitask.yaml", "--train-subset", "train", "--valid-subset", "dev",
-        "--encoder-layers", "1", "--decoder-layers", str(getattr(request,"param",1)), "--encoder-embed-dim", "16", "--decoder-embed-dim", "16",
-        "--encoder-ffn-embed-dim", "32", "--decoder-ffn-embed-dim", "32", "--encoder-attention-heads", "2",
-        "--decoder-attention-heads", "2", "--conv-channels", "32", "--dropout", "0", "--attention-dropout", "0",
-        "--relu-dropout", "0", "--share-decoder-input-output-embed", "--max-target-positions", "3000",
-        "--optimizer", "adam", "--adam-betas", "(0.9,0.98)", "--lr", "0.0005", "--lr-scheduler", "inverse_sqrt",
-        "--warmup-updates", "1", "--warmup-init-lr", "1e-7", "--max-update", "2", "--max-tokens", "20000", "--update-freq", "2",
-        "--num-workers", "0", "--cpu", "--save-dir", str(root / "baseline/checkpoints"), "--save-interval-updates", "1"]
-    cfg = convert_namespace_to_omegaconf(options.parse_args_and_arch(options.get_training_parser(), input_args=argv))
+    cfg = tiny_fairseq_config(data, root / "baseline/checkpoints", getattr(request, "param", 1))
     utils.set_torch_seed(cfg.common.seed)
     task = tasks.setup_task(cfg.task)
     model = task.build_model(cfg.model)

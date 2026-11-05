@@ -93,7 +93,7 @@ def restore_snapshot(backup, output, resume=False):
     return identity
 
 
-def tsv(path):
+def tsv(path, *, allow_empty=False):
     with local_path(path).open(encoding="utf-8", newline="") as stream:
         # Fairseq TSV fields are literal text, not CSV-quoted strings. Match
         # the pinned benchmark reader, preserving quote characters in labels.
@@ -102,7 +102,7 @@ def tsv(path):
         if not reader.fieldnames or reader.fieldnames[0] != "id" or len(set(reader.fieldnames)) != len(reader.fieldnames):
             raise ValueError("invalid prepared TSV header: " + str(path))
         rows = list(reader)
-    if (not rows or any(not row.get("id") or None in row or any(v is None for v in row.values()) for row in rows)
+    if ((not rows and not allow_empty) or any(not row.get("id") or None in row or any(v is None for v in row.values()) for row in rows)
             or len({r["id"] for r in rows}) != len(rows)):
         raise ValueError("empty/duplicate prepared sample IDs: " + str(path))
     return rows
@@ -123,7 +123,8 @@ def prepared_identity(root):
         if (Path(settings["dict"]).resolve() != root / name / "dict.txt" or
                 Path(settings["data"]).resolve() != root / name):
             raise ValueError("prepared auxiliary paths must point to the registered immutable data root")
-    ids = [set(r["id"] for r in tsv(root / (split + ".tsv"))) for split in ("train", "dev", "test")]
+    ids = [{r["id"] for r in tsv(root / (split + ".tsv"), allow_empty=split == "test")}
+           for split in ("train", "dev", "test")]
     if any(ids[i] & ids[j] for i in range(3) for j in range(i)):
         raise ValueError("prepared split ID leakage")
     return {"files": values, "data_lock": read_json(root / "data-lock.json")}

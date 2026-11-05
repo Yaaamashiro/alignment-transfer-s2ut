@@ -154,8 +154,13 @@ def stage_kokoro(common, corpus_root, packs, local, create_audio=False):
     lock = read_json(Path(common) / "dataset-lock.json")
     if lock.get("audio_path_policy") != "kokoro-audio-16k-v1":
         raise ValueError("Kokoro staging requires the imported Kokoro common manifests")
-    if not create_audio and not (local / "input-map.json").is_file():
-        capacity(local, lock["wav_bytes_estimate"])
+    if not create_audio:
+        wav_bytes = lock["wav_bytes_estimate"]
+        progress("Kokoro audio staging", detail=(
+            f"WAV payload={wav_bytes / 2**30:.1f} GiB, VM free={shutil.disk_usage(local).free / 2**30:.1f} GiB; "
+            "checkpoints and derived artifacts require additional space"))
+        if not (local / "input-map.json").is_file():
+            capacity(local, wav_bytes)
     old_root = os.environ.get("CORPUS_ROOT")
     if old_root is not None and Path(old_root).resolve() != corpus_root:
         raise ValueError("CORPUS_ROOT differs from the Kokoro staging root")
