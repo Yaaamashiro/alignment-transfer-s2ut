@@ -19,6 +19,14 @@ T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT D
 
 ## Colabで始める
 
+### Kokoro JParaCrawl
+
+1. [Kokoro Baseline Notebook](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/kokoro_baseline.ipynb) で検証付き音声ZIPを作り、HuBERT unitとfairseq学習データを準備する。
+2. 同Notebookでnative S2UT Baselineを400,000 updates学習する。
+3. [比較Notebook](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/benchmark_comparison.ipynb) で `CORPUS_MODE='kokoro'` と同じ `KOKORO_RUN_ID` を指定する。学習済みSentencePiece T2TTを復元し、Kokoroのtrain/devに対応するTeacherを構築して4条件を比較する。
+
+### 保存済みベンチマーク実験
+
 [主研究Notebook](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/benchmark_comparison.ipynb)をGPUランタイムで開く。
 
 1. 環境を構築し、別学習済みBaselineを復元・登録する。

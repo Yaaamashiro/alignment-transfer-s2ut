@@ -143,6 +143,35 @@ def stage_inputs(benchmark, local, create_audio=False):
         return {"input_map": str(name), "files": len(rows)}
 
 
+def stage_kokoro(common, corpus_root, packs, local, create_audio=False):
+    """Reuse the pinned benchmark's WAV ZIP receipt, staging and input map."""
+    from .benchmark_data import derived_output
+    runtime()
+    from direct_s2st.drive_staging import active_map, capacity, ensure_local, stage_audio
+    corpus_root = Path(corpus_root).resolve()
+    packs = derived_output(packs, corpus_root, common)
+    local = ensure_local(derived_output(local, corpus_root, common))
+    lock = read_json(Path(common) / "dataset-lock.json")
+    if lock.get("audio_path_policy") != "kokoro-audio-16k-v1":
+        raise ValueError("Kokoro staging requires the imported Kokoro common manifests")
+    if not create_audio and not (local / "input-map.json").is_file():
+        capacity(local, lock["wav_bytes_estimate"])
+    old_root = os.environ.get("CORPUS_ROOT")
+    if old_root is not None and Path(old_root).resolve() != corpus_root:
+        raise ValueError("CORPUS_ROOT differs from the Kokoro staging root")
+    os.environ["CORPUS_ROOT"] = str(corpus_root)
+    try:
+        rows = stage_audio(common, packs, local / "audio", splits=("train", "dev"),
+                           languages=("ja", "en"), create=create_audio, materialize=not create_audio)
+    finally:
+        if old_root is None:
+            os.environ.pop("CORPUS_ROOT")
+    if create_audio:
+        return {"status": "PACKED"}
+    with active_map(rows, local) as name:
+        return {"input_map": str(name), "files": len(rows)}
+
+
 def inspect_checkpoint(path, kind):
     from .benchmark import load_native
     state = load_native(path)
@@ -173,7 +202,14 @@ def identity_for(command, output):
     # artifacts carry their own per-pair contracts and the workflow's data lock.
     output = Path(output).resolve()
     files = {}
-    for item in command:
+    inputs = list(command)
+    if "alignment_transfer_s2ut.kokoro_runtime" in command and "--common" in command:
+        common = Path(command[command.index("--common") + 1])
+        inputs += [str(common / name) for name in ("dataset-lock.json", "train.jsonl", "dev.jsonl", "test.jsonl")]
+        if "--units" in command:
+            units = Path(command[command.index("--units") + 1])
+            inputs += [str(units / "unit-lock.json"), *map(str, sorted(units.glob("*.receipt.json")))]
+    for item in inputs:
         path = Path(item)
         try:
             is_file = path.is_file()
@@ -237,7 +273,7 @@ def train_session(command, work, backup, *, popen=None, publish=None):
                               **({"popen":popen} if popen is not None else {}))
 
 
-def stage_session(command, work, backup, interval=600):
+def stage_session(command, work, backup, interval=600, *, restore_only=False):
     """Publish only changed preprocessing files; unchanged pairs are never recopied.
 
     The benchmark's archive publisher/verifier/restorer are used unchanged.
@@ -282,11 +318,15 @@ def stage_session(command, work, backup, interval=600):
                 (not pair_outputs or state.get("artifact_receipts_verified") is True) and
                 versions.get("stage-complete.json") == file_hash(complete)):
             return {"status": "COMPLETE", "reused": True}
+        if restore_only:
+            raise ValueError(f"no completed, verified stage at {backup}")
         if pair_outputs and state.get("artifact_receipts_verified") is not True:
             progress("stage resume: revalidate legacy pair outputs before trusting completion")
         # A failed upload may leave a local success marker. It is not proof of
         # durable progress. Resume/verify the stage and publish it again.
         complete.unlink()
+    if restore_only:
+        raise ValueError(f"no completed, verified stage at {backup}")
     def publish(final=False, require_complete=False):
         nonlocal generation
         changed = []
@@ -364,14 +404,21 @@ def main():
     child.add_argument("--benchmark", required=True)
     child.add_argument("--local", required=True)
     child.add_argument("--create-audio", action="store_true")
+    child = sub.add_parser("stage-kokoro")
+    for name in ("common", "corpus-root", "packs", "local"):
+        child.add_argument("--" + name, required=True)
+    child.add_argument("--create-audio", action="store_true")
     child = sub.add_parser("run")
     child.add_argument("--work", required=True)
     child.add_argument("--backup", required=True)
     child.add_argument("--training", action="store_true")
+    child.add_argument("--restore-only", action="store_true", help="restore a completed preprocessing stage without running its command")
     child.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.action == "stage-inputs":
         result = stage_inputs(args.benchmark, args.local, args.create_audio)
+    elif args.action == "stage-kokoro":
+        result = stage_kokoro(args.common, args.corpus_root, args.packs, args.local, args.create_audio)
     else:
         command = args.command[1:] if args.command and args.command[0] == "--" else args.command
         if not command:
@@ -379,7 +426,10 @@ def main():
         work, backup = Path(args.work).resolve(), Path(args.backup).resolve()
         if work.is_relative_to(backup) or backup.is_relative_to(work):
             raise ValueError("local work and backup must be separate")
-        result = (train_session if args.training else stage_session)(command, work, backup)
+        if args.training and args.restore_only:
+            parser.error("--restore-only is for preprocessing stages")
+        result = (train_session(command, work, backup) if args.training else
+                  stage_session(command, work, backup, restore_only=args.restore_only))
     print(json.dumps(result, ensure_ascii=False))
 
 

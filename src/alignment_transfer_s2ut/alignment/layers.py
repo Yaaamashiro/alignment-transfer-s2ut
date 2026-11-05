@@ -65,4 +65,7 @@ def teacher_signature(metadata):
         if metadata["attention_spec_hash"] != digest(attention_spec(metadata)):
             raise ValueError("teacher attention extraction signature changed")
         result["attention_spec_hash"] = metadata["attention_spec_hash"]
+    for key in ("teacher_source_text_hash", "teacher_source_train_hash", "teacher_source_dev_hash"):
+        if key in metadata:
+            result[key] = metadata[key]
     return result

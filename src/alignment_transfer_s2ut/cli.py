@@ -88,6 +88,8 @@ def parser_for(stage):
     if stage in {"infer", "extract_t2tt_attention", "evaluate_t2tt", "visualize_attention"}:
         parser.add_argument("--checkpoint", required=True)
     if stage == "extract_t2tt_attention":
+        parser.add_argument("--teacher-training-manifest",
+                            help="verify an exact train/dev text subset against the original text-v1 training manifest")
         parser.add_argument("--batch-size", type=int, default=8, help="maximum pairs per extraction forward; 1 uses single-pair inference")
         parser.add_argument("--max-tokens", type=int, default=4096, help="maximum padded source plus target tokens per batch")
         parser.add_argument("--max-attention-cells", type=int, default=1000000, help="maximum batch x target x source attention cells before head expansion")

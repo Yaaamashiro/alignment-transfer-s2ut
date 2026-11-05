@@ -1,12 +1,16 @@
-"""Bridge immutable benchmark pairs/units to alignment preprocessing artifacts."""
+"""Bridge benchmark and Kokoro releases to native S2UT and alignment artifacts."""
 import argparse
+from collections import Counter
+import hashlib
+import json
+import math
 import os
 import re
 from pathlib import Path
 import numpy as np
 import soundfile as sf
 from .benchmark import tsv, benchmark_digest
-from .data.manifest import prepare_manifest, load_manifest, manifest_hash
+from .data.manifest import kokoro_audio_path, prepare_manifest, load_manifest, manifest_hash, speech_audio_path, validate
 from .io import ArtifactStore, digest, file_hash, read_json, read_jsonl, write_jsonl, local_path
 from .units.timing import reduce_units, frame_spans, run_spans
 from .progress import progress
@@ -20,6 +24,70 @@ def derived_output(output, *inputs):
     if any(output.is_relative_to(root) for root in roots):
         raise ValueError("derived output must be outside benchmark/corpus inputs")
     return output
+
+
+def import_kokoro(source, summary, root, output, resume=False):
+    """Convert the QC release to compact, portable benchmark common manifests."""
+    root = Path(root).resolve()
+    output = derived_output(output, root, Path(source).parent, Path(summary).parent)
+    release = read_json(summary)
+    if release.get("complete") is not True:
+        raise ValueError("Kokoro release is incomplete")
+    counts, rows, ids = Counter(), [], set()
+    checksum = hashlib.sha256()
+    splits = ("train", "dev", "test")
+    with Path(source).open("rb") as stream:
+        for line in stream:
+            checksum.update(line)
+            if not line.strip():
+                continue
+            raw = json.loads(line)
+            pair, split = raw["pair_id"], raw["split"]
+            if (not isinstance(pair, str) or not pair.strip() or any(c in pair for c in "\t\r\n/\\")
+                    or pair in ids or split not in splits or raw.get("qc_status") != "accepted"):
+                raise ValueError(f"invalid or duplicate Kokoro QC record: {pair}")
+            ids.add(pair)
+            counts[split] += 1
+            if len(ids) % 2048 == 0:
+                progress("Kokoro: read accepted release", len(ids), release["accepted_pairs"])
+            if split == "test":
+                continue
+            row = {key: raw[key] for key in ("pair_id", "split", "corpus")}
+            # The JParaCrawl text export has no separate source_id field.
+            row["source_id"] = raw.get("source_id", pair)
+            for language in ("ja", "en"):
+                key = language + "_audio"
+                row[key], row[key + "_corpus_relative"] = kokoro_audio_path(raw.get(language + "_wav_16k"), root, language)
+                checksum_key = language + "_sha256"
+                duration_key = language + "_duration"
+                duration = raw[duration_key]
+                if (not re.fullmatch(r"[0-9a-f]{64}", raw[checksum_key]) or isinstance(duration, bool)
+                        or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0):
+                    raise ValueError(f"invalid Kokoro {language} WAV metadata: {pair}")
+                row[checksum_key] = raw[checksum_key]
+                row[duration_key] = duration
+                for suffix in ("_text", "_text_raw", "_tts_text"):
+                    row[language + suffix] = raw.get(language + suffix, raw[language + "_text"])
+            rows.append(row)
+    if (not counts["train"] or not counts["dev"] or len(ids) != release["accepted_pairs"]
+            or any(counts[split] != release[split]["accepted"] for split in splits)):
+        raise ValueError("Kokoro manifest counts differ from the completed release")
+    progress("Kokoro: read accepted release", len(ids), release["accepted_pairs"])
+    validate(rows, check_audio=False)
+    lock = dict(schema_version=1, source_manifest=str(Path(source).resolve()),
+                source_manifest_sha256=checksum.hexdigest(), audio_path_policy="kokoro-audio-16k-v1",
+                total_pairs=len(rows), release_pairs=len(ids),
+                splits={split: {"pairs": counts[split] if split != "test" else 0} for split in splits},
+                wav_bytes_estimate=sum(round(row[lang + "_duration"] * 16000) * 2 + 44
+                                       for row in rows for lang in ("ja", "en")))
+    marker = output / "dataset-lock.json"
+    if marker.is_file() and (not resume or read_json(marker) != lock):
+        raise ValueError("Kokoro common data identity changed")
+    from direct_s2st.io import atomic_write_jsonl, atomic_write_json
+    for split in splits:
+        atomic_write_jsonl(output / (split + ".jsonl"), (r for r in rows if r["split"] == split), resume=resume)
+    atomic_write_json(marker, lock, resume=resume)
+    return lock
 
 
 def export_manifest(common, prepared, output, include_test=False, resume=False):
@@ -38,7 +106,7 @@ def export_manifest(common, prepared, output, include_test=False, resume=False):
         if len(rows) != len(expected) or {r["pair_id"] for r in rows} != set(expected):
             raise ValueError("common/prepared sample mismatch")
         for row in rows:
-            if row["split"] != split or Path(row["ja_audio"]).resolve() != Path(expected[row["pair_id"]]["src_audio"]).resolve():
+            if row["split"] != split or speech_audio_path(row["ja_audio"]) != speech_audio_path(expected[row["pair_id"]]["src_audio"]):
                 raise ValueError("common/prepared split or source mismatch")
             for language in ("ja", "en"):
                 # Same explicit ASCII-whitespace policy as the frozen benchmark
@@ -144,16 +212,22 @@ def main():
     child = sub.add_parser("units")
     child.add_argument("--manifest", required=True)
     child.add_argument("--benchmark-units", required=True)
+    child = sub.add_parser("kokoro")
+    child.add_argument("--source", required=True)
+    child.add_argument("--summary", required=True)
+    child.add_argument("--corpus-root", required=True)
     for child in sub.choices.values():
-        child.add_argument("--prepared", required=True)
         child.add_argument("--output", required=True)
         child.add_argument("--resume", action="store_true")
+    for action in ("manifest", "units"):
+        sub.choices[action].add_argument("--prepared", required=True)
     args = parser.parse_args()
     if args.action == "manifest":
         result = {"pairs": len(export_manifest(args.common, args.prepared, args.output, args.include_test, args.resume))}
-    else:
+    elif args.action == "units":
         result = import_units(args.manifest, args.benchmark_units, args.prepared, args.output, args.resume)
-    import json
+    elif args.action == "kokoro":
+        result = import_kokoro(args.source, args.summary, args.corpus_root, args.output, args.resume)
     print(json.dumps(result))
 
 

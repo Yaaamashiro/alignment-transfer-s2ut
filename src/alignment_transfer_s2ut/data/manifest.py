@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import os
 from ..io import read_jsonl, write_jsonl, digest, file_hash, local_path
 
@@ -6,6 +6,51 @@ TEXT_REQUIRED = ("pair_id", "split", "ja_text", "en_text")
 AUDIO_REQUIRED = ("ja_audio", "en_audio")
 REQUIRED = TEXT_REQUIRED + AUDIO_REQUIRED  # Historical speech schema and hash order.
 TEXT_IDENTITY = "text-v1"
+
+
+def kokoro_audio_path(raw, root, language):
+    """Rebase the producer's audio/16k path without opening the Drive WAV."""
+    if not isinstance(raw, str) or not raw or any(c in raw for c in "\0\t\r\n"):
+        raise ValueError(f"missing Kokoro {language} WAV path")
+    path = PurePosixPath(raw.replace("\\", "/"))
+    parts = path.parts
+    matches = [index for index in range(len(parts) - 3)
+               if parts[index:index + 3] == ("audio", "16k", language)]
+    if len(matches) != 1 or ".." in parts or path.suffix.lower() != ".wav":
+        raise ValueError(f"invalid Kokoro {language} WAV path: {raw}")
+    # Reject unexpected relative prefixes. Absolute paths may name an older VM.
+    start = matches[0]
+    if start and not (path.is_absolute() or parts[0].endswith(":") or parts[:start] == ("production",)):
+        raise ValueError(f"invalid Kokoro relative WAV path: {raw}")
+    relative = Path(*parts[start:])
+    return str(Path(root) / relative), relative.as_posix()
+
+
+def speech_audio_path(value, parent=None):
+    path = Path(value) if parent is None else parent / value
+    logical = os.path.abspath(path)
+    if os.environ.get("S2ST_INPUT_MAP") and logical.startswith("/content/drive/"):
+        # The benchmark's verified map keys are logical absolute paths.
+        # Resolving symlinks would stat every original Drive WAV.
+        return Path(logical)
+    return path.resolve()
+
+
+def verified_teacher_subset(saved, rows, source_manifest):
+    """Prove the frozen speech text is a split-preserving subset of T2TT input."""
+    if saved.get("manifest_identity") != TEXT_IDENTITY:
+        raise ValueError("a separate teacher training manifest requires a text-v1 T2TT checkpoint")
+    source = load_manifest(source_manifest, require_audio=False)
+    for split in ("train", "dev"):
+        if saved[f"{split}_hash"] != text_manifest_hash([row for row in source if row["split"] == split]):
+            raise ValueError(f"teacher's original {split} manifest differs from the checkpoint")
+    index = {row["pair_id"]: row for row in source}
+    for row in rows:
+        original = index.get(row["pair_id"])
+        if row["split"] not in ("train", "dev") or original is None or any(
+                row[key] != original[key] for key in TEXT_REQUIRED):
+            raise ValueError("speech pair ID, split or text differs from the teacher training corpus: " + row["pair_id"])
+    return text_manifest_hash(source)
 
 
 def validate(rows, check_audio=True, *, require_audio=True):
@@ -47,7 +92,7 @@ def load_manifest(path, split=None, check_audio=True, *, require_audio=True):
     for row in rows:
         for key in ("ja_audio", "en_audio"):
             if require_audio and isinstance(row.get(key), str) and row[key]:
-                row[key] = str((path.parent / row[key]).resolve())
+                row[key] = str(speech_audio_path(row[key], path.parent))
     validate(rows, check_audio, require_audio=require_audio)
     return [r for r in rows if split is None or r["split"] == split]
 

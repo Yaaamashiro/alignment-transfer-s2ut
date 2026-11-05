@@ -209,7 +209,7 @@ def backbone(config):
 
 
 def artifact_contract(record, manifest, units, teacher, prior_type, all_layers=False):
-    from .data.manifest import load_manifest, manifest_hash
+    from .data.manifest import load_manifest, manifest_hash, speech_audio_path
     from .io import ArtifactStore
     rows = load_manifest(manifest, check_audio=False)
     feature = yaml.safe_load(local_path(Path(record["data"]) / "config.yaml").read_text(encoding="utf-8"))
@@ -223,8 +223,8 @@ def artifact_contract(record, manifest, units, teacher, prior_type, all_layers=F
     for split in ("train", "dev"):
         native = {r["id"]: r for r in tsv(Path(record["data"]) / (split + ".tsv"))}
         selected = {r["pair_id"]: r for r in rows if r["split"] == split}
-        if set(native) != set(selected) or any(Path(native[key]["src_audio"]).resolve() !=
-                Path(selected[key]["ja_audio"]).resolve() for key in native):
+        if set(native) != set(selected) or any(speech_audio_path(native[key]["src_audio"]) !=
+                speech_audio_path(selected[key]["ja_audio"]) for key in native):
             raise ValueError("transfer manifest must use the full baseline train/dev pairs and source paths")
     reference = next(r for r in rows if r["split"] == "train")
     meta, _ = ArtifactStore(units).get(reference["pair_id"], {"split": "train", "manifest_hash": manifest_hash(rows)})

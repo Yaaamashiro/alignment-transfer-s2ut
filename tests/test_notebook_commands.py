@@ -39,7 +39,7 @@ def comparison_paths(root, extended=False, all_layers=False, tokenizer="characte
     path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
     notebook = json.loads(path.read_text(encoding="utf-8"))
     source = "".join(next(c for c in notebook["cells"] if c.get("id") == "t2tt-active-paths")["source"])
-    namespace = dict(Path=Path, ROOT=str(root), USE_EXTENDED_T2TT=extended,ALL_LAYERS=all_layers,
+    namespace = dict(Path=Path, ROOT=str(root), KOKORO=False, USE_EXTENDED_T2TT=extended,ALL_LAYERS=all_layers,
                      T2TT_BASE_UPDATES=20000, T2TT_TARGET_UPDATES=200000,T2TT_TOKENIZER=tokenizer,
                      RUN_DISTILLATION=False,RUN_ANNEALED_DISTILLATION=False,RUN_MASK_DISTILLATION=False,NEED_T2TT=True,
                      PERSISTENT=root / "drive")

@@ -10,3 +10,5 @@
 8. **Limits:** CPU tiny接続試験・Windowsのsampler fixtureを実GPU/実コーパスの結果として扱わない。Colabではcompiled native batch samplerのpreflightを必須とし、Python samplerへfallbackしない。長時間trainingとBLEU改善の検証は別途必要。
 
 9. **設定と表現:** annealingのfraction/scheduleはcanonical conditions YAML→policy→loss/logの経路で統一する。tailはtask-only、validation/inferenceはteacher-freeと呼ぶ。公開名称を整理し、内部method IDは維持する。校正v2/派生stage v3は旧校正の暗黙再利用を拒否する。
+
+10. **Kokoro corpus:** 既存のsplit・ID・本文を維持し、QC合格のtrain/devで新規Baselineを学習する。固定ベンチマークのprepared validatorにはKokoroの空test TSVを扱うアダプターを用いる。Kokoroの音声対は、既存T2TTの学習・検証用JParaCrawlテキストの部分集合として照合する。

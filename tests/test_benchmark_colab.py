@@ -83,6 +83,8 @@ if os.environ.get('TEST_INTERRUPT')=='1': raise SystemExit(7)
     assert len(markers) == 1
     first = read_json(markers[0])
     assert len(first["files"]) == 4 and first["storage"] == "zip-v1"
+    with pytest.raises(ValueError, match="no completed"):
+        c.stage_session(command, work, backup, restore_only=True)
     hashes = dict(first["files"])
     work.rename(tmp_path / "lost-vm")
     monkeypatch.setenv("TEST_INTERRUPT", "0")
@@ -92,7 +94,7 @@ if os.environ.get('TEST_INTERRUPT')=='1': raise SystemExit(7)
     assert len(markers) == 2
     assert set(read_json(markers[1])["files"]) == {"stage-complete.json"}
     work.rename(tmp_path / "second-vm")
-    assert c.stage_session(command, work, backup)["reused"]
+    assert c.stage_session(command, work, backup, restore_only=True)["reused"]
     assert len(list(backup.glob("*/snapshot.json"))) == 2
     with (markers[0].parent / "snapshot.zip").open("ab") as stream:
         stream.write(b"broken")

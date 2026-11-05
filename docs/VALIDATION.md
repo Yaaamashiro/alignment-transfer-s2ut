@@ -1,5 +1,13 @@
 # Validation record
 
+## 2026-11-05 — Kokoro JParaCrawl input and native Baseline
+
+- Windows CPUで全363件を実行。354成功、8スキップ、1件は新しいアダプターを許可するimport境界チェックの更新後に単独で再実行して成功。
+- 合成PCM16 WAVで、QCリリース取り込み、空test、元WAV移動後のZIP復元、unit shard再利用、固定fairseqの辞書・CTCラベル・データロック、Baselineのpaper recipe lockを検証した。HuBERT推論はfixtureで置き換えた。
+- 小規模fairseq SentencePiece T2TTをZIPへ保存し、元train/dev manifestのハッシュ照合、QC部分集合の全層Attention抽出、本文・split不一致の拒否を確認した。
+- 5 Notebookのschema・Python構文・HTML、Kokoro両NotebookのCLI引数と共通ロガー、wheel、依存解決を確認した。
+- 実コーパス全件の照合、Colab CUDAでのHuBERT/CTC、400,000-update Baseline、転移学習と評価は未実行。
+
 ## 2026-11-04 — Poster notation and calibration metadata
 
 Benchmark手順の表示名をAttention-level Knowledge Distillationへ修正した。τ校正の除外indexキーを`rejected_microbatches`へ統一し、near-zero/NaN/Inf/無効層のmicrobatch indexが新キーへ保存されることと、実native校正JSONにも新キーだけが入ることを検査した。

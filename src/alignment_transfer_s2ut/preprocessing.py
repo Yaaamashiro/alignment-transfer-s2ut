@@ -167,15 +167,21 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
         source_meta, source = ctc_store.get(pair + ":ja", {**expected, "original_pair_id": pair})
         target_meta, target = ctc_store.get(pair + ":en", {**expected, "original_pair_id": pair})
         units_meta, units = units_store.get(pair, expected)
-        mt_identity = tuple(mt_meta[key] for key in ("mt_checkpoint_hash", "mt_architecture_hash", "tokenizer_hash", "backend")) + (digest(spec),)
+        source_keys = ("teacher_source_text_hash", "teacher_source_train_hash", "teacher_source_dev_hash")
+        teacher_source = {key: mt_meta[key] for key in source_keys if key in mt_meta}
+        if teacher_source and set(teacher_source) != set(source_keys):
+            raise ValueError("incomplete T2TT source corpus provenance")
+        mt_identity = tuple(mt_meta[key] for key in ("mt_checkpoint_hash", "mt_architecture_hash", "tokenizer_hash", "backend")) + (
+            digest(spec), digest(teacher_source))
         acoustic_identity = (source_meta["config_hash"], target_meta["config_hash"], units_meta["unit_config_hash"])
         if teacher_identity is not None and teacher_identity != mt_identity:
             raise ValueError("mixed MT checkpoint, architecture, tokenizer or backend")
         if speech_identity is not None and speech_identity != acoustic_identity:
             raise ValueError("mixed CTC or unit configuration")
         teacher_identity, speech_identity = mt_identity, acoustic_identity
+        ja_hash, en_hash = file_hash(row["ja_audio"]), file_hash(row["en_audio"])
         for meta in (source_meta, target_meta, units_meta):
-            if meta["ja_audio_hash"] != file_hash(row["ja_audio"]) or meta["en_audio_hash"] != file_hash(row["en_audio"]):
+            if meta["ja_audio_hash"] != ja_hash or meta["en_audio_hash"] != en_hash:
                 raise ValueError("stale speech artifact")
         if mt_meta["mt_architecture_hash"] != architecture_hash:
             raise ValueError("T2TT / S2UT architecture mismatch")
@@ -190,7 +196,7 @@ def build_teacher(manifest, mt_root, alignment_root, unit_root, output, s2ut_con
                 "ctc_config_hash": digest(acoustic_identity[:2]),
                 "unit_config_hash": units_meta["unit_config_hash"],
                 "units_hash": file_hash(units_store.path(pair)), "backend": mt_meta["backend"],
-                **spec, "attention_spec_hash": digest(spec), **token_meta,
+                **spec, "attention_spec_hash": digest(spec), **token_meta, **teacher_source,
                 **({"text_manifest_hash":mt_meta["text_manifest_hash"]} if mt_meta.get("manifest_identity") == TEXT_IDENTITY else {})}
         arrays = {"mt_attention_layers": mt["attention_layers"]} if spec["all_layers"] else {}
         src_spans, tgt_spans = source["spans"], target["spans"]

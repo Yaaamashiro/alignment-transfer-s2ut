@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from .config import BackboneConfig
 from .data.audio import features
 from .data.manifest import (load_manifest, manifest_hash, text_manifest_hash, TEXT_IDENTITY,
-                            checkpoint_manifest_rows, checkpoint_manifest_hash)
+                            checkpoint_manifest_rows, checkpoint_manifest_hash, verified_teacher_subset)
 from .io import ArtifactStore, atomic_write, digest, file_hash, write_json
 from .tokenization.character import CharacterTokenizer, PAD, EOS
 from .tokenization.factory import fit_tokenizers, tokenizers_from_checkpoint, tokenizer_metadata, save_diagnostics
@@ -543,7 +543,10 @@ def extract_attention(args):
         raise ValueError("T2TT checkpoint required")
     rows = load_manifest(args.manifest, require_audio=False)
     rows = checkpoint_manifest_rows(saved, rows, args.manifest)
-    if saved["train_hash"] != checkpoint_manifest_hash(saved, [r for r in rows if r["split"] == "train"]):
+    teacher_manifest = getattr(args, "teacher_training_manifest", None)
+    if teacher_manifest:
+        teacher_source_hash = verified_teacher_subset(saved, rows, teacher_manifest)
+    elif saved["train_hash"] != checkpoint_manifest_hash(saved, [r for r in rows if r["split"] == "train"]):
         raise ValueError("T2TT training pairs differ from the S2UT train split")
     identity = checkpoint_manifest_hash(saved, rows)
     source, target = tokenizers_from_checkpoint(saved)
@@ -563,6 +566,9 @@ def extract_attention(args):
                 "heads": args.heads, "teacher_forcing": True, "training_split": "train"}
     if saved.get("manifest_identity") == TEXT_IDENTITY:
         common.update(manifest_identity=TEXT_IDENTITY, text_manifest_hash=text_manifest_hash(rows))
+    if teacher_manifest:
+        common.update(teacher_source_text_hash=teacher_source_hash,
+                      teacher_source_train_hash=saved["train_hash"], teacher_source_dev_hash=saved["dev_hash"])
     subwords = "tokenizers" in saved
     if subwords:
         common.update(tokenizer_type="sentencepiece", source_tokenizer_hash=source.fingerprint,
