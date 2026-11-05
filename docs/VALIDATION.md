@@ -1,5 +1,11 @@
 # Validation record
 
+## 2026-11-05 — Baseline-only evaluation defaults
+
+- evaluate Notebookの転移比較スイッチを既定Falseへ変更した。Notebookの既定値を使ったBaseline単独の復元・推論・採点と、3条件を有効にした比較経路を検査した。学習処理の呼出しはない。
+- 関連検査は **12 passed**（4.19秒）。主2 Notebookのschema・Python・HTML、53文書リンクとwheel sourceの一致も確認した。直前の全suite結果へ合算しない。
+- GPU事前検査が合成音声を使うことを手順に明記した。実コーパスとColab CUDAでの実行は未検証。
+
 ## 2026-11-05 — Corpus-independent inputs and experiment names
 
 - 公開Notebookの既定IDを `experiment-001` / `t2tt-001` とし、stage・Teacher・runtimeの名前を汎用化した。コーパス固有のDriveパスと固定件数は任意の設定例へ移した。入力ルート・manifest・任意のQC summaryを設定で選択し、件数はmanifestに従う。

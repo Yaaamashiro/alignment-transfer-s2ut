@@ -77,15 +77,16 @@ def test_training_text_stage_preserves_its_independent_paths_and_commands(tmp_pa
     assert str(ns["TEXT_WORK"]) != str(ns["RESTORED"])
 
 
-@pytest.mark.parametrize("include_transfer", [False, True])
+@pytest.mark.parametrize("include_transfer", [None, True])
 def test_evaluation_restores_models_and_scores_without_training(tmp_path, monkeypatch, include_transfer):
     source, ns = namespace(tmp_path, "evaluate")
     calls = []
     ns["RESEARCH_ROOT"] = tmp_path / "research"
     ns["BASELINE"] = tmp_path / "baseline.json"
     ns["MANIFEST"] = tmp_path / "manifest.jsonl"
-    for name in ("DISTILLATION", "ANNEALED_DISTILLATION", "MASK_DISTILLATION"):
-        ns["COMPARE_" + name] = include_transfer
+    if include_transfer is not None:
+        for name in ("DISTILLATION", "ANNEALED_DISTILLATION", "MASK_DISTILLATION"):
+            ns["COMPARE_" + name] = include_transfer
     def execute_json(*args, **kw):
         validate_command(args[2], args[3:])
         calls.append(list(map(str, args)))

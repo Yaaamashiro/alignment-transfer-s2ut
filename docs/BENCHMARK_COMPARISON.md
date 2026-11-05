@@ -17,7 +17,7 @@ release_summaryは任意。QCリリースの場合はcompleteとsplit別accepted
 ## training.ipynb
 
 1. EXPERIMENT_IDを設定し、CPUでPREPARE_AUDIO_PACKS=TrueにしてQC合格の音声ZIPを作る。
-2. GPUへ切り替え、Falseにして同じ設定で上から実行する。小規模FP16の更新・保存・再開を検査する。
+2. GPUへ切り替え、Falseにして同じ設定で上から実行する。小規模FP16の更新・保存・再開を合成音声で検査する。この事前検査は実コーパスでの実行確認を代替しない。
 3. T2TTは指定した保存先の学習済みSentencePieceを復元できる。新たに学習する場合は新しいT2TT_RUN_IDでRUN_T2TT=Trueにする。EVALUATE_T2TT=Trueでdev BLEU・翻訳例・曲線を確認する。
 4. unit・辞書・fairseqデータを準備し、登録事前検査を確認する。RUN_BASELINE=TrueでBaselineを400,000 updates学習する。
 5. RUN_TEACHER_ARTIFACTS=Trueで元T2TT manifestと音声manifestの全ID・split・本文を照合し、全層Attention・CTC alignment・projected Teacherを構築する。
@@ -32,7 +32,7 @@ release_summaryは任意。QCリリースの場合はcompleteとsplit別accepted
 2. 前処理とBaselineを復元する。選択した転移モデルは完成済みの検証付きsnapshotから復元する。
 3. 共通のnative fairseq生成器でdevを推論し、UERと任意のASR-BLEUを比較する。
 
-EVALUATE_S2UT=TrueでS2UTを評価する。COMPARE_DISTILLATION / COMPARE_ANNEALED_DISTILLATION / COMPARE_MASK_DISTILLATIONで条件を選ぶ。すべてFalseならBaselineのみを評価できる。validation/inferenceはteacher-free。
+EVALUATE_S2UT=TrueでS2UTを評価する。COMPARE_DISTILLATION / COMPARE_ANNEALED_DISTILLATION / COMPARE_MASK_DISTILLATIONは既定Falseで、Baselineのみを評価する。学習を完了した転移条件だけTrueにして比較する。validation/inferenceはteacher-free。
 
 EVALUATE_T2TT_EXTERNAL=TrueでT2TTの固定300件外部BLEUも確認できる。T2TTだけを評価するときはEVALUATE_S2UT=Falseにする。
 
