@@ -70,10 +70,10 @@ def inspect_environment(native=False, benchmark=False, cuda=False):
         check("native_batch_sampler", sampler)
     if benchmark:
         def source():
-            from .colab_runtime import BENCHMARK_REVISION, runtime
+            from .colab_runtime import BENCHMARK_RUNTIME_REVISION, runtime
             runtime()
             version("ja-en-direct-s2st-benchmark")
-            return BENCHMARK_REVISION
+            return BENCHMARK_RUNTIME_REVISION
         check("benchmark", source)
     if cuda:
         from .pilot import check_runtime

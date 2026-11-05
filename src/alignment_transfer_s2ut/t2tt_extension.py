@@ -5,7 +5,7 @@ The trainer itself is never patched: only its operational checkpoint callback is
 wrapped to schedule durable ZIPs and record lineage/milestones.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 import json
 import os
 from pathlib import Path
@@ -283,6 +283,20 @@ def worker(plan_path, preflight=False):
     if (implementation_hash(Path(training.__file__).parent) != plan["implementation_hash"] or
             file_hash(__file__) != plan["control_hash"]):
         raise ValueError("isolated trainer/control code changed")
+    # A frozen trainer may require the old runtime pin in saved_checkpoint().
+    # The controller owns persistence, so verify its actual runtime independently
+    # and keep the original training implementation/contract byte-identical.
+    import direct_s2st
+    from alignment_transfer_s2ut.process_logging import run_process
+    runtime_root = Path(direct_s2st.__file__).resolve().parents[2]
+    with redirect_stdout(sys.stderr):
+        result = run_process(["git", "-C", str(runtime_root), "log", "-1", '--format={"revision":"%H"}'],
+            work / "execution", name="extension-benchmark-pin", capture_json=True)
+        run_process(["git", "-C", str(runtime_root), "diff", "--quiet", "HEAD", "--", "src"],
+            work / "execution", name="extension-benchmark-source")
+    expected_runtime = plan.get("benchmark_runtime_revision", colab_runtime.BENCHMARK_REVISION)
+    if json.loads(result.stdout)["revision"] != expected_runtime:
+        raise ValueError("extension persistence runtime differs from its fixed revision")
     saved = load_checkpoint(work / "checkpoint_last.pt")
     if saved["contract_hash"] != plan["contract_hash"]:
         raise ValueError("continuation contract changed")
@@ -294,8 +308,11 @@ def worker(plan_path, preflight=False):
         if read_json(work / "experiment.json")["contract_hash"] != plan["contract_hash"]:
             raise ValueError("original trainer rejected the target contract")
         return {"contract_hash": plan["contract_hash"], "step": result["step"]}
-    original = colab_runtime.saved_checkpoint
     colab_runtime.EXTRA_RECOVERY = colab_runtime.EXTRA_RECOVERY + EXTRA
+    def persist(work_dir, checkpoint, updates, force=False):
+        from direct_s2st.train_runtime import checkpoint_saved
+        with colab_runtime.recovery_files():
+            checkpoint_saved(work_dir, checkpoint, updates, force=force)
     def scheduled(work_dir, checkpoint, updates, force=False):
         path = Path(checkpoint)
         stat = path.stat()
@@ -303,7 +320,7 @@ def worker(plan_path, preflight=False):
         if updates in plan["milestones"]:
             milestone(Path(work_dir), updates)
         if updates == plan["target_updates"] or updates in plan["milestones"] or updates % plan["snapshot_updates"] == 0:
-            progress_update(lambda: original(work_dir, checkpoint, updates, force=True), progress_path)
+            progress_update(lambda: persist(work_dir, checkpoint, updates, force=True), progress_path)
         else:
             progress_update(lambda: write_json(progress_path,
                 dict(version=1, updates=updates, checkpoint=path.relative_to(work_dir).as_posix(),
@@ -378,7 +395,8 @@ def extend_train_session(source_work, source_backup, work, backup, manifest, con
             source_checkpoint_best_sha256=source[1]["files"]["checkpoint_best.pt"],
             source_contract_hash=last["contract_hash"], target_contract_hash=last["contract_hash"])
         plan = dict(work=str(work), command=target_command, source_updates=source_updates, target_updates=target_updates,
-                    implementation_hash=last["implementation_hash"], contract_hash=last["contract_hash"], training_revision=None)
+                    implementation_hash=last["implementation_hash"], contract_hash=last["contract_hash"], training_revision=None,
+                    benchmark_runtime_revision=c.BENCHMARK_RUNTIME_REVISION)
         shutil.copyfile(__file__, work / ".extension-control.py")
         plan["control_hash"] = file_hash(work / ".extension-control.py")
         milestone(work, source_updates, last, best)

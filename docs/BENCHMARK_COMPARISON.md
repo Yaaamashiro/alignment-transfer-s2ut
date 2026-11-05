@@ -16,7 +16,7 @@ release_summaryは任意。QCリリースの場合はcompleteとsplit別accepted
 
 ## training.ipynb
 
-1. EXPERIMENT_IDを設定し、CPUでPREPARE_AUDIO_PACKS=TrueにしてQC合格の音声ZIPを作る。
+1. EXPERIMENT_IDを設定し、CPUでPREPARE_AUDIO_PACKS=Trueにして音声ZIPを作る。AUDIO_PACK_WORKERSは既定2、整数1〜4でCPU作成のみ並列化する。完成済みZIPは再利用する。
 2. GPUへ切り替え、Falseにして同じ設定で上から実行する。小規模FP16の更新・保存・再開を合成音声で検査する。この事前検査は実コーパスでの実行確認を代替しない。
 3. T2TTは指定した保存先の学習済みSentencePieceを復元できる。新たに学習する場合は新しいT2TT_RUN_IDでRUN_T2TT=Trueにする。EVALUATE_T2TT=Trueでdev BLEU・翻訳例・曲線を確認する。
 4. unit・辞書・fairseqデータを準備し、登録事前検査を確認する。RUN_BASELINE=TrueでBaselineを400,000 updates学習する。

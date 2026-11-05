@@ -56,6 +56,34 @@ def test_training_cpu_pack_mode_skips_all_model_training(tmp_path):
     assert calls == []
 
 
+@pytest.mark.parametrize('workers', [1, 2, 4])
+def test_audio_pack_workers_reach_only_cpu_publication(tmp_path, monkeypatch, workers):
+    source, ns = namespace(tmp_path, 'training')
+    monkeypatch.setenv('S2ST_INPUT_MAP', '')
+    ns.update(AUDIO_PACK_WORKERS=workers, CORPUS_ROOT=tmp_path/'corpus')
+    calls = []
+    def execute_json(*args, **kw):
+        validate_command(args[2], args[3:])
+        calls.append(list(map(str, args)))
+        return {'input_map': str(tmp_path/'input-map.json')}
+    ns['execute_json'] = execute_json
+    exec(source['helpers'], ns)
+    ns['corpus_stage_audio'](create=True)
+    assert calls[-1][calls[-1].index('--audio-pack-workers') + 1] == str(workers)
+    assert '--create-audio' in calls[-1]
+    ns['corpus_stage_audio'](create=False)
+    assert '--audio-pack-workers' not in calls[-1] and '--create-audio' not in calls[-1]
+
+
+def test_primary_notebooks_install_the_tested_audio_pack_runtime():
+    from alignment_transfer_s2ut.colab_runtime import BENCHMARK_RUNTIME_REVISION
+    for name in ('training', 'evaluate'):
+        ns = {'Path': Path}
+        exec(cells(name)['settings'], ns)
+        exec(cells(name)['paths'], ns)
+        assert ns['BENCHMARK_RUNTIME_REVISION'] == BENCHMARK_RUNTIME_REVISION
+
+
 @pytest.mark.parametrize("tokenizer", ["character", "sentencepiece"])
 def test_training_text_stage_preserves_its_independent_paths_and_commands(tmp_path, tokenizer):
     source, ns = namespace(tmp_path, "training")

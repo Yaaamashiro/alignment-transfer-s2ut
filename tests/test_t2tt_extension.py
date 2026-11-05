@@ -191,6 +191,7 @@ def test_original_source_revision_is_recovered_without_contract_rewrite(source_r
     assert call(s)["durable_updates"] == 4
     plan = read_json(s["work"] / "extension-plan.json")
     assert plan["training_revision"] == revision and plan["implementation_hash"] == expected_hash
+    assert plan["benchmark_runtime_revision"] == c.BENCHMARK_RUNTIME_REVISION
     assert load_checkpoint(s["work"] / "checkpoint_last.pt")["implementation_hash"] == expected_hash
 
 

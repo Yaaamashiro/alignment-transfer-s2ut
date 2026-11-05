@@ -122,6 +122,23 @@ def test_benchmark_audio_packs_work_without_original_wavs(tmp_path, benchmark_ru
     assert len(list(packs.rglob("*.zip"))) == 1
 
 
+@pytest.mark.parametrize('create,workers', [(True, 1), (True, 2), (True, 4), (False, 4)])
+def test_corpus_pack_worker_api_keeps_gpu_restoration_serial(tmp_path, benchmark_runtime, monkeypatch, create, workers):
+    from direct_s2st import drive_staging
+    common, corpus = tmp_path/'common', tmp_path/'corpus'
+    write_json(common/'dataset-lock.json', {'audio_path_policy': 'corpus-relative-v1', 'wav_bytes_estimate': 0})
+    monkeypatch.delenv('CORPUS_ROOT', raising=False)
+    received = []
+    def stage(*args, **kw):
+        received.append(kw)
+        return {}
+    monkeypatch.setattr(drive_staging, 'stage_audio', stage)
+    result = c.stage_corpus(common, corpus, tmp_path/'packs', tmp_path/'vm', create, workers)
+    assert received[0]['workers'] == (workers if create else 1)
+    assert received[0]['create'] == create and received[0]['materialize'] == (not create)
+    assert result.get('status') == 'PACKED' if create else 'input_map' in result
+
+
 def test_pair_backup_capacity_failure_preserves_recovery_point(tmp_path, benchmark_runtime, monkeypatch):
     work, backup = tmp_path / "work", tmp_path / "drive"
     command = [sys.executable, "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).mkdir(exist_ok=True); (Path(sys.argv[1])/'result').write_text('complete')", str(work)]

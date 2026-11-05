@@ -4,13 +4,13 @@
 
 学習は [training.ipynb](../notebooks/colab/training.ipynb)、推論・比較は [evaluate.ipynb](../notebooks/colab/evaluate.ipynb) から実行する。動作実績のあるbenchmarkの実装を固定revisionで利用する。
 
-参照元は[ja-en-direct-s2st-benchmark / 4361e55](https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark/tree/4361e55a99c7f4ea3a00c5c138f6820c34a07d06)。Colabが別のローカルcheckoutへ取得・editable installし、起動時にrevisionとtracked sourceの変更を検査する。benchmark checkoutや元データの編集は行わない。
+参照元は[ja-en-direct-s2st-benchmark / 0c0024e](https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark/tree/0c0024ea888206149a3119bf096b86ba66d63b66)。Colabが別のローカルcheckoutへ取得・editable installし、起動時にrevisionとtracked sourceの変更を検査する。runtimeは旧4361e55へ音声ZIP処理だけを追加した固定コミットで、学習・評価実装を変更しない。既存snapshotのartifact/recipe lineageはBENCHMARK_REVISION=4361e55を維持し、実行するコードはBENCHMARK_RUNTIME_REVISION=0c0024eで検査する。インストール先checkoutや元データの編集は行わない。
 
 ローカルで同じruntimeを導入する場合は、alignment用Python環境を有効にして次を実行する。配置先は既存のbenchmark作業checkoutとは別にする。
 
 ```bash
 git clone --no-checkout https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark.git ../alignment-benchmark-runtime
-git -C ../alignment-benchmark-runtime checkout --detach 4361e55a99c7f4ea3a00c5c138f6820c34a07d06
+git -C ../alignment-benchmark-runtime checkout --detach 0c0024ea888206149a3119bf096b86ba66d63b66
 python -m pip install PyYAML==6.0.2 --no-deps -e ../alignment-benchmark-runtime
 python -m alignment_transfer_s2ut.environment --native --benchmark --cuda
 ```
@@ -28,7 +28,7 @@ CLI subprocessの図はファイルへ出力するため、Notebookの設定セ�
 | 完了済みsnapshotの検証・復元 | `colab.latest` / `restore` |
 | S2UTのcache・epochごとのworker調整・確認済みFP16 overflow再試行・勾配監査 | `s2ut.performance.runtime_hooks` / `TrainingAudit` |
 
-`ROOT`は`/content/alignment-transfer-work/benchmark-match-drive-safe-001`、`PERSISTENT`はDrive上の専用ディレクトリ。checkpoint・ログ・NPZ・音声の頻繁な書き込みはROOTへ行う。`PERSISTENT/stages/<stage名>/`へ検証済みZIPだけを保存する。旧Drive直接保存runはそのまま保持し、新しい保存先から開始する。旧checkpointを無条件に採用して学習条件を変えない。
+`ROOT`は`/content/alignment-transfer-work/<EXPERIMENT_ID>`、`PERSISTENT`はDrive上の専用ディレクトリ。checkpoint・ログ・NPZ・音声の頻繁な書き込みはROOTへ行う。`PERSISTENT/stages/<stage名>/`へ検証済みZIPだけを保存する。旧Drive直接保存runはそのまま保持し、新しい保存先から開始する。旧checkpointを無条件に採用して学習条件を変えない。
 
 ## 通常の再開
 
@@ -50,4 +50,6 @@ T2TTは既存のtext trainerを使うため、保存完了通知だけをbenchma
 
 pair単位のAttention・CTC・unit timing・teacherにはbenchmarkの学習checkpointに対応物がないため、保存済みファイルの増分packだけをadapterで追加する。ZIP publisher・checksum・復元はbenchmarkのものを使用する。通常600秒ごととstage終了・エラー終了時に変更分をまとめ、既に保存したpairを次のpackへ複製しない。完成済みstageは入力file hashを照合して再利用する。新VMでは増分packを順に検証復元する。中断した未完了pairと途中ASR評価は再計算する場合がある。
 
-旧`pilot.ipynb` / `pipeline.ipynb`は独立trainerの参考・機能診断用で、このDrive-safe運用の入口ではない。実際の比較と通常再開には`benchmark_comparison.ipynb`を使用する。
+旧`pilot.ipynb` / `pipeline.ipynb`は独立trainerの参考・機能診断用で、このDrive-safe運用の入口ではない。通常再開にはtraining/evaluateを使用し、旧入口はnotebooks/legacyに保存する。
+
+CPU音声ZIPの並列化・既存ZIPを使った再開・測定結果は [音声ZIPの並列化](AUDIO_PACKS.md) を参照。

@@ -16,7 +16,9 @@ import uuid
 from .io import digest, file_hash, read_json, write_json
 from .progress import progress
 
+# Artifact/recipe lineage stays unchanged for this I/O-only runtime patch.
 BENCHMARK_REVISION = "4361e55a99c7f4ea3a00c5c138f6820c34a07d06"
+BENCHMARK_RUNTIME_REVISION = "0c0024ea888206149a3119bf096b86ba66d63b66"
 EXTRA_RECOVERY = ("native-run.json", "native-dev.jsonl", "alignment-train.jsonl", "checkpoint_best.pt", "experiment.json", "metrics.jsonl",
                   "tokenization.json", "tokenizers/ja.model", "tokenizers/ja.vocab", "tokenizers/en.model", "tokenizers/en.vocab")
 
@@ -26,7 +28,7 @@ def runtime():
     import direct_s2st
     root = Path(direct_s2st.__file__).resolve().parents[2]
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-    if revision != BENCHMARK_REVISION:
+    if revision != BENCHMARK_RUNTIME_REVISION:
         raise ValueError("benchmark runtime revision differs from the tested pin")
     subprocess.run(["git", "-C", str(root), "diff", "--quiet", "HEAD", "--", "src"], check=True)
     return importlib.import_module("direct_s2st.colab")
@@ -115,7 +117,7 @@ def native_inputs():
         data_cfg.get_config_from_yaml, audio.get_features_or_waveform = yaml_load, audio_load
 
 
-def stage_inputs(benchmark, local, create_audio=False):
+def stage_inputs(benchmark, local, create_audio=False, audio_pack_workers=2):
     """Use benchmark WAV archives verbatim; GPU sessions never build missing packs."""
     runtime()
     from direct_s2st.drive_staging import stage_audio, ensure_local, copy_verified, register, active_map
@@ -124,7 +126,7 @@ def stage_inputs(benchmark, local, create_audio=False):
     common = benchmark / "data/common"
     rows = stage_audio(common, common.parent / ".drive-audio-packs", local / "audio",
                        splits=("train", "dev"), languages=("ja", "en"), create=create_audio,
-                       materialize=not create_audio)
+                       materialize=not create_audio, workers=audio_pack_workers if create_audio else 1)
     if create_audio:
         return {"status": "PACKED"}
     files = [*sorted((benchmark / "data/s2ut/fairseq").rglob("*")),
@@ -143,11 +145,11 @@ def stage_inputs(benchmark, local, create_audio=False):
         return {"input_map": str(name), "files": len(rows)}
 
 
-def stage_kokoro(common, corpus_root, packs, local, create_audio=False):
-    return stage_corpus(common, corpus_root, packs, local, create_audio)
+def stage_kokoro(common, corpus_root, packs, local, create_audio=False, audio_pack_workers=2):
+    return stage_corpus(common, corpus_root, packs, local, create_audio, audio_pack_workers)
 
 
-def stage_corpus(common, corpus_root, packs, local, create_audio=False):
+def stage_corpus(common, corpus_root, packs, local, create_audio=False, audio_pack_workers=2):
     """Reuse the pinned benchmark's WAV ZIP receipt, staging and input map."""
     from .benchmark_data import derived_output
     runtime()
@@ -171,7 +173,7 @@ def stage_corpus(common, corpus_root, packs, local, create_audio=False):
     os.environ["CORPUS_ROOT"] = str(corpus_root)
     try:
         rows = stage_audio(common, packs, local / "audio", splits=("train", "dev"),
-                           languages=("ja", "en"), create=create_audio, materialize=not create_audio)
+                           languages=("ja", "en"), create=create_audio, materialize=not create_audio, workers=audio_pack_workers if create_audio else 1)
     finally:
         if old_root is None:
             os.environ.pop("CORPUS_ROOT")
@@ -455,6 +457,7 @@ def main():
     child.add_argument("--benchmark", required=True)
     child.add_argument("--local", required=True)
     child.add_argument("--create-audio", action="store_true")
+    child.add_argument("--audio-pack-workers", type=int, choices=range(1, 5), default=2)
     child = sub.add_parser("restore-training")
     for name in ("work", "backup"):
         child.add_argument("--" + name, required=True)
@@ -464,6 +467,7 @@ def main():
     for name in ("common", "corpus-root", "packs", "local"):
         child.add_argument("--" + name, required=True)
     child.add_argument("--create-audio", action="store_true")
+    child.add_argument("--audio-pack-workers", type=int, choices=range(1, 5), default=2)
     child = sub.add_parser("run")
     child.add_argument("--work", required=True)
     child.add_argument("--backup", required=True)
@@ -472,11 +476,11 @@ def main():
     child.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.action == "stage-inputs":
-        result = stage_inputs(args.benchmark, args.local, args.create_audio)
+        result = stage_inputs(args.benchmark, args.local, args.create_audio, args.audio_pack_workers)
     elif args.action == "restore-training":
         result = restore_native_training(args.work, args.backup, args.method)
     elif args.action in {"stage-corpus", "stage-kokoro"}:
-        result = stage_corpus(args.common, args.corpus_root, args.packs, args.local, args.create_audio)
+        result = stage_corpus(args.common, args.corpus_root, args.packs, args.local, args.create_audio, args.audio_pack_workers)
     else:
         command = args.command[1:] if args.command and args.command[0] == "--" else args.command
         if not command:
