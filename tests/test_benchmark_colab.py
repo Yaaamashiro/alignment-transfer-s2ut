@@ -138,7 +138,7 @@ def test_pair_backup_capacity_failure_preserves_recovery_point(tmp_path, benchma
 
 def test_colab_uses_local_outputs_and_benchmark_pin():
     import ast
-    notebook = json.loads((Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
+    notebook = json.loads((Path(__file__).resolve().parents[1] / "notebooks/legacy/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code")
     ast.parse(source)
     assert "ROOT = '/content/alignment-transfer-work/" in source

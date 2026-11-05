@@ -2,7 +2,7 @@
 
 全段階の画面表示・実行記録・無出力時の生存通知は[共通ログ仕様](LOGGING.md)を参照。
 
-比較用の`benchmark_comparison.ipynb`は、動作実績のあるbenchmarkの実装を固定revisionで直接利用する。新たな学習レシピやDrive保存方式を独立に作り直さない。
+学習は [training.ipynb](../notebooks/colab/training.ipynb)、推論・比較は [evaluate.ipynb](../notebooks/colab/evaluate.ipynb) から実行する。動作実績のあるbenchmarkの実装を固定revisionで利用する。
 
 参照元は[ja-en-direct-s2st-benchmark / 4361e55](https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark/tree/4361e55a99c7f4ea3a00c5c138f6820c34a07d06)。Colabが別のローカルcheckoutへ取得・editable installし、起動時にrevisionとtracked sourceの変更を検査する。benchmark checkoutや元データの編集は行わない。
 

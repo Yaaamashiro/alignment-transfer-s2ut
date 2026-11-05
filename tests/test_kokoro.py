@@ -230,7 +230,20 @@ def verify_kokoro_comparison(root, prepared, device, capsys, runtime):
         assert resumed.get_num_updates() == 2
         resumed.consolidate_optimizer()
         resumed.save_checkpoint(str(last), {})
+        resumed.save_checkpoint(str(last.with_name("checkpoint_best.pt")), {})
     assert benchmark.train_native(plan, run, resume=True)["optimizer_steps"] == 0
+    command = [sys.executable, "-m", "alignment_transfer_s2ut.benchmark", "train",
+               "--output", str(run), "--method", "annealed_distillation"]
+    identity = colab_runtime.identity_for(command, run)
+    durable = root / "comparison-backup"
+    runtime.publish_packed(run, durable, identity, 2)
+    run.rename(root / "previous-vm")
+    with pytest.raises(ValueError, match="identity differs"):
+        colab_runtime.restore_native_training(run, durable, "distillation")
+    restored = colab_runtime.restore_native_training(run, durable, "annealed_distillation")
+    assert restored["updates"] == 2 and restored["status"] == "RESTORED"
+    assert benchmark.register_transfer(run, run / "checkpoints/checkpoint_best.pt",
+                                      root / "restored-transfer.json")["training_budget"] == 2
 
 
 def test_teacher_subset_binds_original_train_and_dev_without_mutating_speech(tmp_path):
@@ -307,7 +320,7 @@ def test_kokoro_attention_notebook_uses_verified_source_manifest(tmp_path):
               MANIFEST=tmp_path/"speech.jsonl", BACKBONE_CONFIG=tmp_path/"backbone.json", execute_json=check,
               run=lambda name, module, *args, **kwargs: check("python", "-m", module, *args))
     notebook = json.loads((Path(__file__).resolve().parents[1] /
-                           "notebooks/colab/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
+                           "notebooks/legacy/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
     source = next("".join(c["source"]) for c in notebook["cells"] if "name='verify-kokoro-teacher'" in "".join(c["source"]))
     exec(source, ns)
     assert [c[2].rsplit(".", 1)[-1] for c in commands] == [

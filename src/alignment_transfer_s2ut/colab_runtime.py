@@ -191,6 +191,47 @@ def inspect_checkpoint(path, kind):
     return int(state["step"])
 
 
+def restore_native_training(work, backup, method):
+    """Restore a completed native comparison run without launching a trainer."""
+    from .benchmark import load_native, read_record
+
+    bench = runtime()
+    work, backup = session_paths(work, backup)
+    markers = sorted(backup.glob("*/snapshot.json"), reverse=True)
+    if not markers:
+        raise FileNotFoundError("no completed training snapshot at " + str(backup))
+    identity = read_json(markers[0])["identity"]
+    command = identity.get("command", [])
+    def option(name):
+        return command[command.index(name) + 1] if name in command else None
+    if (identity.get("benchmark_revision") != BENCHMARK_REVISION or identity.get("work") != str(work)
+            or "alignment_transfer_s2ut.benchmark" not in command or "train" not in command
+            or option("--method") != method or option("--output") != str(work)):
+        raise ValueError("training snapshot identity differs from the requested comparison run")
+    snapshot = bench.latest(backup, identity)
+    if snapshot is None:
+        raise ValueError("no verified native training snapshot at " + str(backup))
+    required = {"native-run.json", "checkpoints/checkpoint_last.pt", "checkpoints/checkpoint_best.pt"}
+    if not required <= snapshot[1]["files"].keys():
+        raise ValueError("native snapshot lacks plan or last/best checkpoint")
+    bench.restore(snapshot, work)
+    plan = read_json(work / "native-run.json")
+    if (plan.get("contract_hash") != digest({k: v for k, v in plan.items() if k != "contract_hash"})
+            or plan["transfer"]["method"] != method or snapshot[1]["updates"] != plan["training_budget"]):
+        raise ValueError("native training budget is incomplete or its contract changed")
+    baseline = read_record(plan["baseline_record"])
+    if baseline["record_hash"] != plan["baseline_record_hash"]:
+        raise ValueError("native training baseline registration differs")
+    for name in ("checkpoint_last.pt", "checkpoint_best.pt"):
+        state = load_native(work / "checkpoints" / name)
+        updates = int(state["optimizer_history"][-1]["num_updates"])
+        if (state.get("extra_state", {}).get("alignment_contract_hash") != plan["contract_hash"]
+                or not 0 < updates <= plan["training_budget"]
+                or name == "checkpoint_last.pt" and updates != plan["training_budget"]):
+            raise ValueError("restored native checkpoint differs from its training contract")
+    return {"status": "RESTORED", "updates": plan["training_budget"], "method": method}
+
+
 def session_paths(work, backup):
     from direct_s2st.drive_staging import ensure_local
     work, backup = ensure_local(work), Path(backup).resolve()
@@ -409,6 +450,11 @@ def main():
     child.add_argument("--benchmark", required=True)
     child.add_argument("--local", required=True)
     child.add_argument("--create-audio", action="store_true")
+    child = sub.add_parser("restore-training")
+    for name in ("work", "backup"):
+        child.add_argument("--" + name, required=True)
+    child.add_argument("--method", required=True,
+                       choices=("distillation", "annealed_distillation", "mask_distillation"))
     child = sub.add_parser("stage-kokoro")
     for name in ("common", "corpus-root", "packs", "local"):
         child.add_argument("--" + name, required=True)
@@ -422,6 +468,8 @@ def main():
     args = parser.parse_args()
     if args.action == "stage-inputs":
         result = stage_inputs(args.benchmark, args.local, args.create_audio)
+    elif args.action == "restore-training":
+        result = restore_native_training(args.work, args.backup, args.method)
     elif args.action == "stage-kokoro":
         result = stage_kokoro(args.common, args.corpus_root, args.packs, args.local, args.create_audio)
     else:

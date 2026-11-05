@@ -73,30 +73,16 @@ tokenizerのCLI既定はcharacter。SentencePieceでは`--tokenizer sentencepiec
 
 ## Colabと再開
 
-[jparacrawl_t2tt.ipynb](../notebooks/colab/jparacrawl_t2tt.ipynb)をGPUランタイムで開く。
+[training.ipynb](../notebooks/colab/training.ipynb) でT2TTを準備・学習・復元する。
 
-1. Driveへ接続し、`SOURCE_MANIFEST`を外部JSONLの実パスへ変更する。
-2. 新しい`RUN_ID`を指定する。既定はSentencePiece・200k。characterも選べる。
-3. 環境とCPU preflightを実行する。既存Notebookと同じPython/fairseq/benchmark pinを使う。
-4. text stagingを実行する。4列だけを同じ順序・原文でVMへ保存し、train/dev件数とtext hashを表示する。
-5. 学習セルを実行する。freshは0から、復旧時は同じstageのlast/optimizer/RNG/cursorから継続する。
-6. 完了確認・dev BLEU・翻訳例・曲線を確認する。`RUN_ATTENTION=True`で任意の抽出を行う。
+1. GPUランタイムでPREPARE_AUDIO_PACKS=False、PREPARE_S2UT=Falseにする。
+2. T2TT_SOURCE_MANIFEST_OVERRIDEへ外部text JSONLを指定し、新しいT2TT_RUN_IDでRUN_T2TT=Trueにする。
+3. 「2. T2TT」でcanonical textを作成し、学習を開始する。EVALUATE_T2TT=Trueでdev BLEU・翻訳例・曲線を確認する。
+4. 音声やS2UTも使用する場合は、続く前処理・Baseline・Teacher・転移学習へ進む。
 
-`text_manifest` CLIは原本を一度読み、VM上にcanonicalな4列JSONLを作る。音声列追加後も4列が同じなら既存ファイルを変更しない。原本と同じ出力pathは拒否し、原本を書き換えない。既存のcanonical textが変わった場合も上書きせず、新しいRUN_IDを要求する。
+T2TT単独でも実行できる。学習の保存先はTEXT_ROOT/t2tt-<tokenizer>、DriveはTEXT_PERSISTENT/stages/t2tt-<tokenizer>。TEXT_ROOTとTEXT_PERSISTENTはT2TT_RUN_IDから決まる。切断後は同じrevision・設定で上から再実行し、同じstageのlast/optimizer/RNG/cursorから再開する。
 
-これは**checkpointのtext identity**と、**Drive runtimeの入力ファイルbyte identity**を両立するためでもある。固定benchmarkのruntimeは従来どおり入力ファイルSHA・command/pathを照合する。Notebookでは変更されないローカル4列ファイルを学習入力にするため、外部原本への音声列追加だけならDrive再開identityも維持できる。通常のrunnerへ可変の外部原本を直接渡した場合まで、ファイルSHA照合を緩める機能ではない。
-
-頻繁なcheckpoint・metrics・ログ・AttentionはVM上に保存する。Driveには同じ固定benchmark runtimeでfreeze/verified ZIPを公開する。既定10k＋milestone/終了時、最新2＋milestone保持、loss実測ログと小さな`metrics-summary.json`を共用する。`RUN_TRAINING=False`で完了済みZIPを復元して評価できる。切断後は同じrevision・設定・pathで上から再実行する。保存完了以降の更新は再計算される。
-
-| 内容 | 保存先 |
-|---|---|
-| canonical text | `ROOT/text-manifest/manifest.jsonl` |
-| last/best/metrics/tokenizer | `ROOT/t2tt-<tokenizer>/` |
-| checkpoint ZIP | `PERSISTENT/stages/t2tt-<tokenizer>/` |
-| dev JSON/predictions/cache | `ROOT/dev-<tokenizer>/`と同名Drive stage |
-| Attention | `ROOT/attention-<tokenizer>[-all-layers]/`と同名Drive stage |
-
-text-only追加時には既存Notebookのrevisionを維持した。現在の主benchmark Notebookはloss-only研究設計へ更新されているが、この外部text用Notebookの独立した学習・保存経路は変わらない。
+学習済みT2TTを使う場合はRUN_T2TT=Falseにし、EVALUATE_T2TTまたはTeacherに関するスイッチを有効にする。既定値は既存JParaCrawl SentencePiece run。旧text-only Notebookは [legacy](../notebooks/legacy/jparacrawl_t2tt.ipynb) に保存している。
 
 ## 変更ファイル
 
@@ -108,7 +94,7 @@ text-only追加時には既存Notebookのrevisionを維持した。現在の主b
 | `pilot.py`, `t2tt_extension.py` | pilotのdev text照合、新旧checkpoint契約の検証 |
 | `text_manifest.py` | 原本read-onlyのcanonical text staging |
 | `text_t2tt_runtime.py`, `spm_runtime.py` | 既存fresh/session/ZIP adapterをcharacterとSPMで共用 |
-| `notebooks/colab/jparacrawl_t2tt.ipynb` | 入力・学習・復元・BLEU・例・任意Attention |
+| `notebooks/legacy/jparacrawl_t2tt.ipynb` | 入力・学習・復元・BLEU・例・任意Attention |
 | `tests/test_text_manifest.py`, `test_text_t2tt.py`, `test_text_runtime.py`, `test_text_notebook.py` | API・音声非参照・音声追加・teacher接続・復旧・Notebook |
 | `tests/test_t2tt_external.py` | 追加診断表の表示順に依存せず、BLEU比較表と翻訳例の内容を検査 |
 | `README.md`, `docs/TEXT_ONLY_T2TT.md`, `docs/DEVIATIONS.md`, `docs/VALIDATION.md` | 手順・identity設計・互換性・検証記録 |

@@ -4,7 +4,11 @@
 
 ## Notebookで実行
 
-`notebooks/colab/benchmark_comparison.ipynb` の **6.1c FLEURS/FLORES external text BLEU** を実行する。
+現在の入口は [evaluate.ipynb](../notebooks/colab/evaluate.ipynb)。`EVALUATE_T2TT_EXTERNAL=True` と学習時の `T2TT_RUN_ID` を指定する。T2TTだけを評価する場合は `EVALUATE_S2UT=False` にし、固定300件の復元・翻訳・採点を実行する。
+
+## 旧実験の評価
+
+`notebooks/legacy/benchmark_comparison.ipynb` の **6.1c FLEURS/FLORES external text BLEU** を実行する。
 
 1. 既存の環境・Drive接続・`run(...)` helperを準備する。6.1aの学習を再実行する必要はない。
 2. `ROOT`・`PERSISTENT` とT2TTの選択を設定する。`USE_EXTENDED_T2TT=True`では200k完了済みbestを使い、Falseでは既存20k bestを使う。VMにbestがなければ、選択したstageの完了済みZIPから復元する。

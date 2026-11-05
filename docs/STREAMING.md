@@ -42,7 +42,7 @@ python -m alignment_transfer_s2ut.train_s2ut --trainer legacy \
 
 batch size 8・prefetch 2では最大16 sample分を先読みする。これに加えて、現在のoptimizer更新に必要なupdate-frequency分のmicrobatchを保持する。実際のbyte数は音声・unit長に依存する。
 
-[専用pilot Colab](../notebooks/colab/pilot.ipynb)は既定2 worker・2 batch先読み・8 GiB cacheを使用し、3条件で同じcacheを共有する。`LOADER_WORKERS`・`PREFETCH_BATCHES`・`LOCAL_CACHE`・`CACHE_GB`で設定する。T2TTの文字batchにも順序付き先読みを利用できる。
+[専用pilot Colab](../notebooks/legacy/pilot.ipynb)は既定2 worker・2 batch先読み・8 GiB cacheを使用し、3条件で同じcacheを共有する。`LOADER_WORKERS`・`PREFETCH_BATCHES`・`LOCAL_CACHE`・`CACHE_GB`で設定する。T2TTの文字batchにも順序付き先読みを利用できる。
 
 ## キャッシュと検証
 

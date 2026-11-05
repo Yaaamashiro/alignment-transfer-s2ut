@@ -30,13 +30,13 @@ def validate_command(module, arguments):
 
 
 def pipeline_cells():
-    path = Path(__file__).resolve().parents[1] / "notebooks/colab/pipeline.ipynb"
+    path = Path(__file__).resolve().parents[1] / "notebooks/legacy/pipeline.ipynb"
     return ["".join(cell["source"]) for cell in json.loads(path.read_text(encoding="utf-8"))["cells"]
             if cell["cell_type"] == "code"]
 
 
 def comparison_paths(root, extended=False, all_layers=False, tokenizer="character", **switches):
-    path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
+    path = Path(__file__).resolve().parents[1] / "notebooks/legacy/benchmark_comparison.ipynb"
     notebook = json.loads(path.read_text(encoding="utf-8"))
     source = "".join(next(c for c in notebook["cells"] if c.get("id") == "t2tt-active-paths")["source"])
     namespace = dict(Path=Path, ROOT=str(root), KOKORO=False, USE_EXTENDED_T2TT=extended,ALL_LAYERS=all_layers,
@@ -85,7 +85,7 @@ def test_standalone_commands_stop_on_failure_and_preserve_path_arguments():
 
 
 def test_comparison_attention_and_ctc_keep_existing_resume_commands(tmp_path):
-    path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
+    path = Path(__file__).resolve().parents[1] / "notebooks/legacy/benchmark_comparison.ipynb"
     notebook = json.loads(path.read_text(encoding="utf-8"))
     source = next("".join(cell["source"]) for cell in notebook["cells"]
                   if cell["cell_type"] == "code" and "run(T2TT_ATTENTION_STAGE," in "".join(cell["source"]))
@@ -109,7 +109,7 @@ def test_comparison_attention_and_ctc_keep_existing_resume_commands(tmp_path):
 
 
 def test_comparison_cuda_preflight_includes_batched_attention(tmp_path):
-    path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
+    path = Path(__file__).resolve().parents[1] / "notebooks/legacy/benchmark_comparison.ipynb"
     notebook = json.loads(path.read_text(encoding="utf-8"))
     source = next("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code" and
                   "'tests/test_benchmark_native.py::test_native_fp16_trainer_and_fp32_prior'" in "".join(cell["source"]))
@@ -123,7 +123,7 @@ def test_comparison_cuda_preflight_includes_batched_attention(tmp_path):
 
 @pytest.mark.parametrize("notebook", ["benchmark_comparison", "pilot", "pipeline"])
 def test_notebook_overrides_colab_inline_backend_for_cli_subprocesses(tmp_path, monkeypatch, notebook):
-    path = Path(__file__).resolve().parents[1] / f"notebooks/colab/{notebook}.ipynb"
+    path = Path(__file__).resolve().parents[1] / f"notebooks/legacy/{notebook}.ipynb"
     source = "\n".join("".join(cell["source"]) for cell in json.loads(path.read_text(encoding="utf-8"))["cells"]
                        if cell["cell_type"] == "code")
     setting = next(node for node in ast.parse(source).body if isinstance(node, ast.Assign) and
@@ -141,7 +141,7 @@ def test_notebook_overrides_colab_inline_backend_for_cli_subprocesses(tmp_path, 
 
 
 def staging_helper(tmp_path, print_function=print):
-    path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
+    path = Path(__file__).resolve().parents[1] / "notebooks/legacy/benchmark_comparison.ipynb"
     cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
     common = next("".join(cell["source"]) for cell in cells if "process-logging" in cell.get("metadata", {}).get("tags", []))
     source = next("".join(cell["source"]) for cell in cells
@@ -212,7 +212,7 @@ def test_input_staging_interrupt_stops_only_its_child(tmp_path):
 @pytest.mark.parametrize("name", ["benchmark_comparison", "pilot", "pipeline"])
 def test_every_notebook_command_uses_the_canonical_logger(name):
     root = Path(__file__).resolve().parents[1]
-    notebook = json.loads((root / f"notebooks/colab/{name}.ipynb").read_text(encoding="utf-8"))
+    notebook = json.loads((root / f"notebooks/legacy/{name}.ipynb").read_text(encoding="utf-8"))
     canonical = ast.parse((root / "src/alignment_transfer_s2ut/process_logging.py").read_text(encoding="utf-8"))
     expected = {n.name: ast.dump(n) for n in canonical.body if isinstance(n, ast.FunctionDef)}
     common = next(c for c in notebook["cells"] if "process-logging" in c.get("metadata", {}).get("tags", []))

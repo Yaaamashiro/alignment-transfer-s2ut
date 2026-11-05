@@ -361,7 +361,7 @@ def test_notebook_external_cell_uses_independent_stage_and_displays_existing_dev
         args.dev_evaluation.unlink()
         args.dev_evaluation.with_name(args.dev_evaluation.stem + "-predictions.jsonl").unlink()
     notebook = json.loads((Path(__file__).resolve().parents[1] /
-        "notebooks/colab/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
+        "notebooks/legacy/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
     source = "".join(next(c for c in notebook["cells"] if c.get("id") == "external-text-evaluate")["source"])
     calls, displays, skips = [], [], []
     pandas = types.ModuleType("pandas")

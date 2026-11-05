@@ -9,7 +9,7 @@ from test_notebook_commands import comparison_paths, validate_command
 
 
 def cell(identity):
-    path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
+    path = Path(__file__).resolve().parents[1] / "notebooks/legacy/benchmark_comparison.ipynb"
     notebook = json.loads(path.read_text(encoding="utf-8"))
     return "".join(next(c for c in notebook["cells"] if c.get("id") == identity)["source"])
 
@@ -110,7 +110,7 @@ def test_projected_teacher_and_student_never_mix_teacher_generations(tmp_path, e
 
 
 def test_checkpoint_reference_is_centralized_and_old_stage_defaults_remain_explicit():
-    path = Path(__file__).resolve().parents[1] / "notebooks/colab/benchmark_comparison.ipynb"
+    path = Path(__file__).resolve().parents[1] / "notebooks/legacy/benchmark_comparison.ipynb"
     source = "\n".join("".join(c["source"]) for c in json.loads(path.read_text(encoding="utf-8"))["cells"] if c["cell_type"] == "code")
     assert "t2tt/checkpoint_best.pt" not in source
     assert "RUN_T2TT_EXTENSION = False" in source and "USE_EXTENDED_T2TT = True" in source

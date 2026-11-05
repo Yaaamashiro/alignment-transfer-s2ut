@@ -1,5 +1,12 @@
 # Validation record
 
+## 2026-11-05 — Unified training and evaluation notebooks
+
+- 学習・前処理を `training.ipynb`、推論・比較を `evaluate.ipynb` へ整理した。既存Notebookは `notebooks/legacy/` へ移し、旧フローの回帰検査を継続した。
+- 新しいNotebookの接続検査10件成功。CPU音声ZIPモードで学習がスキップされること、T2TT単独実行、共通入力での転移3条件、S2UT評価からの学習呼出しがないこと、Baseline単独評価、T2TT外部評価の音声非参照を確認した。
+- 関連回帰114件成功、2件スキップ。小規模nativeモデルを完成済みZIPから復元・登録し、評価用の復元処理が学習を実行せず完了することを確認した。
+- 全7 NotebookのschemaとPython構文、主2 NotebookのHTML、文書リンク、wheelを検証した。実データ・Colab GPUでの本学習と評価は未実行。
+
 ## 2026-11-05 — Kokoro Baseline registration with an empty test split
 
 - 合成Kokoroデータのtrain 2対、dev 1対、test 0対で前処理と `prepared_identity()`、stock fairseq Baselineの2更新、登録と再読込、転移3条件のCLI planを確認した。train/devを空にすると登録時の検証が停止する。

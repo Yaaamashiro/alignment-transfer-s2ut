@@ -7,7 +7,7 @@ from test_notebook_commands import validate_command
 
 
 def cells():
-    path=Path(__file__).resolve().parents[1]/"notebooks/colab/jparacrawl_t2tt.ipynb"
+    path=Path(__file__).resolve().parents[1]/"notebooks/legacy/jparacrawl_t2tt.ipynb"
     return {c["id"]:''.join(c["source"]) for c in json.loads(path.read_text(encoding="utf-8"))["cells"]}
 
 

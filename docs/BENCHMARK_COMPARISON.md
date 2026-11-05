@@ -1,51 +1,33 @@
-# Native benchmark comparison
+# 学習と比較
 
-学習済みのbenchmark S2UTをBaselineとして登録し、同じnative fairseq recipeで3種類のloss-only alignment条件を比較する。主Notebookは[benchmark_comparison.ipynb](../notebooks/colab/benchmark_comparison.ipynb)。
+主な入口は [training.ipynb](../notebooks/colab/training.ipynb) と [evaluate.ipynb](../notebooks/colab/evaluate.ipynb)。
 
-## Kokoro JParaCrawl
+## training.ipynb
 
-1. [Kokoro Baseline Notebook](../notebooks/colab/kokoro_baseline.ipynb) をCPUで開き、`PREPARE_AUDIO_PACKS=True` でQC合格リリースを取り込み、train/devのWAV ZIPをDriveに作る。既定の入力は [Colab設定](../configs/data/colab.yaml) にある。
-2. GPUへ切り替え、同じ実験名で `PREPARE_AUDIO_PACKS=False` にして最初から実行する。小規模データでFP16の更新・保存・再開を確認してから、ZIPをVMに展開する。固定HuBERT L6/KM100 unit、補助辞書とSentencePiece CTCラベルを生成する。80-bin FBANKは固定fairseqの音声frontendがWAVから計算する。
-3. prepared dataの登録事前検査に通ったら、`RUN_BASELINE=True` でBaselineを学習する。固定 `paper_fisher_v1` の400,000 updates、FP16、max tokens 20,000、update frequency 4を使用する。切断後は同じ実験名とNotebook revisionで上から実行する。
-4. 比較Notebookで `CORPUS_MODE='kokoro'` と同じ `KOKORO_RUN_ID` を指定し、完成した前処理とBaselineを復元する。devで選択したcheckpointを登録する。
-5. `RUN_TEACHER_ARTIFACTS=True` で6.2から6.3を実行する。JParaCrawl 300,000**対**で学習し、200,000**更新**を完了したSentencePiece T2TTを復元する。元のtrain/dev hashをcheckpointと照合し、Kokoroの217,765対それぞれのID・split・本文が元manifestと完全一致することを確認してから全層Attentionを抽出する。
-6. top-p診断、λ/τ校正、転移3条件、dev評価を下記と同じ順で実行する。
+1. EXPERIMENT_IDを設定し、CPUでPREPARE_AUDIO_PACKS=TrueにしてQC合格の音声ZIPを作る。
+2. GPUへ切り替え、Falseにして同じ設定で上から実行する。小規模FP16の更新・保存・再開を検査する。
+3. T2TTは既定の学習済みSentencePieceを復元できる。新たに学習する場合は新しいT2TT_RUN_IDでRUN_T2TT=Trueにする。EVALUATE_T2TT=Trueでdev BLEU・翻訳例・曲線を確認する。
+4. unit・辞書・fairseqデータを準備し、登録事前検査を確認する。RUN_BASELINE=TrueでBaselineを400,000 updates学習する。
+5. RUN_TEACHER_ARTIFACTS=Trueで元T2TT manifestとKokoroの全ID・split・本文を照合し、全層Attention・CTC alignment・projected Teacherを構築する。
+6. top-p診断を見てMASK_TOP_Pを明示設定し、λ/τを校正する。
+7. RUN_DISTILLATION / RUN_ANNEALED_DISTILLATION / RUN_MASK_DISTILLATIONで転移条件を学習する。RUN_ALIGNMENT_DIAGNOSTICS=Trueで層別診断と可視化を確認する。
 
-Kokoroの `test.tsv` はヘッダーのみを生成し、Baseline登録でも空を許容する。train/devは非空が必須。Driveは `alignment-transfer-s2ut-data/<KOKORO_RUN_ID>/` にWAV ZIP、前処理スナップショット、Baseline、転移成果物を保存する。
+T2TTの既定保存先はJParaCrawl 300,000対で200,000更新を完了したSentencePiece run。Baselineと転移条件は同じ400k予算・初期化・native fairseqレシピを使う。学習済みモデルはそれぞれの検証付きsnapshotへ保存する。
 
-今回の音声時間（日本語約687時間・英語約604時間）から、WAV本体は約138.5 GiB。ステージング前のログにmanifestから計算したWAV容量とVMの空き容量を表示する。現行手順はWAVを一括展開するため、WAVに加えてcheckpointやTeacherなどの作業領域が必要になる。4条件の学習予算は合計1,600,000 updates。所要時間は実データで計測した条件別の更新速度と評価・保存時間から見積もる。
+## evaluate.ipynb
 
-## Colabの順序
+1. trainingと同じEXPERIMENT_ID、corpus設定を指定する。
+2. 前処理とBaselineを復元する。選択した転移モデルは完成済みの検証付きsnapshotから復元する。
+3. 共通のnative fairseq生成器でdevを推論し、UERと任意のASR-BLEUを比較する。
 
-1. Runtime/repository setupと依存・CUDA preflight。
-2. 既存Baseline snapshotを専用VM directoryへ復元し、checkpoint/prepared data/recipe lock/metadataを登録。
-3. T2TT best checkpoint・dev text BLEU・翻訳例を確認。延長/SPM学習は明示スイッチを入れた場合だけ実行。
-4. T2TT全層AttentionとCTC alignmentを復元/抽出。
-5. 既存のprojectionで全層teacherを生成/検査。再利用可能な既存packetは再生成しない。
-6. `RUN_MASK_TOPP_DIAGNOSTICS=True`でcoverage表・分布を確認。
-7. `MASK_TOP_P`を0.8/0.9/0.95から明示設定し、`RUN_ALIGNMENT_CALIBRATION=True`でλ/τを校正。
-8. `RUN_DISTILLATION=True`でKL-based Attention Distillation。
-9. `RUN_ANNEALED_DISTILLATION=True`でAnnealed KL-based Attention Distillation。
-10. `RUN_MASK_DISTILLATION=True`でAttention-level Knowledge Distillation。
-11. 共通のteacher-free native生成・dev評価。
-12. Baseline→KL-based Attention Distillation→Annealed KL-based Attention Distillation→Attention-level Knowledge Distillationの表、loss/layer curves、独立したdev alignment診断とAttention可視化。
+EVALUATE_S2UT=TrueでS2UTを評価する。COMPARE_DISTILLATION / COMPARE_ANNEALED_DISTILLATION / COMPARE_MASK_DISTILLATIONで条件を選ぶ。すべてFalseならBaselineのみを評価できる。validation/inferenceはteacher-free。
 
-学習スイッチ・校正スイッチは全て既定False。mask pは既定None。校正前に本学習を始めない。
+EVALUATE_T2TT_EXTERNAL=TrueでT2TTの固定300件外部BLEUも確認できる。T2TTだけを評価するときはEVALUATE_S2UT=Falseにする。
 
-## 揃える条件
+## 容量と保存
 
-登録済みBaselineのnative S2UT本体、3補助task、optimizer/scheduler、FP16、max_tokens/update_frequency、更新予算、dev selectionを維持する。精度fallbackや学習batchの自動変更はしない。別モデルをseedせず、元seedのfresh native initializationで開始する。validation/inferenceはteacher-free。
+Kokoroのtrain/devは216,312 / 1,453対で、testは空。音声は一括展開し、WAVだけで約138.5 GiBを見込む。ステージング前の容量表示を確認する。checkpointやTeacherにも作業領域が必要。4条件の学習予算は合計1,600,000 updates。
 
-calibration artifactは同じBaseline登録・teacher signature・prepared data・implementationに固定し、3条件で共有する。違いはmethodだけ。KL-based Attention DistillationとAnnealed KL-based Attention Distillationは同じλKL/τKLで、差はcosine annealingだけ。Maskは独立に校正したλ/τと明示pを使う。
+作業はVM、永続化は固定benchmarkのverified ZIP。T2TTとS2UTの保存先は独立しており、同じrevision・実験名・設定でそれぞれ再開できる。旧runの再開は元revisionを使用する。既存の実験用Notebookは [legacy](../notebooks/legacy) に保存している。
 
-## 保存と互換性
-
-原corpus・Baseline backup・teacher sourceはread-only。頻繁なcheckpoint/ログ/packetはVM、Driveは固定benchmark runtimeのverified ZIP・bounded upload・storage budgetを共用する。新条件は`research-v3-*`の独立stageで、旧Guidance runを上書きしない。
-
-同じrevision・ROOT/PERSISTENT・data・選択したMASK_TOP_Pで上から再実行する。保存済みtop-p/calibration stageはスイッチがFalseでも検証付きで復元する。teacherの既存3 stageも復元できる場合はreview gateで止めずに再利用する。初回の未作成teacherは明示reviewが必要。snapshot以降の更新は再計算される。校正JSONの変更や異なるteacherでのresumeは拒否する。古いrunの再開は元revisionで行う。T2TT artifact形式とprojection自体は変更しない。
-
-詳細は[数式](METHOD.md)、[CLI](USAGE.md)、[検証記録](VALIDATION.md)。
-
-## Microbatch τへの移行
-
-今回の校正は`alignment-calibration-v2`、`tau_calibration_unit=microbatch`。旧logical平均からの校正JSONは受理せず、再校正を要求する。Notebookの派生先は`research-v3-*`へ分離した。旧`research-v2-*`のcheckpoint/校正/ログを上書き・再開しない。Baseline・manifest・units・T2TT全層Attention・projected teacherはそのまま再利用し、新stageでtop-p診断と校正から実行する。既存teacherのZIP復元手順は維持する。
+詳細は [Method](METHOD.md)、[検証記録](VALIDATION.md)。

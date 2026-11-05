@@ -2,9 +2,11 @@
 
 CharacterとSentencePieceの違いだけを調べるT2TT実験。旧characterのcheckpoint・teacher・評価結果・保存stageは残す。既存characterモデルをSentencePieceへ変換・warm startしない。
 
-## Colabでの手順
+現在の学習入口は [training.ipynb](../notebooks/colab/training.ipynb)。`T2TT_TOKENIZER='sentencepiece'` を選び、新しい `T2TT_RUN_ID` と `RUN_T2TT=True` で学習する。手順は [text-only T2TT](TEXT_ONLY_T2TT.md) を参照。
 
-1. [benchmark比較Notebook](../notebooks/colab/benchmark_comparison.ipynb)の設定で`T2TT_TOKENIZER='sentencepiece'`を選ぶ。`RUN_T2TT_SENTENCEPIECE=True`で学習、Falseで完了済みモデルの評価だけを行う。
+## 旧比較実験の手順
+
+1. [benchmark比較Notebook](../notebooks/legacy/benchmark_comparison.ipynb)の設定で`T2TT_TOKENIZER='sentencepiece'`を選ぶ。`RUN_T2TT_SENTENCEPIECE=True`で学習、Falseで完了済みモデルの評価だけを行う。
 2. 保存先のセルも再実行し、環境検査・同じmanifest/configの準備まで上から実行する。
 3. 6.1a-Sで`ROOT/t2tt-spm-200k`を0から200kまで学習する。characterの20k学習・200k延長はスキップする。fresh SPMの学習にも、固定benchmarkの常駐session・ローカルfreeze・検証付きDrive ZIPを使用する。
 4. 6.1bでdev、6.1cで保存済み固定300件、6.1dで曲線と保存済みcharacter/SPMの得点を確認する。固定8Cのサンプルを選び直さない。
@@ -76,7 +78,7 @@ CPUの小型モデルで実装を検査する。実コーパスでの8000語彙�
 | `evaluation/text.py`, `evaluate_t2tt_external.py` | checkpoint factory、codepoint OOV、共通BLEU/追加診断 |
 | `spm_runtime.py`, `colab_runtime.py`, `training_metrics.py`, `t2tt_extension.py` | 既存runtimeへの薄いadapter、model/診断の復旧、loss/curve共有 |
 | `pyproject.toml`, `environment.py` | 固定依存・import preflight |
-| `notebooks/colab/benchmark_comparison.ipynb` | 別stage・新規200k・同条件評価・teacher/S2UTの接続 |
+| `notebooks/legacy/benchmark_comparison.ipynb` | 別stage・新規200k・同条件評価・teacher/S2UTの接続 |
 | `diagnose_alignment.py` | subwordにも対応するtext-token軸名 |
 | `tests/test_sentencepiece*.py`, `tests/test_notebook_commands.py` | 単体・学習・外部評価・native・復旧・Notebookの検証 |
 | `README.md`, `docs/SENTENCEPIECE.md`, `docs/DEVIATIONS.md`, `docs/VALIDATION.md` | 設計・操作・制約・検証記録 |

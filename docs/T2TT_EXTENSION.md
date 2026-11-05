@@ -4,7 +4,7 @@
 
 ## Colabでの順番
 
-`notebooks/colab/benchmark_comparison.ipynb` を最新版で開く。
+`notebooks/legacy/benchmark_comparison.ipynb` を最新版で開く。
 
 1. Driveを接続し、学習時と同じ `ROOT`・`PERSISTENT`・`BENCHMARK` を設定する。
 2. 設定と直下のT2TT保存先セルを実行する。既定は下表のとおり。

@@ -163,7 +163,7 @@ def test_pilot_report_handles_resumed_steps_and_rejects_mixed_evaluation(tmp_pat
 
 
 def test_pilot_notebook_syntax_and_separate_update_budgets(tmp_path):
-    notebook = json.loads((Path(__file__).resolve().parents[1] / "notebooks/colab/pilot.ipynb").read_text(encoding="utf-8"))
+    notebook = json.loads((Path(__file__).resolve().parents[1] / "notebooks/legacy/pilot.ipynb").read_text(encoding="utf-8"))
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code")
     tree = ast.parse(source)
     constants = {node.targets[0].id: ast.literal_eval(node.value) for node in tree.body

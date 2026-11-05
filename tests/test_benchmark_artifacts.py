@@ -66,7 +66,7 @@ def test_native_notebook_keeps_baseline_and_binds_backbone():
     import ast
     import json
     notebook = json.loads((Path(__file__).resolve().parents[1] /
-                           "notebooks/colab/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
+                           "notebooks/legacy/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
     source = "\n".join("".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code")
     ast.parse(source)
     assert "RUN_ANNEALED_DISTILLATION = False" in source
@@ -83,6 +83,6 @@ def test_native_notebook_keeps_baseline_and_binds_backbone():
 def notebook_cell(prefix):
     import json
     notebook = json.loads((Path(__file__).resolve().parents[1] /
-                           "notebooks/colab/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
+                           "notebooks/legacy/benchmark_comparison.ipynb").read_text(encoding="utf-8"))
     return next("".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code"
                 and "".join(c["source"]).startswith(prefix))

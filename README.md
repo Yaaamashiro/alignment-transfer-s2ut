@@ -19,34 +19,18 @@ T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT D
 
 ## Colabで始める
 
-### Kokoro JParaCrawl
-
-1. [Kokoro Baseline Notebook](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/kokoro_baseline.ipynb) で検証付き音声ZIPを作り、HuBERT unitとfairseq学習データを準備する。
-2. 同Notebookでnative S2UT Baselineを400,000 updates学習する。
-3. [比較Notebook](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/benchmark_comparison.ipynb) で `CORPUS_MODE='kokoro'` と同じ `KOKORO_RUN_ID` を指定する。学習済みSentencePiece T2TTを復元し、Kokoroのtrain/devに対応するTeacherを構築して4条件を比較する。
-
-### 保存済みベンチマーク実験
-
-[主研究Notebook](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/benchmark_comparison.ipynb)をGPUランタイムで開く。
-
-1. 環境を構築し、別学習済みBaselineを復元・登録する。
-2. T2TT checkpoint・dev翻訳を確認し、全層Attentionとprojected teacherを準備/再利用する。
-3. top-p診断を見て`MASK_TOP_P`を明示選択する。
-4. λ/τ calibrationを実行する。
-5. 必要な学習スイッチを有効にし、KL-based Attention Distillation → Annealed KL-based Attention Distillation → Attention-level Knowledge Distillationの順に実行する。
-6. 共通評価・比較表・loss/layer diagnosticsを確認する。
-
-本学習スイッチは既定False。λ/τを手動設定せず、3条件で同じcalibration artifactを共有する。作業はVM、永続化は既存benchmark方式の検証付きDrive ZIP。同じrevision・設定・保存先で再実行すると保存済み更新から再開する。
-
-## その他のNotebook
-
 | Notebook | 用途 |
 |---|---|
-| [jparacrawl_t2tt](notebooks/colab/jparacrawl_t2tt.ipynb) | 音声なし外部日英manifestからT2TT学習・dev BLEU・Attention抽出 |
-| [pilot](notebooks/colab/pilot.ipynb) | historical standaloneの少量接続試験 |
-| [pipeline](notebooks/colab/pipeline.ipynb) | historical standaloneの前処理/評価例 |
+| [training.ipynb](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/training.ipynb) | T2TT・音声前処理・Baseline・Teacher・校正・転移3条件の学習 |
+| [evaluate.ipynb](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/colab/evaluate.ipynb) | 学習済みモデルの復元・共通推論・dev評価・比較 |
 
-外部text-only入力は`pair_id/split/ja_text/en_text`の4列。後から音声を追加しても新T2TTのtext identityは変わらない。[手順](docs/TEXT_ONLY_T2TT.md)。
+1. trainingを開き、実験名と実行する学習スイッチを設定する。学習済みT2TTは保存先から復元できる。
+2. 音声ZIPはCPU、学習はGPUで実行する。Baselineは400k updates。top-p診断を確認して校正し、必要な転移条件を学習する。
+3. evaluateを開き、同じEXPERIMENT_IDと比較する条件を選ぶ。
+
+同じrevision・設定・保存先で再実行すると、検証済みDrive ZIPから再開する。学習スイッチは既定False。元の実験用Notebookは [legacy](notebooks/legacy) に保存している。
+
+外部text-only入力は pair_id/split/ja_text/en_text の4列。[T2TT手順](docs/TEXT_ONLY_T2TT.md)。
 
 ## Environment
 
