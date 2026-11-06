@@ -1,6 +1,8 @@
 """Kokoro release, verified WAV ZIP, and pinned native preparation integration."""
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 import numpy as np
@@ -9,7 +11,7 @@ import soundfile as sf
 
 from alignment_transfer_s2ut import benchmark, benchmark_data, colab_runtime, corpus_runtime, kokoro_runtime
 from alignment_transfer_s2ut.data.manifest import TEXT_IDENTITY, load_manifest, text_manifest_hash, verified_teacher_subset
-from alignment_transfer_s2ut.io import ArtifactStore, digest, file_hash, local_path, read_jsonl, write_json, write_jsonl
+from alignment_transfer_s2ut.io import ArtifactStore, digest, file_hash, local_path, read_json, read_jsonl, write_json, write_jsonl
 from test_benchmark_colab import benchmark_runtime  # noqa: F401
 from test_notebook_commands import comparison_paths, validate_command
 
@@ -99,10 +101,12 @@ def test_corpus_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
     def run_session(config, *, work, backup, **kwargs):
         from direct_s2st.s2ut import fairseq_train
 
-        assert config["command"][2:4] == [api.__name__, "_fairseq"]
+        assert config["command"][:5] == ["{python}", "-m", api.__name__, "_fairseq", str(prepared)]
         assert config["command"][config["command"].index("--max-tokens") + 1] == "20000"
         assert config["command"][config["command"].index("--update-freq") + 1] == "4"
         assert "--fp16" in config["command"] and kwargs["total"] == 400000
+        assert config["checkpoint"] == "checkpoints/checkpoint_last.pt"
+        assert config["resume_args"] == ["--restore-file", "{checkpoint}"]
         assert kwargs["_staged"] and kwargs["restore_only"] and not kwargs["auto_resume"]
         substitutions = dict(run_root=str(work), updates="400000", python=sys.executable)
         worker = [arg.format(**substitutions) for arg in config["command"]]
@@ -131,7 +135,76 @@ def test_corpus_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
     assert api.baseline_session(data, tmp_path / "run", tmp_path / "backup", True)["durable_updates"] == 400000
     if corpus_format == "canonical":
         assert not list(cold.rglob("ready.json")), "baseline preflight downloaded WAVs"
+    if device == "cpu":
+        verify_baseline_cli(tmp_path, data, prepared, api.__name__, benchmark_runtime)
     verify_corpus_comparison(tmp_path, prepared, device, capsys, benchmark_runtime, monkeypatch)
+
+
+def verify_baseline_cli(root, data, prepared, module, runtime):
+    from alignment_transfer_s2ut.s2ut.fairseq_extension import FAIRSEQ_REVISION
+
+    cli = root / "cli"
+    work, backup = cli / "work", cli / "backup"
+    stale_checkpoint = work / "checkpoints/checkpoint_last.pt"
+    stale_checkpoint.parent.mkdir(parents=True)
+    stale_checkpoint.write_bytes(b"unpublished interrupted local checkpoint")
+    partial_zip = backup / "partial/snapshot.zip"
+    partial_zip.parent.mkdir(parents=True)
+    partial_zip.write_bytes(b"unpublished Drive payload without receipt")
+    lock_path = cli / ("kokoro-baseline-runtime.json" if module.endswith("kokoro_runtime") else "baseline-runtime.json")
+    source = Path(corpus_runtime.__file__).read_bytes()
+    previous_sha = ("d0a4dce83df76acde966af685d1090c7dd95fcc4a897027239c3bfec31ccc187" if b"\r\n" in source else
+                    "c6e6f85c6ba617d594e55be4431705e926f6342f87d9cc01a2fafca475209e35")
+    old_lock = dict(repository=colab_runtime.BENCHMARK_REVISION, fairseq=FAIRSEQ_REVISION, adapter_sha256=previous_sha)
+    write_json(lock_path, old_lock)
+    protected = {p: file_hash(p) for folder in (prepared, root / "packs", data / "common", data / "s2ut/units")
+                 for p in folder.rglob("*") if p.is_file()}
+    protected.update({p: file_hash(p) for p in (lock_path, partial_zip)})
+
+    # Keep both real `python -m` invocations and the benchmark session controller.
+    # Stop inside the worker after actual recipe validation, before optimizer setup.
+    (cli / "sitecustomize.py").write_text('''import json, os, sys
+from pathlib import Path
+from direct_s2st.s2ut import fairseq_train, paper_recipe
+from direct_s2st.vocoders import verification
+paper_recipe.preflight_dependencies = lambda: None
+verification.preflight_command = lambda command, directory: command
+def probe_worker():
+    _, (_, metadata) = fairseq_train.prepare_research_metadata(sys.argv)
+    Path(os.environ["BASELINE_LAUNCH_RECEIPT"]).write_text(json.dumps({
+        "argv": sys.argv, "updates": metadata["max_updates"], "selection": metadata["checkpoint_selection"]
+    }), encoding="utf-8")
+fairseq_train.main = probe_worker
+''', encoding="utf-8")
+    receipt = cli / "worker.json"
+    paths = (cli, Path(runtime.__file__).resolve().parents[1], Path(corpus_runtime.__file__).resolve().parents[1])
+    env = dict(os.environ, BASELINE_LAUNCH_RECEIPT=str(receipt), CUDA_VISIBLE_DEVICES="", S2ST_DRIVE_SAFE="1",
+               PYTHONPATH=os.pathsep.join([*map(str, paths), os.environ.get("PYTHONPATH", "")]))
+    command = [sys.executable, "-m", module, "baseline", "--data", str(data), "--work", str(work),
+               "--backup", str(backup), "--train"]
+
+    corrupt_receipt = partial_zip.with_name("snapshot.json")
+    corrupt_receipt.write_bytes(b"incomplete JSON")
+    rejected = subprocess.run(command, env=env, capture_output=True, text=True, encoding="utf-8", timeout=90)
+    assert rejected.returncode and "backups exist but none are valid" in rejected.stderr, rejected.stderr
+    assert corrupt_receipt.read_bytes() == b"incomplete JSON" and not receipt.exists()
+    corrupt_receipt.rename(cli / "retained-invalid-snapshot.json")
+
+    result = subprocess.run(command, env=env, capture_output=True, text=True, encoding="utf-8", timeout=90)
+    assert result.returncode and "trainer exited without publishing the requested final checkpoint" in result.stderr, result.stderr
+    probe = read_json(receipt)
+    assert probe["updates"] == 400000 and probe["selection"] == "teacher_forced_dev_unit_loss"
+    argv = probe["argv"]
+    assert argv[:2] == ["direct_s2st.s2ut.fairseq_train", str(prepared)]
+    for option, value in (("--arch", "s2ut_transformer_fisher"), ("--s2ut-recipe", "paper_fisher_v1"),
+                          ("--max-update", "400000"), ("--max-tokens", "20000"), ("--update-freq", "4"),
+                          ("--save-interval-updates", "100")):
+        assert argv[argv.index(option) + 1] == value
+    assert Path(argv[argv.index("--save-dir") + 1]) == work / "checkpoints"
+    assert "--fp16" in argv and "--restore-file" not in argv
+    retained, = cli.glob("work.interrupted-*/checkpoints/checkpoint_last.pt")
+    assert retained.read_bytes() == b"unpublished interrupted local checkpoint" and not stale_checkpoint.exists()
+    assert all(file_hash(path) == sha for path, sha in protected.items())
 
 
 def verify_corpus_comparison(root, prepared, device, capsys, runtime, monkeypatch):

@@ -124,7 +124,8 @@ def baseline_session(data, work, backup, restore_only=False, *, legacy=False):
                                    kind="s2ut", model_size="fisher", performance="gpu80", num_workers=8,
                                    save_interval=100, optimize=True, s2ut_recipe="paper_fisher_v1",
                                    s2ut_vocoder_mode="paper")
-    config["command"][2:3] = ["alignment_transfer_s2ut.kokoro_runtime" if legacy else __name__, "_fairseq"]
+    module = "alignment_transfer_s2ut.kokoro_runtime" if legacy else "alignment_transfer_s2ut.corpus_runtime"
+    config["command"][2:3] = [module, "_fairseq"]
     result = bench.run_session(config, work=work, backup=backup, total=MAX_UPDATES, confirm_training=True,
                                auto_resume=not restore_only, resume=restore_only, restore_only=restore_only,
                                _staged=True)
