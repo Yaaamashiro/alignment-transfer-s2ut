@@ -131,14 +131,15 @@ def test_corpus_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
     assert api.baseline_session(data, tmp_path / "run", tmp_path / "backup", True)["durable_updates"] == 400000
     if corpus_format == "canonical":
         assert not list(cold.rglob("ready.json")), "baseline preflight downloaded WAVs"
-    verify_corpus_comparison(tmp_path, prepared, device, capsys, benchmark_runtime)
+    verify_corpus_comparison(tmp_path, prepared, device, capsys, benchmark_runtime, monkeypatch)
 
 
-def verify_corpus_comparison(root, prepared, device, capsys, runtime):
+def verify_corpus_comparison(root, prepared, device, capsys, runtime, monkeypatch):
     import torch
     from fairseq import tasks, utils
     from fairseq.trainer import Trainer
     from fairseq_cli import train
+    from direct_s2st.s2ut.performance import runtime_hooks
     from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
     from native_plan_fixture import fixture_plan
     from test_benchmark_native import tiny_fairseq_config
@@ -164,18 +165,23 @@ def verify_corpus_comparison(root, prepared, device, capsys, runtime):
             "data": identity["files"]}
     fingerprint = benchmark.benchmark_digest(lock)
     lock["recipe"]["training_fingerprint"] = fingerprint
-    with colab_runtime.native_inputs():
-        utils.set_torch_seed(cfg.common.seed)
-        task = tasks.setup_task(cfg.task)
-        task.load_dataset("train")
-        dataset = task.dataset("train")
-        batches = [dataset.collater([dataset[i]]) for i in range(len(dataset))]
-        stock = Trainer(cfg, task, task.build_model(cfg.model), task.build_criterion(cfg.criterion))
-        for step in (1, 2):
-            stock.train_step(batches)
-            assert stock.get_num_updates() == step
-        stock.consolidate_optimizer()
-        stock.save_checkpoint(str(checkpoint), {"s2st_recipe_fingerprint": fingerprint})
+    with monkeypatch.context() as baseline_env:
+        # Use the same dynamic loss-scale retry as the Colab Baseline session.
+        baseline_env.setenv("S2ST_TRAIN_OPTIMIZE", "1")
+        baseline_env.setenv("S2ST_TRAIN_ADAPTIVE_BATCH", "0")
+        baseline_env.setenv("S2ST_TRAIN_FIXED_MICROBATCH", "0")
+        with colab_runtime.native_inputs(), runtime_hooks(audit=None):
+            utils.set_torch_seed(cfg.common.seed)
+            task = tasks.setup_task(cfg.task)
+            task.load_dataset("train")
+            dataset = task.dataset("train")
+            batches = [dataset.collater([dataset[i]]) for i in range(len(dataset))]
+            stock = Trainer(cfg, task, task.build_model(cfg.model), task.build_criterion(cfg.criterion))
+            for step in (1, 2):
+                assert stock.train_step(batches) is not None
+                assert stock.get_num_updates() == step
+            stock.consolidate_optimizer()
+            stock.save_checkpoint(str(checkpoint), {"s2st_recipe_fingerprint": fingerprint})
     del stock
     recipe, metadata, baseline = root / "tiny-recipe.json", root / "tiny-metadata.json", root / "baseline.json"
     write_json(recipe, lock)

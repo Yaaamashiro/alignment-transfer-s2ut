@@ -1,5 +1,11 @@
 # Validation record
 
+## 2026-11-06 — Colab native FP16 preflight
+
+- WindowsのGTX 1650とPyTorch/Torchaudio 2.7.1+cu126で、修正前の結合テスト2件が2回目の更新で勾配オーバーフローし、fairseqがloss scaleを128から64に下げて更新をスキップすることを再現した。
+- 結合テストのBaseline側に、本番と同じ固定benchmark runtimeのFP16再試行を接続した。修正後はtraining NotebookのGPU事前セルと同じ3項目が成功した。release/canonical両形式でBaselineの2更新・登録、転移モデルの保存と再開を検査した。
+- CPU関連46件成功、CUDA用3件スキップ。固定benchmarkの再試行検査8件は、ローカルの固定fairseqソースを隔離fixtureへコピーして実行し成功した。ColabのL4と実データでの本学習は未実行。
+
 ## 2026-11-06 — S2UT audio streaming and cold-VM recovery
 
 - 実際のfairseq Trainerとデータローダーを使うCPU試験で、ZIP本体を取得せず索引を作成し、2つ目のZIPの取得を止めた状態で最初のoptimizer更新を完了した。Driveを模した保存先に検証付きsnapshotを公開し、音声キャッシュが空の環境に復元した。次のsample IDと特徴量が従来の読み込みと一致し、必要なZIP 1個の取得で更新1から2へ進んだ。
