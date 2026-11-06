@@ -45,6 +45,89 @@ def recovery_files():
         recovery.ARTIFACTS = saved
 
 
+def s2ut_implementation_files(package):
+    """Map the exact reviewed storage-only patch to its prior S2UT identity."""
+    package = Path(package)
+    sources = {p.relative_to(package).as_posix(): file_hash(p) for p in package.rglob("*.py")}
+    compatibility = package / "streaming-compatibility.json"
+    if compatibility.is_file():
+        approved = read_json(compatibility)
+        for variant in approved:
+            if all(sources.get(name) == value for name, value in variant["current"].items()):
+                sources.update(variant["previous"])
+                break
+    return sources
+
+
+def stream_audio_mapping():
+    if not os.environ.get("S2ST_INPUT_MAP"):
+        return None
+    from direct_s2st.drive_staging import mapping, stream_document
+    _, stream = stream_document()
+    return mapping() if stream is not None and stream["body"].get("s2ut_audio") else None
+
+
+@contextmanager
+def deferred_s2ut_preflight():
+    """Validate the complete prepared index while deferring verified WAV reads."""
+    rows = stream_audio_mapping()
+    if rows is None:
+        yield
+        return
+    from direct_s2st.s2ut import preflight
+    original = preflight.validate_prepared
+
+    def validate(root, *, clusters=100, check_audio=True):
+        if check_audio:
+            columns = ("id", "src_audio", "src_n_frames", "tgt_audio", "tgt_n_frames")
+            for split in ("train", "dev", "test"):
+                prepared = preflight.read_tsv(root / (split + ".tsv"), columns)
+                for row in prepared.values():
+                    if os.path.abspath(row["src_audio"]) not in rows:
+                        raise ValueError("S2UT source audio is absent from the ZIP index: " + row["src_audio"])
+        return original(root, clusters=clusters, check_audio=False)
+
+    preflight.validate_prepared = validate
+    try:
+        yield
+    finally:
+        preflight.validate_prepared = original
+
+
+@contextmanager
+def limit_speech_transfers():
+    """Share two Drive transfer slots across the forked fairseq loader workers."""
+    if stream_audio_mapping() is None:
+        yield
+        return
+    from direct_s2st.stream_inputs import Downloader
+    from filelock import FileLock, Timeout
+    original = Downloader.transfer
+
+    @contextmanager
+    def transfer(manager, background):
+        with original(manager, background):
+            while True:
+                for slot in range(2):
+                    lock = FileLock(str(manager.root / f"transfer-{slot}.lock"))
+                    try:
+                        lock.acquire(timeout=0)
+                    except Timeout:
+                        continue
+                    try:
+                        yield
+                    finally:
+                        lock.release()
+                    return
+                time.sleep(.05)
+
+    Downloader.transfer = transfer
+    try:
+        yield
+    finally:
+        Downloader.transfer = original
+
+
 def saved_checkpoint(work, checkpoint, updates, force=False):
     if os.environ.get("S2ST_TRAIN_STAGING"):
         runtime()
@@ -111,7 +194,8 @@ def native_inputs():
     data_cfg.get_config_from_yaml = load_yaml
     audio.get_features_or_waveform = lambda path, *a, **kw: audio_load(str(local_path(path)), *a, **kw)
     try:
-        yield
+        with limit_speech_transfers():
+            yield
     finally:
         Dictionary.load, creator._load_samples_from_tsv = dict_load, tsv_load
         data_cfg.get_config_from_yaml, audio.get_features_or_waveform = yaml_load, audio_load
@@ -149,7 +233,59 @@ def stage_kokoro(common, corpus_root, packs, local, create_audio=False, audio_pa
     return stage_corpus(common, corpus_root, packs, local, create_audio, audio_pack_workers)
 
 
-def stage_corpus(common, corpus_root, packs, local, create_audio=False, audio_pack_workers=2):
+def index_corpus_audio(common, corpus_root, packs, local):
+    """Build the benchmark Downloader's audio index without opening Drive ZIPs."""
+    from direct_s2st.drive_staging import audio_archive_path, raw_sha
+    from direct_s2st.io import read_jsonl
+    from direct_s2st.journal import digest as bench_digest
+    from direct_s2st.stream_inputs import checksum
+    from direct_s2st.translatotron2.mel_storage import guarded_root
+    packs = guarded_root(packs)
+    rows, jobs = {}, {}
+    for split in ("train", "dev"):
+        manifest = Path(common) / (split + ".jsonl")
+        items = list(read_jsonl(manifest))
+        manifest_sha = raw_sha(manifest)
+        for language in ("ja", "en"):
+            key = language + "_audio"
+            for start in range(0, len(items), 128):
+                selected = items[start:start + 128]
+                archive = audio_archive_path(packs, manifest_sha, split, language, start, 128)
+                job = bench_digest(["audio", str(archive), manifest_sha])[:24]
+                directory = local / "audio" / job
+                pairs, members = {}, {}
+                for row in selected:
+                    pair = row["pair_id"]
+                    sha = checksum(row[language + "_sha256"])
+                    if pair in pairs:
+                        raise ValueError("duplicate streaming audio ID: " + pair)
+                    pairs[pair] = sha
+                    member = bench_digest([pair, language])[:32] + ".wav"
+                    members[member] = sha
+                    aliases = [Path(row[key])]
+                    if relative := row.get(key + "_corpus_relative"):
+                        relative = Path(relative)
+                        if relative.is_absolute() or relative.drive or ".." in relative.parts:
+                            raise ValueError("unsafe corpus-relative audio path")
+                        aliases.append(corpus_root / relative)
+                    for alias in aliases:
+                        if not alias.is_absolute() or ".." in alias.parts:
+                            raise ValueError("corpus audio index requires safe absolute paths")
+                        name = os.path.abspath(alias)
+                        entry = dict(local=str(directory / member), job=job, member=member, wav_sha256=sha)
+                        previous = rows.setdefault(name, entry)
+                        if previous["wav_sha256"] != sha:
+                            raise ValueError("conflicting ZIP hashes for " + name)
+                jobs[job] = dict(kind="audio", source=str(archive), target=str(directory),
+                                 pairs=pairs, members=members)
+    if not jobs:
+        raise ValueError("empty corpus audio index")
+    body = dict(root=str(local), jobs=jobs, s2ut_audio=True)
+    progress("corpus WAV index", detail=f"packs={len(jobs)} payloads_downloaded=0")
+    return rows, dict(body=body, sha256=bench_digest(body))
+
+
+def stage_corpus(common, corpus_root, packs, local, create_audio=False, audio_pack_workers=2, *, stream_audio=False):
     """Reuse the pinned benchmark's WAV ZIP receipt, staging and input map."""
     from .benchmark_data import derived_output
     runtime()
@@ -160,6 +296,15 @@ def stage_corpus(common, corpus_root, packs, local, create_audio=False, audio_pa
     lock = read_json(Path(common) / "dataset-lock.json")
     if lock.get("audio_path_policy") not in {"kokoro-audio-16k-v1", "corpus-relative-v1"}:
         raise ValueError("corpus staging requires imported common manifests")
+    old_root = os.environ.get("CORPUS_ROOT")
+    if old_root is not None and Path(old_root).resolve() != corpus_root:
+        raise ValueError("CORPUS_ROOT differs from the staging root")
+    if stream_audio:
+        if create_audio:
+            raise ValueError("streaming requires existing Drive WAV packs")
+        rows, stream = index_corpus_audio(common, corpus_root, packs, local)
+        with active_map(rows, local, stream=stream) as name:
+            return {"input_map": str(name), "files": len(rows), "mode": "on-demand"}
     if not create_audio:
         wav_bytes = lock["wav_bytes_estimate"]
         progress("corpus audio staging", detail=(
@@ -167,9 +312,6 @@ def stage_corpus(common, corpus_root, packs, local, create_audio=False, audio_pa
             "checkpoints and derived artifacts require additional space"))
         if not (local / "input-map.json").is_file():
             capacity(local, wav_bytes)
-    old_root = os.environ.get("CORPUS_ROOT")
-    if old_root is not None and Path(old_root).resolve() != corpus_root:
-        raise ValueError("CORPUS_ROOT differs from the staging root")
     os.environ["CORPUS_ROOT"] = str(corpus_root)
     try:
         rows = stage_audio(common, packs, local / "audio", splits=("train", "dev"),
@@ -468,6 +610,7 @@ def main():
         child.add_argument("--" + name, required=True)
     child.add_argument("--create-audio", action="store_true")
     child.add_argument("--audio-pack-workers", type=int, choices=range(1, 5), default=2)
+    child.add_argument("--stream-audio", action="store_true", help="index existing WAV ZIPs for on-demand reads")
     child = sub.add_parser("run")
     child.add_argument("--work", required=True)
     child.add_argument("--backup", required=True)
@@ -480,7 +623,8 @@ def main():
     elif args.action == "restore-training":
         result = restore_native_training(args.work, args.backup, args.method)
     elif args.action in {"stage-corpus", "stage-kokoro"}:
-        result = stage_corpus(args.common, args.corpus_root, args.packs, args.local, args.create_audio, args.audio_pack_workers)
+        result = stage_corpus(args.common, args.corpus_root, args.packs, args.local, args.create_audio,
+                              args.audio_pack_workers, stream_audio=args.stream_audio)
     else:
         command = args.command[1:] if args.command and args.command[0] == "--" else args.command
         if not command:

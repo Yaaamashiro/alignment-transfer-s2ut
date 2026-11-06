@@ -19,7 +19,7 @@ dev = ["pytest>=8,<9"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-alignment_transfer_s2ut = ["strong.yaml", "conditions.yaml"]
+alignment_transfer_s2ut = ["strong.yaml", "conditions.yaml", "streaming-compatibility.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

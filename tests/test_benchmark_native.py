@@ -135,6 +135,99 @@ def native_data(tmp_path, request):
     return Namespace(root=root, cfg=cfg, record=record, task=task, samples=samples, initial=initial)
 
 
+def test_s2ut_updates_during_zip_fetch_and_resumes_on_cold_vm(native_data, benchmark_runtime, monkeypatch):
+    from threading import Event
+    from fairseq import tasks, utils
+    from fairseq.data.iterators import EpochBatchIterator
+    from fairseq.trainer import Trainer
+    from direct_s2st import drive_staging
+    from alignment_transfer_s2ut import colab_runtime as colab
+
+    root = native_data.root
+    common, packs = root / "common", root / "packs"
+    monkeypatch.delenv("CORPUS_ROOT", raising=False)
+    monkeypatch.delenv("S2ST_INPUT_MAP", raising=False)
+    rows = load_manifest(root / "manifest.jsonl")
+    first, second = [r for r in rows if r["split"] == "train"]
+    # Force the two native samples into different production-sized WAV packs.
+    write_jsonl(common / "train.jsonl",
+                [first, *[dict(first, pair_id=f"pad-{i}") for i in range(127)], second])
+    write_jsonl(common / "dev.jsonl", [r for r in rows if r["split"] == "dev"])
+    write_json(common / "dataset-lock.json", {"audio_path_policy": "corpus-relative-v1"})
+    colab.stage_corpus(common, root / "unused-corpus", packs, root / "packing", create_audio=True)
+    for row in rows:
+        for key in ("ja_audio", "en_audio"):
+            Path(row[key]).unlink()
+
+    def open_vm(name):
+        vm = root / name
+        staged = colab.stage_corpus(common, root / "unused-corpus", packs, vm, stream_audio=True)
+        monkeypatch.setenv("S2ST_INPUT_MAP", staged["input_map"])
+        assert staged["mode"] == "on-demand" and not list(vm.rglob("ready.json"))
+        return vm
+
+    def trainer_and_iterator():
+        cfg = native_data.cfg
+        utils.set_torch_seed(cfg.common.seed)
+        task = tasks.setup_task(cfg.task)
+        task.load_dataset("train")
+        dataset = task.dataset("train")
+        trainer = Trainer(cfg, task, task.build_model(cfg.model), task.build_criterion(cfg.criterion))
+        return trainer, EpochBatchIterator(dataset, dataset.collater, [[0], [1]], buffer_size=2)
+
+    vm = open_vm("vm-1")
+    second_key = drive_staging.mapping()[second["ja_audio"]]["job"]
+    blocked_zip = Path(drive_staging.stream_document()[1]["body"]["jobs"][second_key]["source"])
+    copying, release = Event(), Event()
+    real_copy = drive_staging.copy_verified
+
+    def delay_second(source, *args, **kwargs):
+        if source == blocked_zip:
+            copying.set()
+            assert release.wait(30), "second ZIP was not released"
+        return real_copy(source, *args, **kwargs)
+
+    checkpoint = root / "checkpoint" / "checkpoint_last.pt"
+    checkpoint.parent.mkdir()
+    with monkeypatch.context() as mp:
+        mp.setattr(drive_staging, "copy_verified", delay_second)
+        with colab.native_inputs():
+            trainer, sampler = trainer_and_iterator()
+            batches = sampler.next_epoch_itr(shuffle=False)
+            first_batch = next(batches)
+            try:
+                assert copying.wait(10)
+                assert first_batch["id"].tolist() == [0]
+                trainer.train_step([first_batch])
+                assert trainer.get_num_updates() == 1 and not release.is_set()
+                assert len(list(vm.rglob("ready.json"))) == 1
+                trainer.consolidate_optimizer()
+                trainer.save_checkpoint(str(checkpoint), {"train_iterator": sampler.state_dict()})
+            finally:
+                release.set()
+                list(batches)  # Join the outstanding reads before replacing the map.
+
+    backup, identity = root / "backup", {"fixture": "streaming"}
+    benchmark_runtime.publish_packed(checkpoint.parent, backup, identity, 1)
+    snapshot = benchmark_runtime.latest(backup, identity)
+    restored = root / "restored"
+    benchmark_runtime.restore(snapshot, restored)
+    fresh = open_vm("vm-2")
+    with colab.native_inputs():
+        resumed, sampler = trainer_and_iterator()
+        state = resumed.load_checkpoint(str(restored / checkpoint.name))
+        sampler.load_state_dict(state["train_iterator"])
+        assert resumed.get_num_updates() == 1
+        batches = sampler.next_epoch_itr(shuffle=False)
+        batch = next(batches)
+        assert batch["id"].tolist() == [1]
+        assert torch.equal(batch["net_input"]["src_tokens"], native_data.samples[1]["net_input"]["src_tokens"])
+        resumed.train_step([batch])
+        assert resumed.get_num_updates() == 2
+        assert len(list(fresh.rglob("ready.json"))) == 1
+        assert list(batches) == []
+
+
 def test_native_registration_plan_updates_and_teacher_free_validation(native_data):
     from fairseq import tasks, utils
     from fairseq_cli import train

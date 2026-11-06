@@ -7,7 +7,8 @@ from pathlib import Path
 import sys
 
 from .benchmark_data import derived_output
-from .colab_runtime import BENCHMARK_REVISION, runtime, session_paths
+from .colab_runtime import (BENCHMARK_REVISION, deferred_s2ut_preflight, limit_speech_transfers, runtime,
+                            session_paths, s2ut_implementation_files)
 from .io import file_hash, read_json, write_json
 from .progress import progress
 
@@ -111,13 +112,14 @@ def baseline_session(data, work, backup, restore_only=False, *, legacy=False):
     verify_fairseq()
     preflight_dependencies()
     lock_path = work.parent / ("kokoro-baseline-runtime.json" if legacy else "baseline-runtime.json")
-    lock = dict(repository=BENCHMARK_REVISION, fairseq=FAIRSEQ_REVISION, adapter_sha256=file_hash(__file__))
+    adapter_sha = s2ut_implementation_files(Path(__file__).parent)[Path(__file__).name]
+    lock = dict(repository=BENCHMARK_REVISION, fairseq=FAIRSEQ_REVISION, adapter_sha256=adapter_sha)
     if lock_path.is_file() and read_json(lock_path) != lock:
         raise ValueError("Baseline runtime changed; use the original pin")
     if not lock_path.is_file():
         write_json(lock_path, lock)
     from direct_s2st.s2ut.migrate_labels import paper_data_root
-    with allow_empty_test(paper_data_root(data)):
+    with allow_empty_test(paper_data_root(data)), deferred_s2ut_preflight():
         config = bench.make_config(Path(bench.__file__).resolve().parents[2], data, lock_path,
                                    kind="s2ut", model_size="fisher", performance="gpu80", num_workers=8,
                                    save_interval=100, optimize=True, s2ut_recipe="paper_fisher_v1",
@@ -173,7 +175,7 @@ def main(*, legacy=False):
         from direct_s2st.s2ut import fairseq_train
         # Preserve the launcher's canonical recipe identity and argument layout.
         sys.argv[:] = [fairseq_train.__name__, *sys.argv[2:]]
-        with allow_empty_test(sys.argv[1]):
+        with allow_empty_test(sys.argv[1]), deferred_s2ut_preflight(), limit_speech_transfers():
             fairseq_train.main()
         return
     parser = argparse.ArgumentParser(description=__doc__)

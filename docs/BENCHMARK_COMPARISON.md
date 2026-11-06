@@ -12,7 +12,7 @@ speech manifestは `pair_id`、`split`、`ja_text`、`en_text`、`ja_audio`、`e
 
 release_summaryは任意。QCリリースの場合はcompleteとsplit別accepted件数を検査する。expected_pairsを指定するとtrain/devの合計件数も検査する。未指定なら入力manifestの件数を使う。
 
-既存のデータを指定する例は [設定例](../configs/data/kokoro_jparacrawl.example.yaml)。保存済みrunの再開では実際の保存先に対応する元のIDとrevisionを指定する。
+保存済みrunの再開では、元の実験IDと入出力設定を使う。 [コーパス設定例](../configs/data/kokoro_jparacrawl.example.yaml)
 
 ## training.ipynb
 
@@ -38,8 +38,8 @@ EVALUATE_T2TT_EXTERNAL=TrueでT2TTの固定300件外部BLEUも確認できる。
 
 ## 容量と保存
 
-音声は一括展開し、WAVの必要容量を指定したmanifestのdurationから計算する。ステージング前の容量表示を確認する。checkpointやTeacherにも作業領域が必要。4条件の学習予算は合計1,600,000 updates。
+GPUでの起動時は音声ZIPを索引化し、必要になったZIPから取得・検証する。学習データの先読みはfairseqのローダーが担う。展開結果はVMに蓄積するため、参照する音声・checkpoint・Teacherに対応する作業領域が必要。4条件の学習予算は合計1,600,000 updates。 [Colabの入出力と再開](COLAB_RUNTIME.md)
 
-作業はVM、永続化は固定benchmarkのverified ZIP。T2TTとS2UTの保存先は独立しており、同じrevision・実験名・設定でそれぞれ再開できる。旧runの再開は元revisionを使用する。既存の実験用Notebookは [legacy](../notebooks/legacy) に保存している。
+作業はVM、永続化は固定benchmarkのverified ZIP。S2UTは元の実験名・設定で再開する。音声ストリーミング追加前の74c5efaと互換性を検証した実装では、保存済みのS2UT学習契約をそのまま照合する。学習中のT2TTやその他の旧runを続ける場合は、そのrunに対応するrevisionを使う。 [過去のNotebook](../notebooks/legacy)
 
 詳細は [Method](METHOD.md)、[検証記録](VALIDATION.md)。

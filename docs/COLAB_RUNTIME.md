@@ -21,7 +21,7 @@ CLI subprocessの図はファイルへ出力するため、Notebookの設定セ�
 
 | 項目 | 使用するbenchmarkの実装 |
 |---|---|
-| 音声ZIP・SHA256・ローカル展開・論理path mapping | `drive_staging.stage_audio` / `active_map` |
+| 音声ZIP作成・索引・使用時の検証付き展開 | `drive_staging.stage_audio` / `active_map` / `stream_inputs.Downloader` |
 | 常駐学習process・単一upload worker・最大2個の待機snapshot | `session_runtime.run_continuous` / `train_runtime.checkpoint_saved` |
 | snapshot用の完全checkpoint・best・選択状態の固定コピー | `recovery.freeze_files`＋alignment固有のmetadata名 |
 | ZIP作成・容量予算・copy readback・最後に完了marker | `colab.publish_packed` |
@@ -32,7 +32,7 @@ CLI subprocessの図はファイルへ出力するため、Notebookの設定セ�
 
 ## 通常の再開
 
-GPUランタイムを選び、同じコードrevision・ROOT・PERSISTENT・学習設定で上から実行する。消えたPython環境を構築し、入力ZIPと保存stageをローカルへ復元する。学習では最後に検証済みZIPへ保存された更新数からoptimizer/scaler・iterator・RNG・best選択状態を復元する。ローカルの更新数とDriveへ保存済みの更新数は区別する。
+GPUランタイムを選び、同じROOT・PERSISTENT・学習設定で上から実行する。Python環境を構築し、完了済みの前処理と最後の検証済みcheckpointを復元する。S2UTは保存されたoptimizer/scaler・iterator・RNG・best選択状態から続ける。音声ZIPは必要になったものから取得し、次のバッチの読み込みはfairseqのデータローダーが学習計算と並行して進める。
 
 pair出力のNPZ本体を保存した後、外部checksumを書く前に切断された場合は、再開時に内部payloadとmetadataを検証して不足したchecksumだけを補う。元NPZと入力artifactは書き換えない。正常終了時にchecksum不足が残っていれば、完了ZIPの公開を拒否する。旧版で完了とされたAttention・CTC・unit・teacher stageは初回に全pairを再照合し、不足分だけを作成する。再検証済みの完了markerを新しい増分ZIPへ保存した後は通常どおりスキップする。旧ZIPとBaseline backupは変更しない。
 
@@ -40,7 +40,9 @@ pair出力のNPZ本体を保存した後、外部checksumを書く前に切断�
 
 GPUで原本のWAVからZIPを作らない。benchmarkが作ったtrain/devの日英WAV packがあれば再利用する。不足する場合だけ、CPUランタイムで`PREPARE_AUDIO_PACKS=True`にして入力準備セルまで実行する。同じbenchmark関数で原本を一度読み、完成済みpackを再利用する。準備後はGPUへ切り替え、Falseへ戻して通常実行する。testの音声packは比較の前処理に要求しない。
 
-「3. 入力の準備」はGPUランタイムでも転送・検証・展開を行う段階で、GPU学習は開始しない。benchmarkの進捗（stderr）をNotebookのPythonから明示的に表示し、`ROOT/execution/*.log`（開始時に実際の保存先を表示）へ逐次保存する。機械用JSON（stdout）は別の`.stdout.log`に保持し、処理完了後に読み込む。`status=running`は生存通知であり、前進は`checked`・`zip`等の増加で確認する。中断時はこのセルが起動した子processを終了し、同時実行を残さない。既存の検証済みlocal packとDrive原本は保持し、再実行ではbenchmarkの完了markerとhash検査で再利用する。
+GPUの「3. 音声と学習データ」では、manifestからZIPの索引を作る。Baselineの起動時は索引がprepared TSVの音声パスを網羅しているか確認し、音声ZIPと各WAVのSHA-256は初回読み込み時に検証する。同じキャッシュを使う学習ワーカーの同時転送は2本まで。同じVMでは検証済みの展開結果を再利用する。キャッシュは参照した分だけ増えるため、実験を通して使用する音声と派生物を格納する容量が必要。初回のunit抽出・音声検証は全入力を処理する。
+
+`ROOT/execution/*.log`に転送開始・検証済みZIP数・再利用状況を保存する。開始時にログパスを表示し、JSON結果は別の`.stdout.log`へ記録する。切断時は最後にDriveへ保存できたcheckpointが再開点になる。
 
 ## alignment固有の薄いadapter
 

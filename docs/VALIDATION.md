@@ -1,5 +1,13 @@
 # Validation record
 
+## 2026-11-06 — S2UT audio streaming and cold-VM recovery
+
+- 実際のfairseq Trainerとデータローダーを使うCPU試験で、ZIP本体を取得せず索引を作成し、2つ目のZIPの取得を止めた状態で最初のoptimizer更新を完了した。Driveを模した保存先に検証付きsnapshotを公開し、音声キャッシュが空の環境に復元した。次のsample IDと特徴量が従来の読み込みと一致し、必要なZIP 1個の取得で更新1から2へ進んだ。
+- 合成コーパスでBaselineの設定生成・レシピ検査が起動時にWAVを展開しないことを確認した。学習・評価ノートブックのGPU経路が遅延取得を指定し、CPUのZIP作成経路が従来の処理を呼ぶことも検査した。
+- alignment全suiteは **377 passed, 10 skipped**（524.20秒）。旧T2TT継続の回帰も成功した。通常のstage-corpus CLIは音声ZIP取得0件で索引を作成し、S2UTの旧実装ハッシュをLF・CRLFの両方で再現できることを確認した。
+- 固定benchmark runtimeのstreaming・staging・並列音声ZIP関連52件が成功した。学習・評価ノートブックのschema・コード構文・HTML、wheel内77 Python sourceと互換性データの一致、文書リンクを確認した。
+- 実コーパス、Colab CUDA、DriveFSでの同時実行と転送速度は未検証。初回の音声前処理は全入力を使用し、VMのキャッシュには使用した音声が蓄積する。
+
 ## 2026-11-05 — Bounded parallel CPU audio packs
 
 - benchmark runtimeは旧4361e55を土台に音声ZIP処理だけを変更した `0c0024ea888206149a3119bf096b86ba66d63b66` へ固定し、mainへの統合は `9f04d6c97948f9b371626aef487af65acbab57c5`。artifact/recipe lineageは旧4361e55を維持し、実行runtimeを独立した定数で厳密に検査する。両主Notebookは新runtimeを取得する。

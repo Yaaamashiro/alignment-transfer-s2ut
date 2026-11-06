@@ -2,7 +2,7 @@
 
 この文書はhistorical standalone経路の説明です。現在の主比較は[native研究フロー](BENCHMARK_COMPARISON.md)を使用してください。
 
-この文書は`--trainer legacy`の独立trainerとT2TTの入力先読みを対象とする。`benchmark_comparison.ipynb`のS2UTは[benchmark runtime](COLAB_RUNTIME.md)を使用し、必要な入力ZIPを先に取得・展開してから学習する。その経路では以下の`--loader-workers`等でDrive取得を学習中へ遅延させることはできない。
+この文書は`--trainer legacy`の独立trainerとT2TTの入力先読みを対象とする。現行のColab S2UTは、固定benchmarkのZIP取得・検証をfairseqのデータローダーから呼び出す。 [Colabの入出力と再開](COLAB_RUNTIME.md)
 
 必要な入力から読み出し、現在のbatchを学習している間にCPU workerが次の入力を準備する。全データをVMへコピーしてから学習を始める手順は不要。
 

@@ -73,6 +73,10 @@ def verified_teacher_subset(saved, rows, source_manifest):
 def validate(rows, check_audio=True, *, require_audio=True):
     if not rows:
         raise ValueError("empty manifest")
+    indexed = None
+    if check_audio and require_audio and os.environ.get("S2ST_INPUT_MAP"):
+        from ..colab_runtime import stream_audio_mapping
+        indexed = stream_audio_mapping()
     ids, texts, audio_pairs, audio_contents = set(), {}, {}, {}
     for row in rows:
         if any(not isinstance(row.get(k), str) or not row[k] for k in TEXT_REQUIRED):
@@ -98,7 +102,12 @@ def validate(rows, check_audio=True, *, require_audio=True):
             audio_contents[signature] = row["split"]
         if require_audio and check_audio:
             for key in ("ja_audio", "en_audio"):
-                if not local_path(row[key]).is_file():
+                if indexed is not None:
+                    entry = indexed.get(os.path.abspath(row[key]))
+                    declared = row.get(key.replace("_audio", "_sha256"))
+                    if entry is None or (declared and declared != entry["wav_sha256"]):
+                        raise ValueError("manifest audio differs from the ZIP index: " + row[key])
+                elif not local_path(row[key]).is_file():
                     raise FileNotFoundError(row[key])
     return rows
 

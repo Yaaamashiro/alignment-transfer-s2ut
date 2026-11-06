@@ -12,3 +12,5 @@
 9. **設定と表現:** annealingのfraction/scheduleはcanonical conditions YAML→policy→loss/logの経路で統一する。tailはtask-only、validation/inferenceはteacher-freeと呼ぶ。公開名称を整理し、内部method IDは維持する。校正v2/派生stage v3は旧校正の暗黙再利用を拒否する。
 
 10. **Corpus input:** コーパスとmanifestは実験IDから独立して明示指定する。split・ID・本文を維持し、train/devでBaselineを学習する。QC情報がある場合はacceptedのみを受け付ける。固定ベンチマークのprepared validatorには空test TSVを扱うアダプターを用いる。音声対とT2TTの元テキストはID・split・本文で部分集合照合する。既存Kokoroリリースの設定は任意の例とし、旧CLI名は互換入口として残す。旧runの再開では元ID・revisionを使う。
+
+11. **S2UT audio loading:** 学習前にprepared TSVの音声をZIP索引と照合し、ZIPとWAVの実体は使用時に固定benchmarkのDownloaderで検証する。fairseqローダーが同じサンプル順序で次のバッチを取得する。I/O変更を受けたソースのSHA-256が承認済みの組と完全に一致する場合だけ、S2UT Baselineのアダプター識別子と転移学習の実装識別子に旧版74c5efaのハッシュを用いる。 [検証記録](VALIDATION.md)

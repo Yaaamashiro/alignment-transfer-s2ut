@@ -369,8 +369,9 @@ def make_plan(baseline, output, method="distillation", prior_type="t2tt", manife
             "prepared": record["prepared"], "config": cfg, "scientific_config": record["scientific_config"],
             "transfer": transfer, "selection_policy": record["selection_policy"], "training_budget": budget,
             "initialization": "fresh native fairseq seed; no baseline weights loaded"}
-    plan["implementation_hash"] = digest({str(p.relative_to(Path(__file__).parent)): file_hash(p)
-                                         for p in sorted(Path(__file__).parent.rglob("*.py"))})
+    from .colab_runtime import s2ut_implementation_files
+    plan["implementation_hash"] = digest({str(Path(name)): value for name, value in
+                                          s2ut_implementation_files(Path(__file__).parent).items()})
     if for_calibration:
         plan["calibration_only"] = True
     if method != "baseline" and not for_calibration:

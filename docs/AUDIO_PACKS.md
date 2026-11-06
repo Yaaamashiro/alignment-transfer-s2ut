@@ -6,7 +6,7 @@
 2. GitHubの最新 [training.ipynb](../notebooks/colab/training.ipynb) をColabで開く。既存のColabコピーには新設定が自動反映されない。
 3. 元と同じEXPERIMENT_ID、T2TT設定、DATA_CONFIGまたはコーパス・manifestのOverrideを設定する。入力manifestの内容・行順・保存先を変えない。ZIP、plan、receiptは削除しない。
 4. CPUランタイムで `PREPARE_S2UT=True`、`PREPARE_AUDIO_PACKS=True`、`AUDIO_PACK_WORKERS=2` にして「すべてのセルを実行」。必要ならworkersを1または4へ変更できる。
-5. 音声ZIPの準備が終わったらGPUへ切り替え、同じ設定で `PREPARE_AUDIO_PACKS=False` にして再実行する。GPU復元にはCPUの並列設定を渡さず、新規ZIPも作成しない。
+5. 音声ZIPの準備が終わったらGPUへ切り替え、同じ設定で `PREPARE_AUDIO_PACKS=False` にして再実行する。GPUでは作成済みの音声ZIPを必要になった分から取得する。 [Colabの入出力と再開](COLAB_RUNTIME.md)
 
 完成済みZIPは検証して再利用し、残りだけを作る。旧4361e55実装のZIPも使用できる。既存の11個のreceiptと、12個目のZIP/planだけがある状態を再現し、対応する原本WAVを読めなくして4並列で再開した。12個とも内容・mtimeは変化せず、残り5個を作成して全17個が完成した。
 

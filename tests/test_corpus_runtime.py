@@ -122,9 +122,15 @@ def test_corpus_release_to_native_recipe(tmp_path, benchmark_runtime, monkeypatc
         best.touch()
         return {"durable_updates": 400000}
 
+    if corpus_format == "canonical":
+        cold = tmp_path / "fresh-vm"
+        stream = colab_runtime.stage_corpus(common, corpus, packs, cold, stream_audio=True)
+        monkeypatch.setenv("S2ST_INPUT_MAP", stream["input_map"])
     monkeypatch.setattr(paper_recipe, "preflight_dependencies", lambda: None)
     monkeypatch.setattr(benchmark_runtime, "run_session", run_session)
     assert api.baseline_session(data, tmp_path / "run", tmp_path / "backup", True)["durable_updates"] == 400000
+    if corpus_format == "canonical":
+        assert not list(cold.rglob("ready.json")), "baseline preflight downloaded WAVs"
     verify_corpus_comparison(tmp_path, prepared, device, capsys, benchmark_runtime)
 
 

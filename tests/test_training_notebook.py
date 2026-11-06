@@ -71,8 +71,10 @@ def test_audio_pack_workers_reach_only_cpu_publication(tmp_path, monkeypatch, wo
     ns['corpus_stage_audio'](create=True)
     assert calls[-1][calls[-1].index('--audio-pack-workers') + 1] == str(workers)
     assert '--create-audio' in calls[-1]
+    assert '--stream-audio' not in calls[-1]
     ns['corpus_stage_audio'](create=False)
     assert '--audio-pack-workers' not in calls[-1] and '--create-audio' not in calls[-1]
+    assert '--stream-audio' in calls[-1]
 
 
 def test_primary_notebooks_install_the_tested_audio_pack_runtime():
