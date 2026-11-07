@@ -3,7 +3,7 @@
     "current": {
       "benchmark.py": "d098785c51c7a36a07ab19b5072a24ad2964f2c43957d01a38f55ef680224f39",
       "colab_runtime.py": "c142f798e33047b568a386d0414cf83b808a78f0418edb7a533860aad7a364f8",
-      "corpus_runtime.py": "9fcf42bc149084947ea4ca02b4e358e3178cd9b96b550294acb979cf184b8c52",
+      "corpus_runtime.py": "0155f967ce12cc24988c12d0a96298537c49622be1ab6a645e1271ccb9fb443d",
       "data/manifest.py": "e80085262e28358c1764f6a419cfd7db2238d2c5cab92d830364a655a1dbffc0"
     },
     "previous": {
@@ -17,7 +17,7 @@
     "current": {
       "benchmark.py": "db08cf8ac98cc613428efa7de720264f8aa43fe42d097763c70aa081681b4e93",
       "colab_runtime.py": "6cfb36d08f817e1ffad0989e77f087d9379166fcfa237609c4077a77ced39b1f",
-      "corpus_runtime.py": "15c73de5819b8499d62b07cb4a26a5124ca61e8c15724f58c75e62bf819eacb6",
+      "corpus_runtime.py": "4206db8a4d9539930de6f4e67dc92b59780b0c5b8a7aa35ebd4961478c03935f",
       "data/manifest.py": "32efac07a7292d3bb7cf48821b184ce8305ed7805d67a1019999d0936d469009"
     },
     "previous": {
@@ -31,7 +31,7 @@
     "current": {
       "benchmark.py": "db08cf8ac98cc613428efa7de720264f8aa43fe42d097763c70aa081681b4e93",
       "colab_runtime.py": "6cfb36d08f817e1ffad0989e77f087d9379166fcfa237609c4077a77ced39b1f",
-      "corpus_runtime.py": "15c73de5819b8499d62b07cb4a26a5124ca61e8c15724f58c75e62bf819eacb6",
+      "corpus_runtime.py": "4206db8a4d9539930de6f4e67dc92b59780b0c5b8a7aa35ebd4961478c03935f",
       "data/manifest.py": "e80085262e28358c1764f6a419cfd7db2238d2c5cab92d830364a655a1dbffc0"
     },
     "previous": {

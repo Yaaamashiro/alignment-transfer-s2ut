@@ -121,7 +121,7 @@ def baseline_session(data, work, backup, restore_only=False, *, legacy=False):
     from direct_s2st.s2ut.migrate_labels import paper_data_root
     with allow_empty_test(paper_data_root(data)), deferred_s2ut_preflight():
         config = bench.make_config(Path(bench.__file__).resolve().parents[2], data, lock_path,
-                                   kind="s2ut", model_size="fisher", performance="gpu80", num_workers=8,
+                                   kind="s2ut", model_size="fisher", num_workers=8,
                                    save_interval=100, optimize=True, s2ut_recipe="paper_fisher_v1",
                                    s2ut_vocoder_mode="paper")
     module = "alignment_transfer_s2ut.kokoro_runtime" if legacy else "alignment_transfer_s2ut.corpus_runtime"
