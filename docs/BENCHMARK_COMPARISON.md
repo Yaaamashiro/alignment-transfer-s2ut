@@ -22,7 +22,7 @@ Resume saved runs with the original experiment ID and input and output settings.
 4. Prepare units, dictionaries, and fairseq data, then check the registration preflight. Set `RUN_BASELINE=True` to train the Baseline for 400,000 updates.
 5. Set `RUN_TEACHER_ARTIFACTS=True` to verify all IDs, splits, and texts against the original T2TT manifest and build all-layer attention, CTC alignments, and the projected teacher.
 6. Inspect the top-p diagnostics, set `MASK_TOP_P` explicitly, and calibrate λ and τ.
-7. Use `RUN_DISTILLATION`, `RUN_ANNEALED_DISTILLATION`, and `RUN_MASK_DISTILLATION` to train transfer conditions. Set `RUN_ALIGNMENT_DIAGNOSTICS=True` to inspect per-layer diagnostics and visualizations.
+7. Use `RUN_DISTILLATION`, `RUN_ANNEALED_DISTILLATION`, and `RUN_MASK_DISTILLATION` to select transfer conditions. Run the Pilot, review the diagnostics, then switch `TRANSFER_RUN_MODE` to `full` to continue. Set `RUN_ALIGNMENT_DIAGNOSTICS=True` for completed-model layer diagnostics and visualizations. [Native transfer pilot](PILOT.md)
 
 To reuse trained T2TT, specify its `T2TT_RUN_ID` and original text manifest. The Baseline and transfer conditions share the 400,000-update budget, initialization policy, and native fairseq recipe. Each model uses its own verified snapshots.
 

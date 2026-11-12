@@ -1,125 +1,29 @@
-# Real-data diagnostics and the strong S2UT pilot
+# Native transfer pilot
 
-This page covers the historical standalone workflow. See the [native workflow](BENCHMARK_COMPARISON.md) for the current comparison.
+Use the Pilot after the 400,000-update Baseline has published its final Drive snapshot. Use the original Baseline experiment ID, corpus, prepared data, and snapshot location. The training notebook verifies the completed Baseline and displays the recorded recipe, runtime revision, fairseq revision, data identity, seed, batch settings, optimizer, scheduler, and precision. Older Baseline metadata may omit the alignment repository revision. Use the original notebook or execution log to identify that revision.
 
-This small pilot checks the standalone trainer (`--trainer legacy`). The matched comparison uses a separately trained Baseline from the benchmark. [Benchmark workflow](BENCHMARK_COMPARISON.md)
+## Configure the experiment
 
-[Open in Colab](https://colab.research.google.com/github/Yaaamashiro/alignment-transfer-s2ut/blob/main/notebooks/legacy/pilot.ipynb)
+Open [training.ipynb](../notebooks/colab/training.ipynb) in a GPU runtime. Keep `RUN_BASELINE=False` and use the existing SentencePiece T2TT teacher. Use **Top-p diagnostics and calibration** before enabling a transfer condition.
 
-The pilot checks CUDA with real CTC, HuBERT, and the official vocoder, diagnoses alignment quality, and compares three strong conditions. It uses the original train and dev splits. Evaluate test separately after choosing the method and settings.
+1. Enable `RUN_MASK_TOPP_DIAGNOSTICS`. Compare the occupancy, retained probability mass, selected frames, entropy, and invalid rows for 0.8, 0.9, and 0.95. Start by reviewing 0.8. Choose `MASK_TOP_P` explicitly after review.
+2. Enable `RUN_ALIGNMENT_CALIBRATION`. The calibration uses 16 logical train batches, fixed initial gradient ratio 0.5, and a worst-to-median layer weight target of 3. Review the calibrated λ and τ, batch gradient ratios and cosines, and layer weight statistics.
+3. Enable `RUN_DISTILLATION`, `RUN_ANNEALED_DISTILLATION`, and/or `RUN_MASK_DISTILLATION`. Each condition starts from the registered fresh seed and uses a separate run directory.
 
-## Colab settings
+## Pause and review
 
-Select a GPU runtime and set `CORPUS` and `ROOT` in the opening cell.
+Set `TRANSFER_RUN_MODE='pilot'`, `TRANSFER_PILOT_UPDATES=10000`, and `TRANSFER_DIAGNOSTIC_STEPS=[1000, 5000, 10000]`. The notebook also probes the final Pilot step if it is absent from the list. The update limit for the scientific run remains 400,000. Annealed KL follows the full cosine schedule through 320,000 updates.
 
-| Setting | Default |
-|---|---|
-| accepted manifest | `CORPUS/production/manifests/releases/accepted.jsonl` |
-| Output | `/content/drive/MyDrive/alignment-transfer-s2ut-data/pilot-text-001` |
-| Train / dev limit | 10000 / 200 pairs |
-| seed | 1 |
-| T2TT updates | 20000 |
-| T2TT dev text evaluation | All dev pairs, beam 5, length penalty 1, at most 1000 output steps, SacreBLEU 13a |
-| S2UT updates | 10000 per condition |
-| Annealing end | 5000 updates |
-| Warmup | 1000 updates for each condition |
-| Validation / checkpoint interval | 500 updates |
-| batch size / accumulation / max tokens | 8 / 4 / 20000 |
-| CPU workers / prefetch | 2 / 2 nominal batches |
-| Local cache | `/content/alignment-transfer-cache`, maximum 8 GiB |
-| recipe / smoothing / source mapping | strong / 0.05 / frontend |
-| Dev evaluation | Unit error rate. Enable waveform generation and ASR-BLEU in the opening cell |
+At each probe boundary, the Trainer completes the logical update and writes its native checkpoint. The Drive session verifies publication before reporting `PILOT_PAUSED`. The checkpoint retains the model, optimizer, scheduler, FP16 scaler counters, FP32 optimizer master weights, data iterator, RNG, and best-checkpoint state. The additional master weights increase FP16 checkpoint size. Pausing off the normal validation cadence writes a last checkpoint using the normal save path and preserves the selection schedule.
 
-T2TT and S2UT have independent update budgets. If setting S2UT to 5000–20000 updates, keep `ANNEAL_STEPS < S2UT_UPDATES` for a beta-zero training interval. The pilot warmup is shorter than the 10000 updates in the [shared recipe](EXPERIMENTS.md).
+Each probe runs in a separate process. It reads the saved model and the first calibration logical batch, measures gradients on the cross-attention parameters, and uses the λ at the checkpoint's completed-update count. It records the weighted gradient norm ratio, the unweighted cosine, elapsed GPU computation time, peak allocated CUDA memory, and undefined-metric reasons. Negative cosine is a warning. Nonfinite values and checkpoint or contract mismatches are errors.
 
-The first cell installs Python 3.10.22, pinned dependencies, and the fixed fairseq commit. It checks CUDA, torch and torchaudio, and fairseq provenance and stops for CPU-only PyTorch.
+**Training diagnostics and evaluation** shows the curves and a fixed 32-example dev subset with task loss, teacher/student KL, teacher-region student mass, and valid rows by layer. Full dev unit loss appears when the original validation schedule covers the checkpoint. The completed Baseline uses the same fixed dev subset. Optionally set `EVALUATE_TRANSFER_PILOT_DEV=True` for full dev UER and `TRANSFER_PILOT_ASR_BLEU=True` for full dev ASR-BLEU. The optional scores use the common teacher-free generator. The Pilot uses train and dev, and its results describe the current checkpoints.
 
-Training begins once the initial inputs are ready and CPU workers prefetch later inputs. Unaugmented FBANK/CMVN, units, and teacher artifacts are cached on demand on the VM and shared across three conditions. Complete CTC, HuBERT, and teacher construction before training. [Prefetch limits, recovery, and checks](STREAMING.md)
+## Continue to 400,000 updates
 
-## Execution order
+Set `TRANSFER_RUN_MODE='full'`, keep the same selected conditions and paths, and rerun from setup on a fresh runtime or rerun the settings and transfer sections in the existing runtime. The verified snapshot restores the last durable update. The optimizer, scheduler, and sampler continue from that point. Use a new experiment ID for changes to data, teacher, seed, calibration, top-p, or other scientific settings.
 
-1. **Prepare the pilot manifest.** Sample within the original splits with a fixed seed and verify selected audio hashes. T2TT, S2UT, and preprocessing share this manifest.
-2. **Run CUDA integration.** With up to two train pairs and one dev pair, run real CTC and HuBERT, two updates in each strong condition, and official vocoder inference after removing the teacher.
-3. **Train T2TT, evaluate text, and preprocess.** Train on pilot train and use the best dev-loss checkpoint to generate all dev translations from Japanese only. Inspect text BLEU and predictions. Use the same checkpoint to extract MT attention and generate Japanese and English CTC spans, HuBERT/KM100 units, and teacher packets.
-4. **Diagnose train and dev.** Check coverage, entropy, and invalid rows on up to 500 pairs and 20 heatmaps per split. The notebook displays source, translation, both audio files, and heatmaps for two examples per split.
-5. **Train three pilot conditions.** Baseline, Annealed Monotonic, and Annealed T2TT share the strong recipe and initialization.
-6. **Evaluate dev and report.** Evaluate all dev pairs with the common teacher-free generator and save the comparison contract, loss curves, and timings.
+The native CLI accepts `benchmark train --stop-after-update N` as an operational limit. The same command without that argument resumes to the registered training budget. After successful publication the session reports `COMPLETED` at the full budget. Errors and runtime interruptions retain verified snapshots for recovery. The final registration and [evaluate.ipynb](../notebooks/colab/evaluate.ipynb) require a completed transfer run.
 
-The notebook invokes each CLI with a subprocess argument list. A failed stage stops the cell and retains its own failure or interruption log. The two-update integration teacher and the full pilot teacher have separate destinations.
-
-## Data selection and recovery
-
-`pilot prepare` checks the full source manifest for ID, text pair, and known audio pair leakage, then selects train and dev subsets. It reads audio after selection, so unselected test audio is optional. It preserves the original splits.
-
-`data/selection.json` records the input manifest SHA-256, seed, limits, pair IDs, source split counts, selected counts, and canonical manifest hash. Resume checks the same settings and audio contents. Output goes outside the source corpus.
-
-Rerun with the same settings to resume from preprocessing artifacts and training checkpoints. Use a new `ROOT` when changing data, seed, recipe, batching, code revision, or the T2TT teacher. Fresh Colab runtimes fetch the notebook's pinned commit.
-
-## Inspect diagnostics
-
-[Metric definitions](ALIGNMENT.md#alignment-quality-diagnostics)
-
-- Inspect source and target token coverage alongside valid CTC character counts, especially dev masks caused by out-of-vocabulary characters.
-- For low unit-row coverage, listen to the sample and compare CTC spans with unit runs. Zero total valid rows stops the pilot.
-- Compare raw and smoothed priors with heatmaps and entropy. Smoothing preserves zero rows.
-- Check T2TT dev main loss, dev text BLEU, and raw attention. Compare generated English with references to assess translation quality separately from alignment transfer.
-
-Coverage and entropy describe the distribution. Combine quantitative results with listening and visual inspection to assess timing.
-
-T2TT text BLEU uses autoregressive corpus generation. Decode character tokens and score against the original English references with case-sensitive SacreBLEU 2.5.1, 13a, exp smoothing, and effective order disabled. This stage uses text only. It saves the BLEU signature, checkpoint and dev hashes, generation settings, and predictions. `max-chars` counts output steps including EOS. At the limit, generation can end without EOS. Inspect EOS rate and brevity penalty together.
-
-The score diagnoses the teacher selected by dev loss. Check translation quality and alignment together before the main experiment. The pilot uses no universal BLEU or EOS threshold.
-
-## Pilot outputs
-
-| Path under `ROOT` | Contents |
-|---|---|
-| `data/` | Selection settings and canonical manifest |
-| `runtime.json` | Python, torch, CUDA, fairseq revision, and GPU model and memory |
-| `integration/attempt-*/` | CUDA integration outputs |
-| `t2tt/`, `mt/`, `ctc/`, `units/`, `teacher/` | Trained teacher and preprocessing artifacts |
-| `t2tt/dev-text-metrics.json`, `t2tt/dev-text-metrics-predictions.jsonl` | T2TT dev text BLEU, signature, EOS rate, generation settings, and predictions |
-| `alignment-audit-train/`, `alignment-audit-dev/` | Summary JSON, per-sample JSONL, and heatmap PNG and NPZ files |
-| `runs/{condition}/` | Checkpoints, training metrics, dev predictions, and evaluation |
-| `LOGS` on the local Colab VM | Commands, exit status, elapsed time, full logs, and GPU utilization CSV per attempt. [Logging](LOGGING.md) |
-| `pilot-plan.json` | Shared settings and commands for three conditions |
-| `fair-comparison.json` | Checks for recipe, initialization, data, and transfer settings |
-| `pilot-summary.json`, `pilot-summary.png` | Best dev loss, updates, beta, evaluation, timings, T2TT text evaluation, and dev curves |
-
-All conditions select checkpoints and plot curves with beta-zero dev main loss. Training total losses include condition-specific auxiliary objectives. For duplicate steps after resume, reporting uses the latest metrics.
-
-`pilot report --t2tt-evaluation` checks that text BLEU used the same checkpoint, dev data, and backend as the Annealed T2TT teacher. Colab enables this check.
-
-Timing sums recorded attempts and reports failure counts. The GPU CSV samples device-wide utilization and memory every five seconds. Match low-utilization intervals to logs to inspect FBANK and I/O stalls.
-
-Dev unit inference defaults to beam 5, length penalty 1, and at most 1000 units. `GENERATE_WAVEFORMS=True` uses the fixed vocoder, and `ASR_BLEU=True` uses the fixed ASR. Evaluate all three conditions with the same settings and use a new destination when changing them.
-
-## CLI
-
-```bash
-python -m alignment_transfer_s2ut.pilot prepare \
-  --input /path/to/corpus/production/manifests/releases/accepted.jsonl \
-  --corpus-root /path/to/corpus --output outputs/pilot/data \
-  --train-limit 10000 --dev-limit 200 --seed 1 --resume
-
-# After training T2TT, evaluate the same teacher on dev text.
-python -m alignment_transfer_s2ut.evaluate_t2tt \
-  --manifest outputs/pilot/data/manifest.jsonl \
-  --checkpoint outputs/pilot/t2tt/checkpoint_best.pt --split dev \
-  --beam-size 5 --length-penalty 1 --max-chars 1000 --device cuda \
-  --output outputs/pilot/t2tt/dev-text-metrics.json --resume
-
-# After preprocessing and diagnostics, print the plan without starting GPU training.
-python -m alignment_transfer_s2ut.pilot plan \
-  --manifest outputs/pilot/data/manifest.jsonl --config configs/s2ut/fisher.yaml \
-  --units outputs/pilot/units --teacher outputs/pilot/teacher \
-  --output outputs/pilot/runs --logs outputs/pilot/execution
-
-# Replace plan with train using the same arguments to run the three conditions after CUDA checks.
-python -m alignment_transfer_s2ut.pilot report \
-  --runs outputs/pilot/runs --logs outputs/pilot/execution \
-  --t2tt-evaluation outputs/pilot/t2tt/dev-text-metrics.json \
-  --output outputs/pilot/pilot-summary.json
-```
-
-Local workflow tests use synthetic data. Record CUDA integration with real CTC, HuBERT, and the vocoder, Colab execution, and real-corpus pilot results separately.
+The original standalone Pilot is documented at its [historical revision](https://github.com/Yaaamashiro/alignment-transfer-s2ut/blob/1c4ed71964aaabf32a2db38e0b3a4186122afc3a/docs/PILOT.md).

@@ -154,13 +154,16 @@ def test_evaluation_preprocessing_is_restore_only(tmp_path):
     assert calls == [{"restore_only": True}] * 3
 
 
-def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(tmp_path):
+@pytest.mark.parametrize("mode", ["pilot", "full"])
+def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(tmp_path, mode):
     source, ns = namespace(tmp_path, "training")
     ns.update(PREPARE_AUDIO_PACKS=False, NEED_TEACHER=True, NEED_TEXT=True,
               RUN_TEACHER_ARTIFACTS=True,
               RUN_DISTILLATION=True, RUN_ANNEALED_DISTILLATION=True, RUN_MASK_DISTILLATION=True,
               MASK_TOP_P=.8, BASELINE=tmp_path / "baseline.json", MANIFEST=tmp_path / "speech.jsonl",
-              BACKBONE_CONFIG=tmp_path / "backbone.json", T2TT_SOURCE_MANIFEST_OVERRIDE="")
+              BACKBONE_CONFIG=tmp_path / "backbone.json", T2TT_SOURCE_MANIFEST_OVERRIDE="",
+              TRANSFER_RUN_MODE=mode, TRANSFER_PILOT_UPDATES=5, TRANSFER_DIAGNOSTIC_STEPS=[1, 5],
+              RESEARCH_ROOT=tmp_path / "research")
     exec(source["text-paths"], ns)
     ns["TEXT_BACKUP"] = tmp_path / "text-backup"
     ns["TEXT_DEV_METRICS"] = tmp_path / "dev-text.json"
@@ -175,21 +178,34 @@ def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(
     def execute_json(*args, **kw):
         validate_command(args[2], args[3:])
         calls.append(list(map(str, args)))
-        return dict(training_budget=400000, initialization="fresh", selection_policy={},
+        return dict(training_budget=400000, initialization="fresh", selection_policy={}, contract_hash="native-fixture",
                     transfer={"calibration_hash": "fixture"})
     def run(name, module, *args, **kw):
+        args = list(map(str, args))
         validate_command(module, args)
-        calls.append(["python", "-m", module, *map(str, args)])
+        calls.append(["python", "-m", module, *args])
+        if "--stop-after-update" in args:
+            step = int(args[args.index("--stop-after-update") + 1])
+            write_json(Path(args[args.index("--output") + 1]) / "native-session.json",
+                       {"status": "PILOT_PAUSED", "durable_updates": step}, overwrite=True)
+        if args[0] == "probe":
+            write_json(args[args.index("--output") + 1], {"contract_hash": "native-fixture",
+                       "step": int(args[args.index("--update") + 1])})
     ns.update(execute_json=execute_json, run=run)
     exec(source["teacher-extraction"], ns)
     exec(source["teacher-projection"], ns)
     exec(source["transfer-training"], ns)
     training = [c for c in calls if c[2:4] == ["alignment_transfer_s2ut.benchmark", "train"]]
-    assert len(training) == 3
+    repeats = 2 if mode == "pilot" else 1
+    assert len(training) == 3 * repeats
     assert [c[c.index("--method") + 1] for c in training] == [
-        "distillation", "annealed_distillation", "mask_distillation"]
+        method for method in ("distillation", "annealed_distillation", "mask_distillation") for _ in range(repeats)]
     assert all(c[c.index("--baseline") + 1] == str(ns["BASELINE"]) for c in training)
     assert all(c[c.index("--teacher") + 1] == str(ns["TEACHER_ROOT"]) for c in training)
+    assert all("--max-update" not in c for c in training)
+    assert all(("--stop-after-update" in c) == (mode == "pilot") for c in training)
+    exec(source["register-transfers"], ns)
+    assert len(ns["conditions"]) == (1 if mode == "pilot" else 4)
     attention = next(c for c in calls if c[2] == "alignment_transfer_s2ut.extract_t2tt_attention")
     assert "--teacher-training-manifest" in attention and "--all-layers" in attention
 

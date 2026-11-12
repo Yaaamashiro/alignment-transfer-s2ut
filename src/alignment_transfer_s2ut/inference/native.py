@@ -14,18 +14,18 @@ from ..progress import progress
 from .decode import load_vocoder
 
 
-def infer_native(args):
+def infer_native(args, *, checkpoint_record=None):
     from ..colab_runtime import native_inputs
     with native_inputs():
-        return _infer_native(args)
+        return _infer_native(args, checkpoint_record=checkpoint_record)
 
 
-def _infer_native(args):
+def _infer_native(args, *, checkpoint_record=None):
     if args.units_only == bool(args.vocoder_config):
         raise ValueError("select --units-only or --vocoder-config")
     if args.beam_size < 1 or args.max_len_a < 0 or args.max_len_b < 1 or args.length_penalty < 0:
         raise ValueError("invalid native generation settings")
-    record = read_record(args.record, verify_data=False)
+    record = checkpoint_record if checkpoint_record is not None else read_record(args.record, verify_data=False)
     # Generation needs model configuration/dictionaries, never train/dev/test labels.
     for name, sha in record["prepared"]["files"].items():
         if not name.endswith(".tsv") and file_hash(Path(record["data"]) / name) != sha:

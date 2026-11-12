@@ -59,6 +59,60 @@ def gradient_norm(gradients):
     return float(torch.stack(values).sum().sqrt()) if values else 0.
 
 
+def gradient_diagnostics(task, alignment, task_norm, alignment_norm, coefficient):
+    if not all(math.isfinite(value) and value >= 0 for value in (task_norm, alignment_norm, coefficient)):
+        raise ValueError("nonfinite or negative gradient norm/coefficient")
+    reason = None
+    cosine = None
+    if task_norm == 0 or alignment_norm == 0:
+        reason = "zero task gradient" if task_norm == 0 else "zero alignment gradient"
+    else:
+        products = [(left.double() * right.double()).sum() for left, right in zip(task, alignment, strict=True)
+                    if left is not None and right is not None]
+        cosine = float(torch.stack(products).sum()) / task_norm / alignment_norm if products else 0.
+        cosine = min(1., max(-1., cosine))
+    ratio = coefficient * alignment_norm / task_norm if task_norm else None
+    if ratio is not None and not math.isfinite(ratio):
+        raise ValueError("nonfinite alignment gradient ratio")
+    return {"gradient_ratio": ratio, "gradient_cosine": cosine, "cosine_undefined_reason": reason,
+            "ratio_undefined_reason": "zero task gradient" if not task_norm else None}
+
+
+def distribution_summary(values):
+    tensor = torch.as_tensor(values, dtype=torch.float64)
+    if not tensor.numel():
+        return None
+    percentiles = tensor.quantile(tensor.new_tensor([.25, .5, .75, .9])).tolist()
+    return {"mean": float(tensor.mean()), "median": percentiles[1],
+            "min": float(tensor.min()), "max": float(tensor.max()),
+            "p25": percentiles[0], "p75": percentiles[2], "p90": percentiles[3]}
+
+
+def layer_weight_summary(weights, losses, counts):
+    values = torch.as_tensor(weights, dtype=torch.float64)
+    losses, counts = torch.as_tensor(losses), torch.as_tensor(counts)
+    valid = counts > 0
+    used = valid.any(dim=1)
+    if not used.any():
+        return None
+    values, losses, valid = values[used], losses[used], valid[used]
+    entropy = -(values * values.clamp_min(1e-300).log()).sum(dim=1)
+    worst = values.argmax(dim=1)
+    # Use the same lower-order median and deterministic first tie as calibration/logging.
+    ratios = []
+    for row, layer_losses, eligible in zip(values, losses, valid, strict=True):
+        selected = row[eligible][layer_losses[eligible].argsort(stable=True)]
+        middle = float(selected[(len(selected) - 1) // 2])
+        if middle > 0:
+            ratios.append(float(selected[-1]) / middle)
+    return {"mean_weights": values.mean(dim=0).tolist(), "max_weight": float(values.max()),
+            "worst_layer_frequency": (torch.bincount(worst, minlength=values.size(1)) / len(worst)).tolist(),
+            "entropy": distribution_summary(entropy.tolist()),
+            "effective_layers": distribution_summary(entropy.exp().tolist()),
+            "max_to_median_weight_ratio": distribution_summary(ratios),
+            "undefined_weight_ratios": len(worst) - len(ratios)}
+
+
 def binding(plan):
     return {key: plan[key] for key in ("baseline_record_hash", "scientific_config", "prepared", "initialization")} | {
         "artifacts": plan["transfer"]["artifacts"], "all_layers": plan["transfer"]["all_layers"]}

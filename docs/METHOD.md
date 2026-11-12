@@ -75,6 +75,8 @@ Use `autograd.grad` to measure the native logical task gradient and the aggregat
 
 Accumulate microbatch gradients sequentially and release each graph. Zero or nonfinite norms stop calibration. KL and Mask use separate λ values. The two KL conditions share λKL and τKL.
 
+The calibration report includes the measured task/alignment gradient cosine and the norm ratio after applying the final λ to each logical batch. It summarizes microbatch layer weights, worst-layer frequency, entropy, effective layer count, and the maximum-to-median weight ratio. The Pilot repeats the gradient observation on saved checkpoints in a separate process. [Native transfer pilot](PILOT.md)
+
 ## Top-p selection and the training contract
 
 `tau_estimates.kl.rejected_microbatches` and `tau_estimates.mask.rejected_microbatches` store zero-based indices into the saved microbatch list. A candidate is rejected for missing valid layers, a near-zero gap, NaN, or Inf.

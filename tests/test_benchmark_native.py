@@ -86,7 +86,16 @@ def native_data(tmp_path, request):
     for split in ("train", "dev", "test"):
         (data / (split + ".tsv")).write_text("id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames\n" + "".join(
             f"{r['pair_id']}\t{r['ja_audio']}\t{50 + int(r['pair_id'])}\t0 1 0 1 0 1\t6\n" for r in rows if r["split"] == split), encoding="utf-8")
-    cfg = tiny_fairseq_config(data, root / "baseline/checkpoints", getattr(request, "param", 1))
+    options = getattr(request, "param", 1)
+    layers, device, frequency, monitor = options if isinstance(options, tuple) else (options, "cpu", 2, None)
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("native pilot FP16 integration requires CUDA")
+    cfg = tiny_fairseq_config(data, root / "baseline/checkpoints", layers, device=device)
+    if device == "cuda":
+        cfg.common.fp16_scale_window = 2
+    if frequency != 2:
+        cfg.optimization.update_freq = [frequency]
+        cfg.checkpoint.save_interval_updates = 0  # Exercise an extra pilot save between native saves.
     utils.set_torch_seed(cfg.common.seed)
     task = tasks.setup_task(cfg.task)
     model = task.build_model(cfg.model)
@@ -96,15 +105,20 @@ def native_data(tmp_path, request):
     task.load_dataset("train")
     dataset = task.dataset("train")
     samples = [dataset.collater([dataset[i]]) for i in range(2)]
-    trainer.train_step(samples)
-    trainer.train_step(samples)
+    from alignment_transfer_s2ut.s2ut.benchmark_extension import completed_step
+    for i in range(2):
+        batch = samples if frequency == 2 else [samples[i]]
+        completed_step(trainer, batch, trainer.train_step)
     identity = b.prepared_identity(data)
     recipe = {"recipe": {"fixture": True}, "command": ["direct_s2st.s2ut.fairseq_train", str(data)], "data": identity["files"]}
     fingerprint = b.benchmark_digest(recipe)
     recipe["recipe"]["training_fingerprint"] = fingerprint
     write_json(root / "recipe.json", recipe)
-    write_json(root / "metadata.json", {"training_fingerprint": fingerprint, "fairseq_revision": b.REVISION,
-        "dataset_fingerprint": identity["data_lock"], "completed_updates": 2})
+    metadata = {"training_fingerprint": fingerprint, "fairseq_revision": b.REVISION,
+                "dataset_fingerprint": identity["data_lock"], "completed_updates": 2}
+    if monitor:
+        metadata["monitoring"] = {"policy": {"mode": "report_only", "interval": monitor}}
+    write_json(root / "metadata.json", metadata)
     (root / "baseline/checkpoints").mkdir(parents=True)
     trainer.consolidate_optimizer()
     trainer.save_checkpoint(str(root / "baseline/checkpoints/checkpoint_best.pt"), {"s2st_recipe_fingerprint": fingerprint})

@@ -341,6 +341,8 @@ def inspect_checkpoint(path, kind):
 
 def restore_native_training(work, backup, method):
     """Restore a completed native comparison run without launching a trainer."""
+    from hashlib import sha256
+    from zipfile import ZipFile
     from .benchmark import load_native, read_record
 
     bench = runtime()
@@ -362,14 +364,22 @@ def restore_native_training(work, backup, method):
     required = {"native-run.json", "checkpoints/checkpoint_last.pt", "checkpoints/checkpoint_best.pt"}
     if not required <= snapshot[1]["files"].keys():
         raise ValueError("native snapshot lacks plan or last/best checkpoint")
-    bench.restore(snapshot, work)
-    plan = read_json(work / "native-run.json")
+    directory, receipt = snapshot
+    if receipt.get("storage") == "zip-v1":
+        with ZipFile(directory / "snapshot.zip") as archive:
+            plan_bytes = archive.read("native-run.json")
+    else:
+        plan_bytes = (directory / "files/native-run.json").read_bytes()
+    if sha256(plan_bytes).hexdigest() != receipt["files"]["native-run.json"]:
+        raise ValueError("restored native plan checksum mismatch")
+    plan = json.loads(plan_bytes)
     if (plan.get("contract_hash") != digest({k: v for k, v in plan.items() if k != "contract_hash"})
             or plan["transfer"]["method"] != method or snapshot[1]["updates"] != plan["training_budget"]):
         raise ValueError("native training budget is incomplete or its contract changed")
     baseline = read_record(plan["baseline_record"])
     if baseline["record_hash"] != plan["baseline_record_hash"]:
         raise ValueError("native training baseline registration differs")
+    bench.restore(snapshot, work)
     for name in ("checkpoint_last.pt", "checkpoint_best.pt"):
         state = load_native(work / "checkpoints" / name)
         updates = int(state["optimizer_history"][-1]["num_updates"])
@@ -425,10 +435,32 @@ def train_session(command, work, backup, *, popen=None, publish=None):
     bench = runtime()
     from direct_s2st.session_runtime import run_continuous
     work, backup = session_paths(work, backup)
-    identity = identity_for(command, work)
+    native = "alignment_transfer_s2ut.benchmark" in command
+    identity_command = list(command)
+    if native:
+        from .benchmark import pilot_target
+        stop = None
+        for index, argument in enumerate(identity_command):
+            option, equals, value = argument.partition("=")
+            if option == "--stop-after-update":
+                stop = int(value if equals else identity_command[index + 1])
+                del identity_command[index:index + (1 if equals else 2)]
+                break
+        action = identity_command.index("train")
+        plan_command = identity_command[:action] + ["plan"] + identity_command[action + 1:]
+        plan = json.loads(subprocess.check_output(plan_command, text=True))
+        total = plan["training_budget"]
+        target = pilot_target(plan, stop)
+        readers = plan["config"]["dataset"]["num_workers"]
+    else:
+        target = total = int(command[command.index("--max-updates") + 1])
+        readers = 2
+    identity = identity_for(identity_command, work)
     previous = bench.latest(backup, identity)
     if previous:
-        bench.restore(previous, work)
+        if not native or not all((work / name).is_file() and file_hash(work / name) == expected
+                                 for name, expected in previous[1]["files"].items()):
+            bench.restore(previous, work)
     elif any(backup.glob("*/snapshot.json")):
         raise ValueError("no verified training snapshot; refusing to restart")
     elif any(work.iterdir()):
@@ -436,23 +468,18 @@ def train_session(command, work, backup, *, popen=None, publish=None):
         work.rename(retained)
         work.mkdir()
         progress("no durable snapshot; retained unpublished local files at " + str(retained) + "; starting at update 0")
-    native = "alignment_transfer_s2ut.benchmark" in command
     relative = "checkpoints/checkpoint_last.pt" if native else "checkpoint_last.pt"
     last = work / relative
     completed = inspect_checkpoint(last, "s2ut") if last.is_file() else 0
     if previous and completed != previous[1]["updates"]:
         raise ValueError("snapshot update count differs from checkpoint")
-    if native:
-        parser_args = command[command.index("train") + 1:]
-        # The same native CLI creates the scientific contract. No chunk-based
-        # max_update rewrite: scheduler/budget remain those of the baseline.
-        plan_command = command[:command.index("train")] + ["plan"] + parser_args
-        plan = json.loads(subprocess.check_output(plan_command, text=True))
-        total = plan["training_budget"]
-        readers = plan["config"]["dataset"]["num_workers"]
-    else:
-        total = int(command[command.index("--max-updates") + 1])
-        readers = 2
+    if native and previous:
+        from .benchmark import load_native
+        state = load_native(last)
+        if (read_json(work / "native-run.json") != plan or completed > total or
+                state.get("extra_state", {}).get("alignment_contract_hash") != plan["contract_hash"]):
+            raise ValueError("restored native training contract differs; use the original settings or a new run")
+        del state
     config = {"kind": "s2ut" if native else "tt2", "checkpoint": relative,
               "command": list(command), "resume_args": [],
               "runtime": {"cache_gb": 8, "readers": max(1, readers), "precision": "default", "adaptive_batch": False}}
@@ -463,9 +490,16 @@ def train_session(command, work, backup, *, popen=None, publish=None):
     os.environ.setdefault("S2ST_BACKUP_MIN_SECONDS", "600")
     os.environ.setdefault("S2ST_BACKUP_MAX_GB", "1024")
     with recovery_files():
-        return run_continuous(config, work=work, backup=backup, identity=identity, completed=completed,
-                              total=total, seconds=0, inspect_checkpoint=inspect_checkpoint, publish=publish or bench.publish_packed,
-                              **({"popen":popen} if popen is not None else {}))
+        result = run_continuous(config, work=work, backup=backup, identity=identity, completed=completed,
+                                total=target, seconds=0, inspect_checkpoint=inspect_checkpoint, publish=publish or bench.publish_packed,
+                                **({"popen":popen} if popen is not None else {}))
+    if native:
+        if result["durable_updates"] < target:
+            raise RuntimeError("native training exited before publishing the requested recovery point")
+        result.update(status="COMPLETED" if result["durable_updates"] == total else "PILOT_PAUSED",
+                      training_budget=total)
+        write_json(work / "native-session.json", result, overwrite=True)
+    return result
 
 
 def stage_session(command, work, backup, interval=600, *, restore_only=False):

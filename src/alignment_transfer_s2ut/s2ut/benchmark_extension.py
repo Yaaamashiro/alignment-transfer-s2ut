@@ -175,6 +175,7 @@ class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
             model.alignment_updates, self.task.training_budget, padding)
         loss = task_loss + size * alignment
         logs.update(diagnostics)
+        logs["alignment/task_loss"] = task_loss.detach() / size
         logs.update(loss=loss.detach(), alignment_metric_weight=size)
         return loss, size, logs
 
@@ -267,15 +268,23 @@ def completed_step(trainer, samples, step, max_retries=32):
 
 
 @contextmanager
-def trainer_hooks(contract_hash, selection_policy=None):
+def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=None):
     """Native Trainer with provenance, logging and stock microbatch accumulation."""
     from fairseq_cli import train
     original = train.Trainer
     original_load = checkpoint_utils.load_checkpoint_to_cpu
+    original_load_training = checkpoint_utils.load_checkpoint
     original_validate_save = train.validate_and_save
     original_forward = SpeechToUnitMultitaskTaskCriterion.forward
     original_compute = SpeechToUnitMultitaskTaskCriterion.compute_loss
     selection_policy = selection_policy or {"mode": "native"}
+    scaler_fields = ("loss_scale", "_iter", "_last_overflow_iter", "_last_rescale_iter", "_overflows_since_rescale")
+
+    def master_parameters(optimizer):
+        parameters = getattr(optimizer, "fp32_params", ())
+        if isinstance(parameters, dict):
+            return [parameters[device] for device in sorted(parameters)]
+        return [parameters] if torch.is_tensor(parameters) else parameters
     def compute(self, *args, **kwargs):
         result = original_compute(self, *args, **kwargs)
         self.native_main_loss_sum = result[0].detach().clone()
@@ -291,6 +300,11 @@ def trainer_hooks(contract_hash, selection_policy=None):
     class Trainer(original):
         selection_state = None
         validation_main = None
+        saved_update = None
+        checkpoint_epoch_end = None
+        checkpoint_epoch_loss = None
+        loading_training_checkpoint = False
+        resume_mid_epoch = False
 
         def _fp_convert_sample(self, sample):
             converted = super()._fp_convert_sample(sample)
@@ -308,7 +322,8 @@ def trainer_hooks(contract_hash, selection_policy=None):
                 if "alignment/worst_layer" in row:
                     row["alignment/worst_layer"] = int(row["alignment/worst_layer"])
                 row.update({"train/total_loss": float(result.get("loss", 0)) * math.log(2),
-                    "train/learning_rate": self.get_lr(), "train/gradient_norm": float(result.get("gnorm", 0))})
+                    "train/learning_rate": self.get_lr(), "train/gradient_norm": float(result.get("gnorm", 0)),
+                    "train/seconds": self.cumulative_training_time()})
                 if "train/main_loss" not in row:
                     row["train/main_loss"] = float(result.get("nll_loss", 0)) * math.log(2)
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -331,10 +346,22 @@ def trainer_hooks(contract_hash, selection_policy=None):
             os.close(fd)
             Path(temporary).unlink()  # Native serializer renames into an absent target on Windows.
             try:
+                epoch_lr = None
+                if self.checkpoint_epoch_end is not None:
+                    loss = extra_state.get("val_loss") if selection_policy["mode"] == "native" else self.checkpoint_epoch_loss
+                    epoch_lr = (self.checkpoint_epoch_end, loss)
+                scaler = getattr(self.optimizer, "scaler", None) if self.cfg.common.fp16 else None
+                scaler_state = {key: getattr(scaler, key) for key in scaler_fields} if scaler is not None else None
+                # fairseq saves rounded model weights and Adam moments. The
+                # FP32 weights that Adam updates also have to survive a pause.
+                master = [p.detach().cpu() for p in master_parameters(self.optimizer)] if self.cfg.common.fp16 else []
                 result = super().save_checkpoint(temporary, {**extra_state, "alignment_contract_hash": contract_hash,
-                    "alignment_selection": self.selection_state, "alignment_rng": rng_state(self.model)})
+                    "alignment_selection": self.selection_state, "alignment_rng": rng_state(self.model),
+                    "alignment_epoch_lr": epoch_lr, "alignment_fp16_scaler": scaler_state,
+                    "alignment_fp32_master": master})
                 if Path(temporary).is_file():
                     os.replace(temporary, path)
+                    self.saved_update = self.get_num_updates()
                 return str(path) if result is not None else result
             finally:
                 Path(temporary).unlink(missing_ok=True)
@@ -346,14 +373,52 @@ def trainer_hooks(contract_hash, selection_policy=None):
                     raise ValueError("native resume contract mismatch")
                 self.selection_state = extra.get("alignment_selection")
                 restore_rng(self.model, extra["alignment_rng"])
+                if self.cfg.common.fp16 and "alignment_fp16_scaler" in extra:
+                    scaler, state = getattr(self.optimizer, "scaler", None), extra["alignment_fp16_scaler"]
+                    if (scaler is None or not isinstance(state, dict) or set(state) != set(scaler_fields)
+                            or not math.isfinite(state["loss_scale"]) or state["loss_scale"] != scaler.loss_scale
+                            or any(type(state[key]) is not int for key in scaler_fields[1:])):
+                        raise ValueError("native resume FP16 scaler state differs")
+                    for key, value in state.items():
+                        setattr(scaler, key, value)
+                    parameters = master_parameters(self.optimizer)
+                    weights = extra.get("alignment_fp32_master")
+                    if not isinstance(weights, list) or len(weights) != len(parameters):
+                        raise ValueError("native resume FP32 master weights are missing")
+                    with torch.no_grad():
+                        for parameter, weight in zip(parameters, weights, strict=True):
+                            if (not torch.is_tensor(weight) or weight.shape != parameter.shape or
+                                    weight.dtype != torch.float32 or not torch.isfinite(weight).all()):
+                                raise ValueError("invalid native resume FP32 master weights")
+                            parameter.copy_(weight)
             return extra
 
+        def lr_step(self, epoch, val_loss=None):
+            if self.loading_training_checkpoint:
+                return self.get_lr()
+            return super().lr_step(epoch, val_loss)
+
+        def begin_epoch(self, epoch):
+            if self.resume_mid_epoch:
+                self.resume_mid_epoch = False
+                return
+            super().begin_epoch(epoch)
+
     def validate_save(cfg, trainer, task, epoch_itr, valid_subsets, end_of_epoch):
+        update = trainer.get_num_updates()
+        pause = update == stop_after_update
+        trainer.checkpoint_epoch_end = epoch_itr.epoch if end_of_epoch else None
+        trainer.checkpoint_epoch_loss = None
         if selection_policy["mode"] == "native":
-            return original_validate_save(cfg, trainer, task, epoch_itr, valid_subsets, end_of_epoch)
+            losses, stop = original_validate_save(cfg, trainer, task, epoch_itr, valid_subsets, end_of_epoch)
+            if pause:
+                if trainer.saved_update != update:
+                    # Preserve the normal validation and best-selection schedule.
+                    checkpoint_utils.save_checkpoint(cfg.checkpoint, trainer, epoch_itr, None)
+                publish_pause(cfg, update)
+            return losses, stop or pause
         if list(valid_subsets) != ["dev"] or cfg.dataset.disable_validation or cfg.dataset.max_valid_steps is not None:
             raise ValueError("benchmark selection requires full dev validation")
-        update = trainer.get_num_updates()
         stop = update >= cfg.optimization.max_update
         saved = trainer.selection_state or {"best": None, "best_update": None, "last_validation": 0}
         loss = None
@@ -381,6 +446,7 @@ def trainer_hooks(contract_hash, selection_policy=None):
             values = [r for r in values if r["step"] != update] + [{"step": update, "dev/main_loss": loss, "beta": 0}]
             write_jsonl(output, values, overwrite=True)
             if improved:
+                trainer.checkpoint_epoch_loss = loss
                 target = Path(cfg.checkpoint.save_dir) / "checkpoint_best.pt"
                 # Trainer's own checkpoint serializer retains optimizer/scaler state.
                 trainer.consolidate_optimizer()
@@ -393,13 +459,24 @@ def trainer_hooks(contract_hash, selection_policy=None):
                 finally:
                     Path(temporary).unlink(missing_ok=True)
         due = cfg.checkpoint.save_interval_updates > 0 and update % cfg.checkpoint.save_interval_updates == 0
-        if stop or loss is not None or end_of_epoch or due:
+        if stop or pause or loss is not None or end_of_epoch or due:
             # Best belongs to the unit-loss selector; native last/iterator saving is unchanged.
+            trainer.checkpoint_epoch_loss = loss
             checkpoint_utils.save_checkpoint(cfg.checkpoint, trainer, epoch_itr, None)
             from ..colab_runtime import saved_checkpoint
-            saved_checkpoint(Path(cfg.checkpoint.save_dir).parent,
-                Path(cfg.checkpoint.save_dir) / "checkpoint_last.pt", update, force=loss is not None or stop)
-        return [loss], stop
+            if not pause:
+                saved_checkpoint(Path(cfg.checkpoint.save_dir).parent,
+                    Path(cfg.checkpoint.save_dir) / "checkpoint_last.pt", update, force=loss is not None or stop)
+        if pause:
+            publish_pause(cfg, update)
+        return [loss], stop or pause
+
+    def publish_pause(cfg, update):
+        from ..colab_runtime import saved_checkpoint
+        from ..progress import progress
+        last = Path(cfg.checkpoint.save_dir) / "checkpoint_last.pt"
+        saved_checkpoint(last.parent.parent, last, update, force=True)
+        progress(f"transfer pilot paused at update {update}; configured budget {cfg.optimization.max_update}")
 
     def load(*args, **kwargs):
         # Pinned fairseq predates PyTorch 2.6's weights_only default. The caller
@@ -413,12 +490,30 @@ def trainer_hooks(contract_hash, selection_policy=None):
             return original_load(*args, **kwargs)
         finally:
             torch.load = original_torch_load
+
+    def load_training(cfg, trainer, **kwargs):
+        # fairseq calls lr_step twice while restoring, with the iterator's next
+        # epoch and no validation loss. Replay only the actual pending epoch step.
+        trainer.loading_training_checkpoint = True
+        try:
+            extra, iterator = original_load_training(cfg, trainer, **kwargs)
+        finally:
+            trainer.loading_training_checkpoint = False
+        if not extra or "alignment_epoch_lr" not in extra:
+            trainer.lr_step(iterator.epoch)
+        else:
+            trainer.resume_mid_epoch = extra["train_iterator"]["iterations_in_epoch"] > 0
+            if extra["alignment_epoch_lr"] is not None:
+                trainer.lr_step(*extra["alignment_epoch_lr"])
+        return extra, iterator
     train.Trainer, checkpoint_utils.load_checkpoint_to_cpu = Trainer, load
+    checkpoint_utils.load_checkpoint = load_training
     train.validate_and_save = validate_save
     try:
         yield
     finally:
         train.Trainer, checkpoint_utils.load_checkpoint_to_cpu = original, original_load
+        checkpoint_utils.load_checkpoint = original_load_training
         train.validate_and_save = original_validate_save
         SpeechToUnitMultitaskTaskCriterion.compute_loss = original_compute
         SpeechToUnitMultitaskTaskCriterion.forward = original_forward

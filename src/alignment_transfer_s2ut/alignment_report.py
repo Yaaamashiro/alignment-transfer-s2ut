@@ -15,6 +15,7 @@ def _diagnose(plan,record,calibration,output,samples):
     calibration_value=read_json(calibration)
     totals={key:[] for key in ("kl","mask","mass","weights","mask_weights","counts")}
     pairs=[]
+    task_losses, sample_sizes = [], []
     with native_session(plan,Path(output).parent/"diagnostic-model") as (trainer,model,criterion,extension):
         saved=b.load_native(record["checkpoint"])
         model.load_state_dict(saved["model"],strict=True);model.eval()
@@ -26,7 +27,9 @@ def _diagnose(plan,record,calibration,output,samples):
                 prior=sample["alignment_prior"]
                 sample,_=trainer._prepare_sample(sample)
                 sample["alignment_prior"]=prior.to(sample["target"].device).float()
-                _,_,_,raw=criterion.components(model,sample)
+                task_loss, size, _, raw=criterion.components(model,sample)
+                task_losses.append(float(task_loss))
+                sample_sizes.append(int(size))
                 kl=layer_statistics(sample["alignment_prior"],raw)
                 mask=layer_statistics(sample["alignment_prior"],raw,"mask",calibration_value["selected_top_p"])
                 _,weights=worst_layer(kl["losses"],calibration_value["tau_kl"],kl["counts"])
@@ -43,6 +46,7 @@ def _diagnose(plan,record,calibration,output,samples):
     valid_kl = torch.tensor(means["kl"])[valid_layers]
     return write_result(output,dict(format="alignment-diagnostics-v1",checkpoint_hash=record["checkpoint_hash"],
         calibration_hash=file_hash(calibration),split="dev",pair_ids=pairs,teacher_forced_diagnostic_only=True,
+        dev_task_loss=sum(task_losses)/sum(sample_sizes),
         per_layer_kl=means["kl"],kl_mean=float(valid_kl.mean()),kl_worst=float(valid_kl.max()),
         per_layer_mask_loss=means["mask"],teacher_region_mass=means["mass"],valid_rows=counts.sum(0).tolist(),
         kl_weight_distribution=means["weights"],mask_weight_distribution=means["mask_weights"],
@@ -58,13 +62,19 @@ def curves(runs,output):
     paths=[]
     for run in map(Path,runs):
         rows=read_jsonl(run/"alignment-train.jsonl")
-        fig,axes=plt.subplots(3,1,figsize=(10,10),constrained_layout=True)
-        for key in ("train/main_loss","train/total_loss","alignment/loss"):
+        fig,axes=plt.subplots(5,1,figsize=(10,14),constrained_layout=True)
+        for key in ("alignment/task_loss","train/main_loss","train/total_loss","alignment/loss"):
             axes[0].plot([r["step"] for r in rows if key in r],[r[key] for r in rows if key in r],label=key)
+        dev = run / "native-dev.jsonl"
+        if dev.is_file():
+            validation = read_jsonl(dev)
+            axes[0].plot([r["step"] for r in validation], [r["dev/main_loss"] for r in validation], label="Full dev unit loss")
         for key in sorted({k for r in rows for k in r if k.startswith("alignment/D_")}):
             axes[1].plot([r["step"] for r in rows if key in r],[r[key] for r in rows if key in r],label=key)
         for key in sorted({k for r in rows for k in r if k.startswith("alignment/w_")}):
             axes[2].plot([r["step"] for r in rows if key in r],[r[key] for r in rows if key in r],label=key)
+        for axis, key in zip(axes[3:], ("alignment/lambda", "train/learning_rate"), strict=True):
+            axis.plot([r["step"] for r in rows if key in r], [r[key] for r in rows if key in r], label=key)
         for axis in axes:
             axis.set_xlabel("Completed updates")
             if axis.lines:axis.legend()

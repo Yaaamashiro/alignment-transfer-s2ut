@@ -388,7 +388,17 @@ def make_plan(baseline, output, method="distillation", prior_type="t2tt", manife
     return plan
 
 
-def train_native(plan, output, resume=False):
+def pilot_target(plan, stop_after_update):
+    budget = plan["training_budget"]
+    if stop_after_update is None:
+        return budget
+    if (plan["transfer"]["method"] == "baseline" or type(stop_after_update) is not int
+            or not 0 < stop_after_update < budget):
+        raise ValueError("pilot stop must be a positive update below the transfer training budget")
+    return stop_after_update
+
+
+def train_native(plan, output, resume=False, *, stop_after_update=None):
     if plan.get("calibration_only"):
         raise ValueError("calibration-only plan cannot start training")
     from .s2ut.fairseq_extension import verify_fairseq
@@ -397,6 +407,7 @@ def train_native(plan, output, resume=False):
     from fairseq.distributed import utils as distributed_utils
     from .s2ut import benchmark_extension
     output = Path(output)
+    target = pilot_target(plan, stop_after_update)
     marker, last = output / "native-run.json", output / "checkpoints/checkpoint_last.pt"
     if output.exists() and any(output.iterdir()):
         if not resume or not marker.is_file() or read_json(marker) != plan:
@@ -405,8 +416,12 @@ def train_native(plan, output, resume=False):
         saved = load_native(last)
         if saved.get("extra_state", {}).get("alignment_contract_hash") != plan["contract_hash"]:
             raise ValueError("native resume checkpoint belongs to a different training contract")
-        if checkpoint_updates(saved) >= plan["training_budget"]:
-            return {"checkpoint": str(last), "updates": checkpoint_updates(saved), "optimizer_steps": 0}
+        updates = checkpoint_updates(saved)
+        if updates > plan["training_budget"]:
+            raise ValueError("native resume checkpoint exceeds the training budget")
+        if updates >= target:
+            return {"checkpoint": str(last), "updates": updates, "optimizer_steps": 0,
+                    "status": "COMPLETED" if updates == plan["training_budget"] else "PILOT_PAUSED"}
     if resume and not last.is_file() and (output / "checkpoints/checkpoint_best.pt").exists():
         raise ValueError("last checkpoint missing; refusing to restart a partially saved run")
     if plan["config"]["common"].get("fp16") and not torch.cuda.is_available():
@@ -415,9 +430,14 @@ def train_native(plan, output, resume=False):
     cfg = native_config(plan["config"])
     progress("native fairseq training: fresh model or own-run resume")
     from .colab_runtime import native_inputs, benchmark_training
-    with native_inputs(), benchmark_training(), benchmark_extension.trainer_hooks(plan["contract_hash"], plan["selection_policy"]):
+    with native_inputs(), benchmark_training(), benchmark_extension.trainer_hooks(
+            plan["contract_hash"], plan["selection_policy"], stop_after_update=stop_after_update):
         distributed_utils.call_main(cfg, train.main)
-    return {"checkpoint": str(last.resolve()), "updates": checkpoint_updates(load_native(last))}
+    updates = checkpoint_updates(load_native(last))
+    if updates != target:
+        raise RuntimeError(f"native trainer stopped at {updates}; expected {target}")
+    return {"checkpoint": str(last.resolve()), "updates": updates,
+            "status": "COMPLETED" if updates == plan["training_budget"] else "PILOT_PAUSED"}
 
 
 def register_transfer(run, checkpoint, output, resume=False):
@@ -435,6 +455,10 @@ def register_transfer(run, checkpoint, output, resume=False):
     last = load_native(Path(run) / "checkpoints/checkpoint_last.pt")
     if last.get("extra_state", {}).get("alignment_contract_hash") != plan["contract_hash"]:
         raise ValueError("last checkpoint belongs to another run")
+    if checkpoint_updates(last) != plan["training_budget"] or not 0 < updates <= plan["training_budget"]:
+        raise ValueError("transfer registration requires the completed training budget")
+    if Path(checkpoint).resolve() != (Path(run) / "checkpoints/checkpoint_best.pt").resolve():
+        raise ValueError("transfer registration requires the run's dev-selected checkpoint_best.pt")
     record = {**baseline, "method": plan["transfer"]["method"], "transfer": plan["transfer"],
               "checkpoint": str(Path(checkpoint).resolve()), "checkpoint_hash": file_hash(checkpoint),
               "checkpoint_updates": updates, "training_budget": checkpoint_updates(last), "config": cfg,
@@ -514,6 +538,8 @@ def main(argv=None):
         child.add_argument("--mask-top-p", type=float)
         child.add_argument("--resume", action="store_true")
         child.add_argument("--all-layers", action="store_true", default=True)
+        if action == "train":
+            child.add_argument("--stop-after-update", type=int, help="save and pause at this absolute update")
     child = sub.add_parser("register-transfer")
     for field in ("run", "checkpoint", "output"):
         child.add_argument("--" + field, required=True)
@@ -563,7 +589,7 @@ def main(argv=None):
         result = make_plan(args.baseline, args.output, args.method, args.prior_type, args.manifest,
                            args.units, args.teacher, all_layers=args.all_layers, calibration=args.calibration, mask_top_p=args.mask_top_p)
         if args.action == "train":
-            result = train_native(result, args.output, args.resume)
+            result = train_native(result, args.output, args.resume, stop_after_update=args.stop_after_update)
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
 
 
