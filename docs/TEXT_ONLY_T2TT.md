@@ -1,15 +1,15 @@
 # External text-only T2TT
 
-外部で生成済みの日英JSONLを使い、音声を用意する前にT2TT学習・dev BLEU・Attention抽出を行う。JParaCrawlのfiltering、TTS、Whisper QC、S2UT学習、xCOMET/COMETKiwiはこの機能の対象外。
+Use externally generated Japanese–English JSONL to train T2TT, compute dev BLEU, and extract attention before preparing audio. This workflow covers text model training and evaluation. Corpus filtering, TTS, Whisper QC, S2UT training, and xCOMET and COMETKiwi are separate workflows.
 
-## 入力
+## Inputs
 
 ```json
 {"pair_id":"p0001","split":"train","ja_text":"日本語文","en_text":"English sentence."}
 {"pair_id":"p0002","split":"dev","ja_text":"別の文","en_text":"Another sentence."}
 ```
 
-必要なのは`pair_id / split / ja_text / en_text`の非空文字列。train/devが必要でtestは任意。splitはtrain/dev/testをそのまま使い、再分割しない。重複IDとsplitをまたぐ同じ対訳pairは拒否する。文字列のstrip・Unicode normalization・filteringを行わない。語彙はtrainだけで作り、devでbest checkpointを選択する。
+Each row needs nonempty strings for `pair_id`, `split`, `ja_text`, and `en_text`. Train and dev are required, and test is optional. The importer preserves split labels and text verbatim. It rejects duplicate IDs and translation pairs repeated across splits. Build the vocabulary on train and select the best checkpoint on dev.
 
 ## Manifest API
 
@@ -20,39 +20,39 @@ from alignment_transfer_s2ut.data.manifest import (
 
 text_rows = load_manifest("manifest.jsonl", require_audio=False)
 speech_rows = load_manifest("manifest-with-audio.jsonl")
-# Payloadを開かずに音声metadataだけ検査する既存APIも維持する。
+# Validate speech metadata without opening audio payloads.
 speech_metadata = load_manifest("manifest-with-audio.jsonl", check_audio=False)
 ```
 
-`TEXT_REQUIRED`は4列、`AUDIO_REQUIRED`は`ja_audio/en_audio`。既存の`REQUIRED`は両者を連結したまま。`require_audio=True`が既定であり、`check_audio=False`だけでは音声列は任意にならない。これは既存S2UTのmetadata検査を弱めないため。
+`TEXT_REQUIRED` lists the four text fields and `AUDIO_REQUIRED` lists `ja_audio` and `en_audio`. `REQUIRED` combines both. `require_audio=True` is the default, and `check_audio=False` disables the payload check while still requiring audio fields.
 
-`require_audio=False`では、optionalな音声パスのresolve/stat/hash・音声ファイルの存在検査も行わない。音声path/SHAの重複検査はspeech用途だけで行う。T2TT・dev評価・抽出はこのtext modeを使う。CTC・HuBERT/unit・teacher・S2UT・speech評価・音声を使う可視化は従来のspeech modeで、音声列がなければ明確に停止する。CTC/unitはその検査を外部モデル取得より前に行う。
+With `require_audio=False`, optional audio paths are left untouched and audio existence, hashes, and duplicate checks are skipped. T2TT, dev evaluation, and attention extraction use text mode. CTC, HuBERT and unit extraction, teacher construction, S2UT, speech evaluation, and audio visualization use speech mode and require audio fields. CTC and unit extraction validate those fields before downloading models.
 
-## Identityと音声追加
+## Identity and adding audio
 
-`text_manifest_hash(rows)`は、順序を含めて次の4列だけをhashする。
+`text_manifest_hash(rows)` hashes the following four fields in row order.
 
 ```text
 pair_id, split, ja_text, en_text
 ```
 
-音声path/SHAやその他の列を後から追加・変更しても、このhashは変わらない。ID・原文・split・順序・行集合を変えると変わる。
+The hash binds IDs, original text, splits, row order, and row membership. Audio paths, hashes, and other fields are outside the text identity.
 
-新しいT2TT checkpoint/experimentは`manifest_identity="text-v1"`を契約へ含め、`train_hash/dev_hash`をtext identityとして保存する。characterとSentencePieceの両方に適用する。新しいdev evaluation contractとAttention metadataにもtext identityの種別を記録する。Attentionには全manifestの`text_manifest_hash`も明記する。
+New T2TT checkpoints and experiments bind `manifest_identity="text-v1"` and store text identities as `train_hash` and `dev_hash` for character and SentencePiece models. Dev evaluation and attention metadata also record the identity type. Attention metadata includes the full `text_manifest_hash`.
 
-将来、同じ順序・pair_id・split・textへ音声を追加したmanifestでteacherを作る場合、T2TT Attentionだけをtext identityで照合する。CTC・unit・生成するteacher自体は音声を含む従来のidentityで照合する。この境界を明示し、S2UTの音声provenanceをtext-onlyへ弱めない。
+When adding audio to the same ordered IDs, splits, and texts, verify T2TT attention with text identity. CTC, units, and the resulting teacher use the existing identity that includes audio.
 
-`manifest_hash`の従来計算は変更しない。`speech_manifest_hash`はその明示的aliasで、音声pathと既存SHAを含む。S2UT checkpoint/CTC/unit/teacherの全面移行は行わない。pilotのT2TT dev照合には、S2UT experimentへ追加した診断用`dev_text_hash`を使い、S2UTのscientific contractやspeech hash自体は維持する。
+`speech_manifest_hash` aliases the original `manifest_hash` calculation, including audio paths and available SHA values. Existing S2UT checkpoints, CTC, units, and teachers retain speech identity. Pilot T2TT dev matching uses the added diagnostic `dev_text_hash` while S2UT retains its scientific contract and speech hash.
 
-## 旧checkpointとartifact
+## Legacy checkpoints and artifacts
 
-identityの種別がないT2TT checkpointはlegacyのaudio込みidentityとして扱う。評価・抽出は元の音声metadataを使って保存hashを照合し、音声payloadは開かない。relative pathはfilesystemを調べずlexicalなabsolute pathへ戻す。旧実験でsymlinkを解決した音声pathを使っていた場合は、保存時と同じcanonical metadataが必要。
+T2TT checkpoints without an identity type use the legacy identity that includes audio metadata. Evaluation and extraction verify the saved hash from the original metadata without reading audio payloads. Relative paths become lexical absolute paths. If the old experiment stored symlink-resolved paths, supply the same canonical metadata.
 
-旧checkpointへ4列だけのmanifestを渡しても、昔のaudio込みhashの一致は証明できないため停止する。hashを書き換えて新形式へ昇格させない。元manifestと元revisionを保持して旧学習を再開するか、外部text用の別stageを新規作成する。旧形式Attentionは従来どおりspeech identityを要求し、既存artifactの無変更resumeも維持する。
+A four-field manifest fails the legacy audio-inclusive hash check. Keep the original manifest and revision to resume legacy training, or start a separate stage for external text. Old attention artifacts still use speech identity and can resume with their original inputs.
 
 ## CLI
 
-直接、音声列のないJSONLを渡せる。
+Pass a JSONL manifest containing the text fields directly.
 
 ```bash
 python -m alignment_transfer_s2ut.train_t2tt \
@@ -69,34 +69,34 @@ python -m alignment_transfer_s2ut.extract_t2tt_attention \
   --all-layers --device cuda --output outputs/t2tt-external-attention
 ```
 
-tokenizerのCLI既定はcharacter。SentencePieceでは`--tokenizer sentencepiece --source-vocab-size 8000 --target-vocab-size 8000 --sentencepiece-model-type unigram`を追加する。[SentencePiece仕様](SENTENCEPIECE.md)のidentity/UNK/文字span制約は変わらない。SacreBLEU・prediction JSONL・EOS率・生成metadata・teacher forcing/all-layer抽出を維持する。外部固定300件の評価もcheckpoint-owned tokenizerを使い、音声manifestを要求しない。
+The CLI defaults to character tokenization. For SentencePiece, add `--tokenizer sentencepiece --source-vocab-size 8000 --target-vocab-size 8000 --sentencepiece-model-type unigram`. The workflow supports SacreBLEU, prediction JSONL, EOS rate, generation metadata, and teacher-forced all-layer extraction. The fixed 300-item external evaluation uses the checkpoint-owned tokenizer and text inputs. [SentencePiece identity, UNK, and character spans](SENTENCEPIECE.md)
 
-## Colabと再開
+## Colab and recovery
 
-[training.ipynb](../notebooks/colab/training.ipynb) でT2TTを準備・学習・復元する。
+Prepare, train, and restore T2TT in [training.ipynb](../notebooks/colab/training.ipynb).
 
-1. GPUランタイムでPREPARE_AUDIO_PACKS=False、PREPARE_S2UT=Falseにする。
-2. T2TT_SOURCE_MANIFEST_OVERRIDEへ外部text JSONLを指定し、新しいT2TT_RUN_IDでRUN_T2TT=Trueにする。
-3. 「2. T2TT」でcanonical textを作成し、学習を開始する。EVALUATE_T2TT=Trueでdev BLEU・翻訳例・曲線を確認する。
-4. 音声やS2UTも使用する場合は、続く前処理・Baseline・Teacher・転移学習へ進む。
+1. Select a GPU runtime and set `PREPARE_AUDIO_PACKS=False` and `PREPARE_S2UT=False`.
+2. Set `T2TT_SOURCE_MANIFEST_OVERRIDE` to the external text JSONL. Choose a new `T2TT_RUN_ID` and set `RUN_T2TT=True`.
+3. In the T2TT section, create the canonical text manifest and start training. Set `EVALUATE_T2TT=True` to view dev BLEU, translation examples, and learning curves.
+4. For speech experiments, continue through preprocessing, Baseline training, teacher construction, and transfer training.
 
-T2TT単独でも実行できる。学習の保存先はTEXT_ROOT/t2tt-<tokenizer>、DriveはTEXT_PERSISTENT/stages/t2tt-<tokenizer>。TEXT_ROOTとTEXT_PERSISTENTはT2TT_RUN_IDから決まる。切断後は同じrevision・設定で上から再実行し、同じstageのlast/optimizer/RNG/cursorから再開する。
+T2TT can run independently. Local training uses `TEXT_ROOT/t2tt-<tokenizer>` and Drive uses `TEXT_PERSISTENT/stages/t2tt-<tokenizer>`. Both roots derive from `T2TT_RUN_ID`. After a disconnect, rerun with the original revision and settings to restore the stage's last checkpoint, optimizer, RNG, and cursor.
 
-学習済みT2TTを使う場合はRUN_T2TT=Falseにし、EVALUATE_T2TTまたはTeacherに関するスイッチを有効にする。T2TT_RUN_IDの既定はt2tt-001。再利用するモデルの実際のIDと元text manifestを指定する。旧text-only Notebookは [legacy](../notebooks/legacy/jparacrawl_t2tt.ipynb) に保存している。
+To use a trained T2TT model, set `RUN_T2TT=False` and enable `EVALUATE_T2TT` or the teacher switches. `T2TT_RUN_ID` defaults to `t2tt-001`. Specify the actual saved model ID and original text manifest. [Legacy text-only notebook](../notebooks/legacy/jparacrawl_t2tt.ipynb)
 
-## 変更ファイル
+## Changed files
 
-| ファイル | 変更 |
+| File | Change |
 |---|---|
-| `data/manifest.py`, `data/__init__.py` | 用途別validation、text/speech identity、旧identityの明示的読込み |
-| `training.py`, `evaluation/text.py` | audio-free入力、text-v1契約、評価・抽出の互換分岐 |
-| `preprocessing.py` | 音声必須の早期検査、text Attentionからspeech teacherへの照合境界 |
-| `pilot.py`, `t2tt_extension.py` | pilotのdev text照合、新旧checkpoint契約の検証 |
-| `text_manifest.py` | 原本read-onlyのcanonical text staging |
-| `text_t2tt_runtime.py`, `spm_runtime.py` | 既存fresh/session/ZIP adapterをcharacterとSPMで共用 |
-| `notebooks/legacy/jparacrawl_t2tt.ipynb` | 入力・学習・復元・BLEU・例・任意Attention |
-| `tests/test_text_manifest.py`, `test_text_t2tt.py`, `test_text_runtime.py`, `test_text_notebook.py` | API・音声非参照・音声追加・teacher接続・復旧・Notebook |
-| `tests/test_t2tt_external.py` | 追加診断表の表示順に依存せず、BLEU比較表と翻訳例の内容を検査 |
-| `README.md`, `docs/TEXT_ONLY_T2TT.md`, `docs/DEVIATIONS.md`, `docs/VALIDATION.md` | 手順・identity設計・互換性・検証記録 |
+| `data/manifest.py`, `data/__init__.py` | Validation by input mode, text and speech identity, and explicit legacy identity handling |
+| `training.py`, `evaluation/text.py` | Audio-free input, the text-v1 contract, and compatibility paths for evaluation and extraction |
+| `preprocessing.py` | Early speech validation and the identity boundary between text attention and speech teacher artifacts |
+| `pilot.py`, `t2tt_extension.py` | Pilot dev text matching and old and new checkpoint checks |
+| `text_manifest.py` | Read-only source staging for canonical text |
+| `text_t2tt_runtime.py`, `spm_runtime.py` | Shared fresh start, session, and ZIP adapters for character and SentencePiece |
+| `notebooks/legacy/jparacrawl_t2tt.ipynb` | Inputs, training, recovery, BLEU, examples, and optional attention extraction |
+| `tests/test_text_manifest.py`, `test_text_t2tt.py`, `test_text_runtime.py`, `test_text_notebook.py` | API, audio-free inputs, adding audio, teacher connection, recovery, and notebook tests |
+| `tests/test_t2tt_external.py` | BLEU comparison tables and examples checked independently of diagnostic table order |
+| `README.md`, `docs/TEXT_ONLY_T2TT.md`, `docs/DEVIATIONS.md`, `docs/VALIDATION.md` | Workflow, identity, compatibility, and validation |
 
-Python pathは`src/alignment_transfer_s2ut/`からの相対パス。本番外部コーパス・実GPUの200k学習やBLEUは別途実行し、CPU小型接続試験を品質結果とは扱わない。
+Python paths in the table are relative to `src/alignment_transfer_s2ut/`. CPU tiny tests check workflow connectivity. The external corpus, 200k GPU training, and BLEU require separate runs.

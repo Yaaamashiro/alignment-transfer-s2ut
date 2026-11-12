@@ -1,98 +1,98 @@
 # Method
 
-T2TTのlearned cross-attention routing/alignment patternを、対応するS2UT Decoder層へlossとして転移する。Attentionをground-truth alignmentとは扱わない。比較順はBaseline、KL-based Attention Distillation、Annealed KL-based Attention Distillation、Attention-level Knowledge Distillation。
+Use learned T2TT cross-attention patterns as loss supervision for corresponding S2UT decoder layers. The comparison runs Baseline, KL-based Attention Distillation, Annealed KL-based Attention Distillation, and Attention-level Knowledge Distillation in that order.
 
-## Teacherとforward
+## Teacher and forward pass
 
-各層で全headを平均したT2TT Attentionを、既存のCTC文字時刻・HuBERT unit timing・source/target mappingで投影する。
+Average T2TT attention across heads in each layer, then project it through the source and target mappings using CTC character timing and HuBERT unit timing.
 
 \[
 \tilde A_l^{\mathrm{T2TT}}=M_{\mathrm{tgt}}A_l^{\mathrm{T2TT}}M_{\mathrm{src}}.
 \]
 
-対応はT2TT層l→S2UT層lで、最終層の複製ではない。teacherはdetachする。S2UT contextは常にstock fairseqのraw Attention `softmax(Z)`から計算する。teacherの内容・biasをforwardへ渡さない。native capture contextはshapeとscopeだけを持つ。validationとsource-only generationにはそのcontextもない。
+T2TT layer `l` supervises S2UT layer `l`. Detach the teacher tensor. The S2UT context uses stock fairseq attention `softmax(Z)`. The native capture context carries shape and scope during training. Validation and source-only generation use the stock path.
 
-## 4条件
+## Four conditions
 
-全体の目的関数は次に統一する。
+The objective is
 
 \[
 \boxed{\mathcal L=\mathcal L_{\mathrm{S2UT}}+\lambda\mathcal L_{\mathrm{align}}}.
 \]
 
-\(\mathcal L_{\mathrm{S2UT}}\)はnative `speech_to_unit`のunit lossと元Baselineの補助lossを合わせたS2UT目的関数。BaselineはこのS2UT lossだけを使い、Annealed条件では\(\lambda\)を\(\lambda_t\)へ置き換える。
+\(\mathcal L_{\mathrm{S2UT}}\) combines the native `speech_to_unit` unit loss and the Baseline auxiliary losses. The Baseline uses this objective alone. The annealed condition uses \(\lambda_t\) in place of \(\lambda\).
 
-KL-based Attention Distillationでは、teacher rowに確率massがあるtarget unitだけを使う。paddingとEOSは投影priorのzero rowとして除外する。
+KL-based Attention Distillation uses target units whose projected teacher rows have positive probability mass. Padding and EOS have zero prior rows and are excluded.
 
 \[
 \ell_l^{\mathrm{KL}}=\frac{1}{N_l}\sum_{u\in V_l}\operatorname{KL}(\tilde A_{l,u}^{\mathrm{T2TT}}\parallel A_{l,u}^{\mathrm{S2UT}}).
 \]
 
-Annealed KL-based Attention Distillationのforward・KL・初期λ・τはKL-based Attention Distillationと同一。差はcosine scheduleだけ。
+Annealed KL-based Attention Distillation uses the same forward pass, KL loss, initial λ, and τ as KL-based Attention Distillation, with the cosine schedule below.
 
 \[
-T_a=fT,\quad f=\text{policy[anneal\_fraction]}\ (\text{主設定 }0.8),\quad \lambda_t=\lambda_{\mathrm{KL}}\frac{1+\cos(\pi t/T_a)}2\ (0\le t<T_a),\qquad \lambda_t=0\ (t\ge T_a).
+T_a=fT,\quad f=\text{policy[anneal\_fraction]}\ (\text{default }0.8),\quad \lambda_t=\lambda_{\mathrm{KL}}\frac{1+\cos(\pi t/T_a)}2\ (0\le t<T_a),\qquad \lambda_t=0\ (t\ge T_a).
 \]
 
-`t`は現在までの完了update数（最初のforwardはt=0）。主設定では最後の20%をtask-only tailとして、task lossだけで更新する。teacherの参照は別途診断値を計算するために残り得るが、forwardへ注入せず、alignmentの勾配寄与は0になる。
+`t` counts completed updates, with `t=0` on the first forward pass. The default schedule uses only the S2UT task loss for the final 20% of updates. Diagnostics can still read teacher values during this task-only tail, while the alignment gradient contributes zero.
 
-Attention-level Knowledge Distillationはteacherのsource確率を降順にstable sortし、累積massが明示選択したp以上になる最小集合Bを作る。同値なら元source indexの昇順。source paddingは除外し、有効rowは最低1 frame、無効rowは0 frame。teacher確率0のframeは選ばない。
+Attention-level Knowledge Distillation sorts teacher source probabilities in descending order with a stable sort and selects the smallest set B whose cumulative mass reaches the chosen p. Ties use the original source index order. The region excludes source padding and zero-probability frames. Valid rows contain at least one frame, and invalid rows contain zero.
 
 \[
 \ell_l^{\mathrm{mask}}=1-\frac1{N_l}\sum_{u\in V_l}\sum_f B_{l,u,f}A_{l,u,f}^{\mathrm{S2UT}}.
 \]
 
-teacher region内のstudent massが1なら0、0.7なら0.3になる。
+Student mass of 1 inside the teacher region gives loss 0. Mass of 0.7 gives loss 0.3.
 
-## 層集約とnative gradient accumulation
+## Layer aggregation and native gradient accumulation
 
 \[
 \mathcal L_{\mathrm{align}}=\tau[\operatorname{logsumexp}_l(\ell_l/\tau)-\log L],\qquad
 w_l=\operatorname{softmax}_l(\ell_l/\tau).
 \]
 
-`torch.logsumexp`を使い、最大値で中心化して大きなlossでの勾配精度も保つ。層数はDecoderから取得する。全rowが無効の層はそのmicrobatchの集約から除外し、全層が無効なら停止する。
+Use `torch.logsumexp` with max centering to preserve gradient accuracy for large losses. The decoder determines the layer count. A microbatch excludes layers with zero valid rows and stops when all layers are invalid.
 
-このLogSumExpは**criterionへ渡された現在のmicrobatchごと**に計算する。criterionは `task_sum + sample_size * lambda_t * alignment_loss` を返し、stock Trainerが既存logical batchのtotal sample sizeで正規化する。従ってalignmentはsample-sizeで重み付けたmicrobatch LogSumExpの平均。logical batch全体の層lossを先に集めたLogSumExpとは異なる。全microbatch graph保持、二重forward、update_frequency変更は行わない。
+Compute LogSumExp for each microbatch passed to the criterion. The criterion returns `task_sum + sample_size * lambda_t * alignment_loss`, and the stock Trainer normalizes by the total sample size of the logical batch. This yields a sample-size-weighted mean of microbatch LogSumExp values. It preserves the native update frequency and uses a single forward pass per microbatch.
 
-## 学習前の校正
+## Calibration before training
 
-trainの固定順16 logical batches、元Baselineと同じfresh initialization seed・データ変換・precision・logical batchを使う。モデルはtrain modeでdropout条件を保存し、virtual batch indexに対しseed+indexを使って再生する。optimizer updateは0。最初のpassでτを求め、同じ初期化・入力・RNGへ戻して勾配を測る。calibrationだけの2 passであり、本学習のforward数は増やさない。
+Use 16 fixed-order logical batches from training with the Baseline's fresh initialization seed, input transformations, precision, and batching. The model runs in training mode and replays dropout with the seed plus virtual batch index. The first pass estimates τ. The second restores the same initialization, inputs, and RNG to measure gradients. Calibration performs zero optimizer updates.
 
 \[
 \Delta_b=\ell_{\max}^{(b)}-\ell_{\mathrm{median}}^{(b)},\quad \tau=\operatorname{median}_{b\in\text{microbatches}}\frac{\Delta_b}{\ln3}.
 \]
 
-τの校正単位は、本学習のWorst-layer lossと同じ**microbatch**。固定16 logical batchesに含まれる各microbatchの\(\ell_l\)から個別に候補τ_bを求め、そのmedianを採用する。層lossをlogical batch内で先に平均しない。たとえばupdate_frequency=4なら最大64候補になる。
+Calibrate τ at the same microbatch granularity as the training loss. Compute a candidate τ_b from the \(\ell_l\) values of each microbatch in the 16 logical batches and take the median. An update frequency of four gives up to 64 candidates.
 
-各microbatchでcounts>0の層だけを使う。偶数個のmedianはPyTorchと同じlower order statistic。near-zero差（1e-8）、NaN、Infの候補は除外し、全て無効なら停止する。手動τへのfallbackはない。KLとMaskを独立に校正する。λの勾配ノルム測定は従来どおりlogical batch単位で、本学習と同じmicrobatch LogSumExpをnative sample sizeで積算する。
+Use only layers with positive counts in each microbatch. For even counts, use the lower order statistic, as in PyTorch. Reject gaps below `1e-8`, NaN, and Inf, and stop if every candidate is invalid. Calibrate KL and Mask independently. λ gradient norms use logical batches and accumulate the same microbatch LogSumExp with native sample-size weights.
 
-Cross-Attentionのq/k/v/out projectionを含む全parameterについて、native logical task gradientと、上記microbatch集約後のalignment gradientを別々に`autograd.grad`で取得する。
+Use `autograd.grad` to measure the native logical task gradient and the aggregated alignment gradient separately for all cross-attention parameters, including q, k, v, and output projections.
 
 \[
 \lambda=\operatorname{median}_{batch}\left(0.5\frac{\|\nabla_{\theta_{CA}}\mathcal L_{\mathrm{S2UT}}\|_2}{\|\nabla_{\theta_{CA}}\mathcal L_{\mathrm{align}}\|_2}\right).
 \]
 
-各microbatchの勾配だけを順に加算しgraphを保持しない。0/非finite normは停止条件。KLとMaskは別λ、Annealed KL-based Attention Distillationは通常KL-based Attention Distillationと同じλKL・τKLを必ず使う。
+Accumulate microbatch gradients sequentially and release each graph. Zero or nonfinite norms stop calibration. KL and Mask use separate λ values. The two KL conditions share λKL and τKL.
 
-## Top-pとcontract
+## Top-p selection and the training contract
 
-τ校正の除外indexは`tau_estimates.kl.rejected_microbatches` / `tau_estimates.mask.rejected_microbatches`へ保存する。indexは保存したmicrobatch一覧に対する0-based indexで、除外理由は有効層なし・near-zero gap・NaN/Inf。
+`tau_estimates.kl.rejected_microbatches` and `tau_estimates.mask.rejected_microbatches` store zero-based indices into the saved microbatch list. A candidate is rejected for missing valid layers, a near-zero gap, NaN, or Inf.
 
-teacher-only分析はp=0.8/0.9/0.95についてcoverageのmean/median/p25/p75/p90、source長別・層別集計、valid row数、selected frame数、entropyとの相関、分布histogramを保存する。十分なteacher massを保ちつつregionが過度に広くならない候補をユーザーが選ぶ。学習は自動選択しない。
+The teacher-only diagnostic records coverage mean, median, p25, p75, and p90 for p values 0.8, 0.9, and 0.95. It also records summaries by source length and layer, valid rows, selected frames, correlations with entropy, and histograms. Select a candidate that retains sufficient teacher mass with a suitably narrow region. Training requires the explicit choice.
 
-calibration JSONはimplementation、teacher、prepared data、Baseline登録、fresh model hash、seed、pair順/hash、batch数、各層loss、gradient norm、weight、top-p診断と選択pを保持する。training contractはファイルhashと内容hashを含める。異なるartifactでのresumeは拒否する。
+The calibration JSON records the implementation, teacher, prepared data, Baseline registration, fresh model hash, seed, pair order and hash, batch count, per-layer losses, gradient norms, weights, top-p diagnostics, and selected p. The training contract binds the file and content hashes. A mismatched artifact prevents resume.
 
-実装は`alignment/losses.py`、`alignment/calibration.py`、`alignment_calibration.py`、`s2ut/benchmark_extension.py`。
+The implementation is in `alignment/losses.py`, `alignment/calibration.py`, `alignment_calibration.py`, and `s2ut/benchmark_extension.py`.
 
-## ログの集約
+## Log aggregation
 
-数式の記号変更に伴って内部IDは変更しない。\(\ell_l\)は既存ログの`alignment/D_l`に対応し、`task_sum`はcriterion内の未正規化S2UT loss sumを指す。
+\(\ell_l\) maps to the existing `alignment/D_l` log ID. `task_sum` is the unnormalized S2UT loss sum inside the criterion.
 
-各updateの\(\ell_l\)と\(w_l\)は、microbatchの実測値をnative sample sizeで加重平均する。保存するworst layer indexはこの平均\(\ell_l\)のargmaxで、microbatchごとの最悪層の頻度も別fieldに保存する。selected frame数とvalid row数はmicrobatch間で合計する。これらの集計値を、本学習で計算していないlogical-batch LogSumExpと解釈しない。
+Each update logs the microbatch measurements of \(\ell_l\) and \(w_l\) averaged by native sample size. The reported worst layer is the argmax of the averaged \(\ell_l\). A separate field records the frequency of each microbatch's worst layer. Selected frames and valid rows are summed across microbatches.
 
-## Annealing設定と診断の有効層
+## Annealing settings and diagnostic layer masks
 
-`configs/experiments/conditions.yaml`の`anneal_fraction`と`anneal_schedule`をplanのpolicyへ読み込む。loss係数とtask-only開始/progressログは同じpolicy値を使う。scheduleはcosineだけを受理し、fractionはfiniteかつ(0,1]。設定内容のhashもtraining contractへ含めるので、変更した設定で既存checkpointをresumeしない。wheelにはこのcanonical YAMLをbuild時にそのまま同梱し、別のPython既定値は持たない。
+The plan loads `anneal_fraction` and `anneal_schedule` from `configs/experiments/conditions.yaml`. Both the loss coefficient and task-only progress logs use that policy. The schedule must be cosine and the fraction finite in (0,1]. The training contract includes the settings hash and rejects a mismatch on resume. The wheel bundles the canonical YAML at build time.
 
-`alignment/kl_mean`・`alignment/kl_worst`・entropyの層平均、および独立したdev診断のKL平均/最大は、valid rowがある層だけで計算する。無効層のper-layer値0とvalid row数は観測用に保持する。tailのログ名は`alignment/task_only_start`と`alignment/task_only_phase`。validation/inferenceのteacher-freeという表現とは区別する。
+`alignment/kl_mean`, `alignment/kl_worst`, layer-averaged entropy, and independent dev KL mean and maximum use layers with valid rows. Logs retain zero per-layer values and valid-row counts for invalid layers. The task-only tail logs `alignment/task_only_start` and `alignment/task_only_phase`. Validation and inference are teacher-free.

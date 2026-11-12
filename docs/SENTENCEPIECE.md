@@ -1,86 +1,86 @@
 # SentencePiece T2TT
 
-CharacterとSentencePieceの違いだけを調べるT2TT実験。旧characterのcheckpoint・teacher・評価結果・保存stageは残す。既存characterモデルをSentencePieceへ変換・warm startしない。
+This T2TT experiment compares character and SentencePiece tokenization. Keep the existing character checkpoints, teacher artifacts, evaluation results, and stages. Start SentencePiece training from a fresh model.
 
-現在の学習入口は [training.ipynb](../notebooks/colab/training.ipynb)。`T2TT_TOKENIZER='sentencepiece'` を選び、新しい `T2TT_RUN_ID` と `RUN_T2TT=True` で学習する。手順は [text-only T2TT](TEXT_ONLY_T2TT.md) を参照。
+Use `training.ipynb`, set `T2TT_TOKENIZER='sentencepiece'`, select a new `T2TT_RUN_ID`, and set `RUN_T2TT=True`. [Training notebook](../notebooks/colab/training.ipynb) and [text-only T2TT](TEXT_ONLY_T2TT.md)
 
-## 旧比較実験の手順
+## Legacy comparison workflow
 
-1. [benchmark比較Notebook](../notebooks/legacy/benchmark_comparison.ipynb)の設定で`T2TT_TOKENIZER='sentencepiece'`を選ぶ。`RUN_T2TT_SENTENCEPIECE=True`で学習、Falseで完了済みモデルの評価だけを行う。
-2. 保存先のセルも再実行し、環境検査・同じmanifest/configの準備まで上から実行する。
-3. 6.1a-Sで`ROOT/t2tt-spm-200k`を0から200kまで学習する。characterの20k学習・200k延長はスキップする。fresh SPMの学習にも、固定benchmarkの常駐session・ローカルfreeze・検証付きDrive ZIPを使用する。
-4. 6.1bでdev、6.1cで保存済み固定300件、6.1dで曲線と保存済みcharacter/SPMの得点を確認する。固定8Cのサンプルを選び直さない。
-5. BLEU・翻訳例・反復診断を確認後、`RUN_TEACHER_ARTIFACTS=True`で6.2以降を実行する。SPM Attentionとteacherを新しく作り、旧character teacherを流用しない。
+1. Select `T2TT_TOKENIZER='sentencepiece'`. Use `RUN_T2TT_SENTENCEPIECE=True` to train or `False` to evaluate a completed model. [Legacy comparison notebook](../notebooks/legacy/benchmark_comparison.ipynb)
+2. Rerun the storage-path cell, then run the environment check and prepare the same manifest and config.
+3. In 6.1a-S, train `ROOT/t2tt-spm-200k` from 0 to 200k. The SentencePiece workflow skips character training and extension. It uses the pinned benchmark's resident session, local freeze, and verified Drive ZIPs.
+4. Use 6.1b for dev, 6.1c for the saved fixed 300 samples, and 6.1d for curves and saved character and SentencePiece scores. Reuse the fixed 8C samples.
+5. Review BLEU, translations, and repetition diagnostics, then set `RUN_TEACHER_ARTIFACTS=True` for 6.2 onward. Build SentencePiece attention and teacher artifacts for this run.
 
-`RUN_T2TT_EXTENSION`・`USE_EXTENDED_T2TT`はcharacterの設定。SentencePieceを選ぶと、SPM用の新規200k stageと完了確認を使う。CLIのtokenizer既定とNotebookの選択既定は、後方互換のためcharacterのまま。
+`RUN_T2TT_EXTENSION` and `USE_EXTENDED_T2TT` are character settings. SentencePiece uses its own new 200k stage and completion check. The CLI and legacy notebook default to character for compatibility.
 
-| 用途 | 独立したstage / ローカル名 |
+| Purpose | Separate stage / local path |
 |---|---|
-| T2TT学習 | `t2tt-spm-200k` |
+| T2TT training | `t2tt-spm-200k` |
 | dev | `t2tt-dev-spm-200k` / `text-evaluation/t2tt-spm-200k/dev-text.json` |
-| 固定300件 | `t2tt-flores-fleurs-spm-200k` / `text-evaluation/t2tt-spm-200k/flores-fleurs/` |
+| Fixed 300-sample evaluation | `t2tt-flores-fleurs-spm-200k` / `text-evaluation/t2tt-spm-200k/flores-fleurs/` |
 | Attention | `t2tt-attention-spm-200k` |
 | teacher | `teacher-alignment-spm-200k` |
 | audit | `diagnostics-spm-200k` / `audit-spm-200k` |
-| KL-based Attention Distillation / Annealed KL-based Attention Distillation / Attention-level Knowledge Distillation | `research-v3-spm-200k-all-layers`配下の独立stage |
+| KL-based Attention Distillation / Annealed KL-based Attention Distillation / Attention-level Knowledge Distillation | Separate stages under `research-v3-spm-200k-all-layers` |
 
-全層modeのAttention・teacher・audit・S2UTは、さらに`-all-layers`を付ける。CTCは既存`speech-text-alignment-200k`、unitは既存保存先を使い、入力・設定hashが同じ場合だけ再利用する。stageは`PERSISTENT/stages/`以下、ローカルは`ROOT/`以下。characterの`t2tt`・`t2tt-200k`を指定すると混入/上書きを拒否する。
+All-layer attention, teacher, audit, and S2UT paths add `-all-layers`. CTC uses `speech-text-alignment-200k` and units use their existing path. Reuse requires matching input and configuration hashes. Drive stages are under `PERSISTENT/stages/` and local files under `ROOT/`. The workflow rejects character `t2tt` and `t2tt-200k` destinations for SentencePiece.
 
-## Tokenizerの仕様
+## Tokenizer specification
 
-- SentencePiece **0.2.0**、Unigram、source/target別model、各**8000目標**。`hard_vocab_limit=False`なので実語彙数は小さくなる場合がある。coverage=1.0で必要な文字数が上限を超えた場合は、データを削除したりcoverageを下げたりせず停止する。
-- `train`だけをmanifestの固定順で入力する。shuffleなし、sentence samplingなし、1 thread。dev/test/固定FLEURS・FLORESは語彙生成へ渡さない。空白以外のtrain全文字をrequired alphabetにも指定し、特殊tokenに似たリテラル文字列の文字も落とさない。
-- `normalization_rule_name=identity`に加え、`remove_extra_whitespaces=False`、`add_dummy_prefix=False`。連続・先頭・末尾の空白も保持する。byte fallbackは使わない。
-- `<bos>=0, <pad>=1, <eos>=2, <unk>=3`。characterの`<space>`は使わない。tab/LF/CRは固定のuser-defined symbolsとして保持し、train行中の制御文字も削除・変更しない。
-- Python immutable protoのsurfaceとoffsetを原文と照合する。offsetがUTF-8 byte単位の実装も明示的にcodepoint境界へ変換する。dummy prefixの0幅tokenや、原文を覆わないspanは受理しない。C++ piece viewを読む間はownerのprotoを保持する。
+- Use SentencePiece **0.2.0**, Unigram, and separate source and target models, each targeting **8000** pieces. `hard_vocab_limit=False` allows smaller vocabularies. Coverage is 1.0. If required characters exceed the vocabulary limit, training stops.
+- Fit on `train` alone in manifest order, with one thread and no shuffling or sampling. Dev, test, and fixed FLEURS/FLORES stay out of vocabulary fitting. The required alphabet contains all non-whitespace training characters, including those in literal strings resembling special tokens.
+- Use `normalization_rule_name=identity`, `remove_extra_whitespaces=False`, and `add_dummy_prefix=False`. Preserve repeated, leading, and trailing spaces. Byte fallback is disabled.
+- Reserve `<bos>=0`, `<pad>=1`, `<eos>=2`, and `<unk>=3`. SentencePiece uses its own whitespace handling. Fixed user-defined symbols preserve tab, LF, and CR in training text.
+- Check Python immutable proto surfaces and offsets against the original text. Convert UTF-8 byte offsets to codepoint boundaries when needed. Reject zero-width dummy-prefix tokens and spans that fail to cover the text. Keep the owning proto alive while reading C++ piece views.
 
-train/devの全行について元のcodepoint spanを検査する。UNKがない行では`decode(encode(text)) == text`を要求する。**train-only語彙・byte fallbackなしでは、devの未知文字の完全復元は保証できない**。未知文字はUNK spanとして元位置を維持し、未知codepoint数とexact round-trip件数を記録する。未知文字を減らすためにdevから語彙を追加しない。
+Check codepoint spans for all train and dev rows. Rows without UNK must satisfy `decode(encode(text)) == text`. With a train-only vocabulary and no byte fallback, unknown dev characters remain UNK spans at the original positions. Record unknown codepoint counts and exact round trips.
 
-SentencePieceの空白マーカーそのもの（literal U+2581 `▁`）とNULは、この方針ではlosslessに表現できないため明示エラーとする。削除・置換・文の除外を行わない。実コーパスで該当した場合は、その時点で別の可逆表現方針の検討が必要。
+Literal U+2581 `▁` and NUL raise explicit errors because this representation cannot encode them losslessly. If either occurs in production input, choose a reversible representation before training.
 
-[公式Python API](https://github.com/google/sentencepiece/blob/v0.2.0/python/README.md)と[モデルschema](https://github.com/google/sentencepiece/blob/v0.2.0/src/sentencepiece_model.proto)を参照。protobuf 4.25.3をpreprocess extraへ固定し、モデル内のUnigram/normalizer/special ID等を起動時に検査する。
+The preprocess extra pins protobuf 4.25.3. Startup verifies Unigram, normalization, and special IDs in the model. [Python API](https://github.com/google/sentencepiece/blob/v0.2.0/python/README.md) and [model schema](https://github.com/google/sentencepiece/blob/v0.2.0/src/sentencepiece_model.proto)
 
-## 学習条件と保存
+## Training and storage
 
-Transformerの12 Encoder/6 Decoder、dim 256、FFN 2048、heads 4/8、ReLU、dropout 0.1、pre-norm、sinusoidalを維持する。batch 8・update frequency 4・max tokens 20000・200k、Adam・LR・warmup・clip・label smoothing・validation・best選択を変更しない。語彙に依存するembedding/projectionの行数とtoken系列長は必然的に変わる。backboneを512次元へ増やす等の変更はしない。
+Use 12 encoder and 6 decoder layers, dimension 256, FFN 2048, 4/8 heads, ReLU, dropout 0.1, pre-norm, and sinusoidal positions. The recipe uses batch 8, update frequency 4, max tokens 20000, and 200k updates, with the same Adam, learning rate, warmup, clipping, label smoothing, validation, and best selection. Vocabulary-dependent embedding and projection rows and token sequence lengths differ.
 
-per-token lossはcharacter/SPMで単位が異なるため、値だけを性能比較しない。比較の主指標は同じ原文・参照訳・生成設定でのBLEU。`max_chars`という既存CLI名は維持するが、実装上はEOSを含むdecoder token step上限であり、SPMでも既定1000 stepsを使う。
+Compare BLEU with shared sources, references, and generation settings because character and SentencePiece losses use different token units. `max_chars` remains the CLI name for the decoder token step limit, including EOS. The default is 1000 steps for both tokenizers.
 
-checkpoint/experimentの`tokenizers.source/target`にspecとserialized model protoのbase64を保存する。type・Unigram・identity・requested/actual vocab size・model SHA256・SentencePiece version・normalizer flagsを含み、scientific contractにも含める。外部`.model`が消えてもcheckpointだけから復元できる。
+Checkpoint and experiment `tokenizers.source/target` store the spec and serialized model proto in base64. The contract binds type, Unigram, identity, requested and actual vocabulary size, model SHA-256, SentencePiece version, and normalizer flags. A checkpoint contains enough data to restore its tokenizers.
 
-`tokenizers/ja.model`・`ja.vocab`・`en.model`・`en.vocab`も保存し、resume時にcheckpointとbyte一致を検査する。`.vocab`は制御文字を壊さないようJSON-quoted pieceとscoreのTSV。`tokenization.json`にtrain/dev・source/targetごとのmean codepoints、mean tokens、codepoints/token、UNK codepoints、exact round-trip件数を保存する。これらも復旧ZIPへ含める。
+Also save `tokenizers/ja.model`, `ja.vocab`, `en.model`, and `en.vocab` and check byte parity with the checkpoint on resume. Vocabulary TSVs store JSON-quoted pieces and scores. `tokenization.json` records mean codepoints, mean tokens, codepoints per token, UNK codepoints, and exact round trips by train/dev and source/target. Recovery ZIPs include these files.
 
-SPMの初回は0 updateから。再開は同じSPM stage自身のlast/model/optimizer/RNG/cursorから行い、tokenizerのmodel・語彙要求・spec・contractが変われば拒否する。characterとの切替には新しいstageを要求する。Drive保存は既定10kごと＋50k単位のmilestone＋終了時。最新2＋milestone保持、lossログと`metrics-summary.json`は従来の方式を共用する。
+New SentencePiece training starts at update 0. Resume uses that stage's last checkpoint, optimizer, RNG, and cursor and checks the tokenizer model, vocabulary request, spec, and contract. Use a new stage to switch tokenizer type. Drive snapshots default to every 10k updates, 50k milestones, and completion. Retain the latest two and milestones. Loss logs and `metrics-summary.json` use the shared implementation.
 
-tokenizer metadataがないcheckpointはlegacy CharacterTokenizerとして扱う。旧checkpointのdev/外部評価/抽出は引き続き使える。旧runを学習再開するときは従来どおり保存時のrevisionを使い、既存T2TT extensionはhashが一致する元sourceを隔離する。旧評価JSONは比較のため読み取り、実装hashの異なるコードで再評価する場合は新しい評価保存先を使う。既存cacheの契約を緩めない。
+A checkpoint without tokenizer metadata loads as a legacy `CharacterTokenizer`. Dev and external evaluation and extraction remain available. Resume old training with its original revision. T2TT extension isolates sources that match the saved hash. Reuse old evaluation JSON for comparisons and use a separate evaluation destination with different implementation hashes.
 
-## Attentionと音声時刻
+## Attention and speech timing
 
-Attentionは`[T_subword,S_subword]`、全層なら`[L,T_subword,S_subword]`。同時にsource/target tokenの`[begin,end)`原文codepoint spanを保存し、tokenizer type・source/target/combined hashを記録する。UNKのAttention row/columnは従来と同様maskする。
+Attention uses `[T_subword,S_subword]` or `[L,T_subword,S_subword]` for all layers. Save source and target `[begin,end)` codepoint spans, tokenizer type, and source, target, and combined hashes. Mask UNK rows and columns.
 
-CTC forced alignmentは元文字単位のまま。同じsubwordに含まれる有効文字の最初のstart/最後のendへ集約する。空白・句読点等のinvalid文字は無視し、有効文字がなければ`[-1,-1]`。teacherには集約時刻と元CTC時刻・token spanを両方保持する。
+CTC aligns original characters. Each subword spans the earliest start and latest end of its valid characters. Ignore invalid characters such as spaces and punctuation, and use `[-1,-1]` if none are valid. The teacher preserves aggregated timing, original CTC timing, and token spans.
 
-projectionは従来の`M_tgt @ A_MT @ M_src`で、最終priorはHuBERT reduced units × speech encoder positions。S2UTのunit語彙・構成・task lossは変更しない。現在の3条件のλ/τは独立したcalibration artifactから解決する。対応層転移と全head平均も維持する。native fairseq criterionへの接続も検査する。
+`M_tgt @ A_MT @ M_src` projects to HuBERT reduced units by speech encoder positions. The native S2UT recipe supplies the unit vocabulary, model, and task loss. The three transfer conditions use λ and τ from a separate calibration artifact. Projection matches corresponding layers and averages all heads. Tests cover the native fairseq criterion.
 
-legacy character artifactはAttention shapeが原文長と一致した場合だけ1 codepoint/tokenとして受理する。SPMはspanが必須。type/spec/hash/shapeの矛盾、characterとSPMの混合、tokenizerが変わったresumeは拒否する。
+Accept legacy character artifacts as one codepoint per token only when attention dimensions match original text lengths. SentencePiece requires spans. The workflow rejects mismatched type, spec, hash, or shape, mixed tokenizer artifacts, and tokenizer changes on resume.
 
-## 評価と検証範囲
+## Evaluation and validation
 
-devは従来のSacreBLEU 13a・case-sensitive・exp smoothing・beam 5・length penalty 1。外部評価は保存済み固定300件・同じnative/benchmark-normalized BLEUを使う。外部JSONには原文codepoint長の0–19/20–39/40–79/80以上のBLEU、空出力・unique出力数・反復4-gram比率も記録する。集計指標の定義・原文・参照訳はtokenizerによって変えない。反復診断は崩壊の証明やcheckpoint選択には使わない。
+Dev uses SacreBLEU 13a, case-sensitive exp smoothing, beam 5, and length penalty 1. External evaluation reuses the fixed 300 samples and the same native and benchmark-normalized BLEU. JSON reports BLEU in source length buckets 0–19, 20–39, 40–79, and 80+, along with empty outputs, unique outputs, and repeated 4-gram rate. The tokenizers share metric definitions, source text, and references. Use repetition for diagnosis and dev loss for checkpoint selection.
 
-CPUの小型モデルで実装を検査する。実コーパスでの8000語彙生成・平均系列長・200k学習・実GPUのメモリ・BLEU改善は、Colab実行時の診断/評価で別途測定する。人工データの語彙数・得点を本実験の値として報告しない。
+Small CPU models validate implementation. Measure vocabulary construction with an 8000-piece target, mean sequence lengths, 200k training, GPU memory, and BLEU on the real corpus in Colab.
 
-| 変更箇所 | 役割 |
+| File | Role |
 |---|---|
-| `tokenization/character.py`, `sentencepiece.py`, `factory.py` | 共通API・identity/offset・checkpoint復元・診断 |
-| `tokenization/alignment.py`, `preprocessing.py` | 元文字span検査、subword時刻集約、混入拒否 |
-| `training.py`, `cli.py` | tokenizer選択、tokenizer契約、subword Attention抽出 |
-| `evaluation/text.py`, `evaluate_t2tt_external.py` | checkpoint factory、codepoint OOV、共通BLEU/追加診断 |
-| `spm_runtime.py`, `colab_runtime.py`, `training_metrics.py`, `t2tt_extension.py` | 既存runtimeへの薄いadapter、model/診断の復旧、loss/curve共有 |
-| `pyproject.toml`, `environment.py` | 固定依存・import preflight |
-| `notebooks/legacy/benchmark_comparison.ipynb` | 別stage・新規200k・同条件評価・teacher/S2UTの接続 |
-| `diagnose_alignment.py` | subwordにも対応するtext-token軸名 |
-| `tests/test_sentencepiece*.py`, `tests/test_notebook_commands.py` | 単体・学習・外部評価・native・復旧・Notebookの検証 |
-| `README.md`, `docs/SENTENCEPIECE.md`, `docs/DEVIATIONS.md`, `docs/VALIDATION.md` | 設計・操作・制約・検証記録 |
+| `tokenization/character.py`, `sentencepiece.py`, `factory.py` | Shared API, identity and offsets, checkpoint restore, and diagnostics |
+| `tokenization/alignment.py`, `preprocessing.py` | Original character span checks, subword timing, and mismatch rejection |
+| `training.py`, `cli.py` | Tokenizer selection, contract, and subword attention extraction |
+| `evaluation/text.py`, `evaluate_t2tt_external.py` | Checkpoint factory, codepoint OOVs, shared BLEU, and diagnostics |
+| `spm_runtime.py`, `colab_runtime.py`, `training_metrics.py`, `t2tt_extension.py` | Runtime adapter, model and diagnostic recovery, shared loss logs and curves |
+| `pyproject.toml`, `environment.py` | Pinned dependencies and import checks |
+| `notebooks/legacy/benchmark_comparison.ipynb` | Separate stage, fresh 200k training, matched evaluation, and teacher and S2UT workflow |
+| `diagnose_alignment.py` | Text-token labels for character and subword plots |
+| `tests/test_sentencepiece*.py`, `tests/test_notebook_commands.py` | Unit, training, external evaluation, native, recovery, and notebook tests |
+| `README.md`, `docs/SENTENCEPIECE.md`, `docs/DEVIATIONS.md`, `docs/VALIDATION.md` | Design, workflow, limits, and validation |
 
-Python pathは`src/alignment_transfer_s2ut/`からの相対パス。検証結果は[VALIDATION](VALIDATION.md)。
+Python paths are relative to `src/alignment_transfer_s2ut/`. [Validation records](VALIDATION.md)

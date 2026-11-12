@@ -75,7 +75,10 @@ def test_native_notebook_keeps_baseline_and_binds_backbone():
     assert "baseline['backbone']" in source
     assert "test_native_fp16_trainer_and_fp32_prior" in source
     assert "--finetune-from-model" not in source
-    assert "--max-updates" not in source[source.index("# 3条件は同一calibration"):]
+    transfer_index = next(i for i, cell in enumerate(notebook["cells"]) if cell["id"] == "benchmark_comparison-28")
+    transfer_code = "\n".join("".join(cell["source"]) for cell in notebook["cells"][transfer_index:]
+                              if cell["cell_type"] == "code")
+    assert "--max-updates" not in transfer_code
     assert "'compare', *records," in source
     assert "'--output', COMPARISON_DIR / 'training-comparison.json', '--resume'" in source
 

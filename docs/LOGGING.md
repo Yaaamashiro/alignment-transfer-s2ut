@@ -1,50 +1,50 @@
-# 実行ログ
+# Process logs
 
-3つのColab Notebookでは、環境構築から前処理・学習・推論・評価まで、すべての外部コマンドを共通loggerへ渡す。学習を始める前のgit・uv・pip・テスト・設定取得も対象とする。
+Colab notebooks send external commands to the shared logger throughout setup, preprocessing, training, inference, and evaluation. This includes Git, uv, pip, preflight tests, and configuration commands before training.
 
-## 表示と記録
+## Display and persistence
 
-| 状態 | 表示する内容 |
+| Status | Display |
 |---|---|
-| `started` | 処理名、全文ログの保存先 |
-| `running` | 起動したPID、経過時間、子processの出力 |
-| 無出力が10秒続いた場合 | `no_output`と生存通知。進捗が確認できたとは扱わない |
-| `completed` | 終了コード0、経過時間、ログの保存先 |
-| `failed` / `interrupted` | 終了コードまたは例外、経過時間、ログの保存先 |
-| `skipped` | 無効化された条件やcheckpoint待ちなどの理由 |
+| `started` | Stage name and full log path |
+| `running` | Child PID, elapsed time, and child output |
+| 10 seconds without output | `no_output` and a liveness notice |
+| `completed` | Exit code 0, elapsed time, and log path |
+| `failed` / `interrupted` | Exit code or exception, elapsed time, and log path |
+| `skipped` | Reason, such as a disabled condition or a missing checkpoint |
 
-子processの各行は間引かず、NotebookのPythonから明示的に表示する。同じ内容をローカルファイルへ逐次flushする。Python子processには`PYTHONUNBUFFERED=1`を渡す。CPUテストはテスト名が分かるverbose表示を使う。
+The notebook displays child output line by line and flushes the same lines to a local file. Python child processes receive `PYTHONUNBUFFERED=1`. CPU tests use verbose output to show test names.
 
-生存通知だけでは、転送・最適化・検証が前進したと判断しない。実際の前進は、処理が出す`checked`・`zip`・pair数・学習update等を確認する。
+A liveness notice confirms the process is alive. Use stage counters such as `checked`, `zip`, pair counts, and optimizer updates to confirm progress.
 
-## 保存先
+## Log paths
 
-| Notebook | `LOGS`の既定値 |
+| Notebook | Default `LOGS` |
 |---|---|
 | benchmark_comparison | `ROOT/execution/` |
-| pilot | `/content/alignment-transfer-logs/pilot/<ROOTの名前>/` |
-| pipeline | `/content/alignment-transfer-logs/pipeline/<ROOTの名前>/<recipe>/` |
+| pilot | `/content/alignment-transfer-logs/pilot/<ROOT name>/` |
+| pipeline | `/content/alignment-transfer-logs/pipeline/<ROOT name>/<recipe>/` |
 
-Drive接続前後の通知は`/content/alignment-transfer-logs/<Notebook名>/bootstrap/`へ保存する。頻繁なログ書き込み先はVMローカル。ログそのものはDrive snapshotへの保存を保証しないため、必要な記録はVM削除前に保持する。学習checkpointのZIP保存・復元は従来のbenchmark runtimeを使用する。
+Drive connection notices go to `/content/alignment-transfer-logs/<notebook name>/bootstrap/`. Frequent writes stay local to the VM. Retain any needed logs before deleting the VM, since snapshots cover training artifacts. The benchmark runtime handles checkpoint ZIP publication and recovery.
 
-試行ごとに次のファイルを作る。
+Each attempt writes the following files.
 
-- `*.log`：開始・生存通知・子processの出力・終了状態を含む全文ログ。
-- `*.json`：処理名、実行引数、開始時刻、PID、経過秒数、状態、終了コード、ログの場所。実行中も更新する。
-- `*.stdout.log`：JSONを返すコマンドのstdout。人向けのstderrと分離する。
-- `*-gpu.csv`：GPU監視を有効にした試行のdevice使用率・メモリ量。
-- `notebook-events.log`：Drive接続・明示的なskip等の通知。
+- `*.log` contains the full log, including startup, liveness notices, child output, and the final status.
+- `*.json` records the stage name, arguments, start time, PID, elapsed time, status, exit code, and log paths. The logger updates it during execution.
+- `*.stdout.log` holds stdout for JSON-producing commands separately from human-readable stderr.
+- `*-gpu.csv` records device utilization and memory for monitored attempts.
+- `notebook-events.log` records Drive connection and explicit skips.
 
-JSONを返す入力準備・runtime検査・planも、stderrを表示しながらstdoutだけを別ファイルで受け取る。結果がJSONとして読めない場合も失敗として記録する。
+For input preparation, runtime checks, and plans that return JSON, the notebook shows stderr and captures stdout separately. Invalid JSON is recorded as a failure.
 
-## 中断と再開
+## Interruption and recovery
 
-中断時はloggerが起動した子processを終了する。Colab/Linuxでは外側のloggerが専用process groupを作り、入れ子のlogger・学習workerが別のgroupへ逃げないようにする。既存の入力pack・checkpoint・Drive原本をloggerから削除しない。
+On interruption, the logger terminates the child processes it started. On Colab and Linux, the outer logger creates a process group shared by nested loggers and training workers. Input packs, checkpoints, and original Drive files are outside logger cleanup.
 
-実行中のセルはGitHub更新で変わらない。Notebookのコードと固定revisionを更新するときは、旧processの停止を確認してから再開し、同じ入力準備を同時に起動しない。学習開始後のrunは保存したコードrevisionを維持する。新しい実装を別の学習runへ無条件に適用しない。
+A running cell continues with its loaded code. When updating the notebook or pinned revision, wait for the old process to stop before rerunning a preparation stage. Resume started runs with their saved source revision.
 
-## 実装と検査
+## Implementation and tests
 
-共通実装は`src/alignment_transfer_s2ut/process_logging.py`。標準ライブラリのみで動くため、Colabのインストール前セルにも同じ関数を埋め込む。`pilot.run_logged`も同じ実装を利用する。
+`src/alignment_transfer_s2ut/process_logging.py` is the shared implementation. The standard-library functions are embedded in pre-install Colab cells and also used by `pilot.run_logged`.
 
-テストで、Notebook内の実装が共通sourceと一致すること、通常セルに直接のsubprocess呼び出しが残らないこと、完了前の出力・無出力通知・JSON分離・失敗と中断の扱いを確認する。モデル・loss・batch・学習budget・benchmarkの保存方式は変更しない。
+Tests check that the embedded logger matches the shared source, notebook cells route subprocesses through it, and it handles live output, silence, JSON separation, failure, and interruption.

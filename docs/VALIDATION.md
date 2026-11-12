@@ -1,283 +1,289 @@
 # Validation record
 
+## 2026-11-12 — Colab GitHub authentication and English documentation
+
+- Verified anonymous clone, fetch, and checkout against the public GitHub repository at the exact revisions pinned in the training and evaluation notebooks. Checked that `origin` retained the plain HTTPS URL and that the public benchmark remote was reachable.
+- Ran the authentication, logging, notebook, and artifact tests with 90 passed and one POSIX-only cancellation test skipped on Windows. Private access with valid, invalid, and missing credentials used a mock Git transport. Real private access and Colab Secrets require the manual check in [GitHub access from Colab](GITHUB_ACCESS.md).
+- Validated the schema, Python syntax, and rendered HTML of all seven notebooks. Compared the executable code outside the bootstrap helper with the previous revision and checked the local documentation links.
+
 ## 2026-11-06 — Colab native FP16 preflight
 
-- WindowsのGTX 1650とPyTorch/Torchaudio 2.7.1+cu126で、修正前の結合テスト2件が2回目の更新で勾配オーバーフローし、fairseqがloss scaleを128から64に下げて更新をスキップすることを再現した。
-- 結合テストのBaseline側に、本番と同じ固定benchmark runtimeのFP16再試行を接続した。修正後はtraining NotebookのGPU事前セルと同じ3項目が成功した。release/canonical両形式でBaselineの2更新・登録、転移モデルの保存と再開を検査した。
-- CPU関連46件成功、CUDA用3件スキップ。固定benchmarkの再試行検査8件は、ローカルの固定fairseqソースを隔離fixtureへコピーして実行し成功した。ColabのL4と実データでの本学習は未実行。
+- On a Windows GTX 1650 with PyTorch and Torchaudio 2.7.1+cu126, both pre-fix integration tests overflowed on the second update. fairseq reduced the loss scale from 128 to 64 and skipped the update.
+- The integration Baseline now uses the pinned production runtime's FP16 retry. All three GPU preflight cases passed. Both release and canonical formats covered two Baseline updates, registration, and transfer save and resume.
+- CPU checks passed 46 with 3 CUDA cases skipped. All eight pinned benchmark retry checks passed using an isolated fixture with the pinned fairseq sources. The full run on Colab L4 and real data remains untested.
 
 ## 2026-11-06 — S2UT audio streaming and cold-VM recovery
 
-- 実際のfairseq Trainerとデータローダーを使うCPU試験で、ZIP本体を取得せず索引を作成し、2つ目のZIPの取得を止めた状態で最初のoptimizer更新を完了した。Driveを模した保存先に検証付きsnapshotを公開し、音声キャッシュが空の環境に復元した。次のsample IDと特徴量が従来の読み込みと一致し、必要なZIP 1個の取得で更新1から2へ進んだ。
-- 合成コーパスでBaselineの設定生成・レシピ検査が起動時にWAVを展開しないことを確認した。学習・評価ノートブックのGPU経路が遅延取得を指定し、CPUのZIP作成経路が従来の処理を呼ぶことも検査した。
-- alignment全suiteは **377 passed, 10 skipped**（524.20秒）。旧T2TT継続の回帰も成功した。通常のstage-corpus CLIは音声ZIP取得0件で索引を作成し、S2UTの旧実装ハッシュをLF・CRLFの両方で再現できることを確認した。
-- 固定benchmark runtimeのstreaming・staging・並列音声ZIP関連52件が成功した。学習・評価ノートブックのschema・コード構文・HTML、wheel内77 Python sourceと互換性データの一致、文書リンクを確認した。
-- 実コーパス、Colab CUDA、DriveFSでの同時実行と転送速度は未検証。初回の音声前処理は全入力を使用し、VMのキャッシュには使用した音声が蓄積する。
+- A CPU test with the actual fairseq Trainer and loader built the ZIP index without fetching audio and completed update 1 while the second transfer was blocked. After publishing and restoring a verified snapshot into an empty audio cache, the next sample ID and features matched, and fetching one ZIP advanced update 1 to 2.
+- On synthetic data, Baseline config and recipe checks extracted no WAVs at startup. The notebook GPU paths selected on-demand fetch and the CPU path used the existing ZIP builder.
+- Full alignment suite **377 passed, 10 skipped** in 524.20 s. Legacy T2TT continuation passed. `stage-corpus` built an index with zero audio ZIP fetches, and the old S2UT implementation hashes matched for LF and CRLF.
+- Passed 52 pinned benchmark streaming, staging, and parallel ZIP checks. Verified training and evaluation notebook schemas, Python and HTML, 77 wheel Python sources, compatibility data, and documentation links.
+- Full-corpus execution, Colab CUDA, and concurrent DriveFS throughput remain untested. Initial audio preprocessing reads all input and accessed audio accumulates in the VM cache.
 
 ## 2026-11-05 — Bounded parallel CPU audio packs
 
-- benchmark runtimeは旧4361e55を土台に音声ZIP処理だけを変更した `0c0024ea888206149a3119bf096b86ba66d63b66` へ固定し、mainへの統合は `9f04d6c97948f9b371626aef487af65acbab57c5`。artifact/recipe lineageは旧4361e55を維持し、実行runtimeを独立した定数で厳密に検査する。両主Notebookは新runtimeを取得する。
-- 1 ZIP/job、既定2・整数1〜4、投入Future最大workers、worker別一時ディレクトリ、同時予約容量検査、VM内OS lock、失敗時cancel/joinを実装した。128 WAV/ZIP、ZIP_STORED、manifest namespace、メンバー順、plan/receiptとSHA/stamp検査は維持する。GPUの復元・学習ではZIP用Executorを起動しない。
-- ステージング36件、benchmark main上の進捗・streaming・Colab・前処理を含む関連回帰105件が成功。旧4361e55のコードで11 receipt完成＋12個目のreceipt未発行を作り、対応する24原本WAVを読めない状態で4並列へ変更して全17 ZIPを完成させた。既存12 ZIPのbyteとmtimeは変化しない。
-- 旧T2TT実装の継続では、controllerが検証したruntimeへ保存通知を接続する。復元された旧packageの実装hash・checkpoint contract・optimizer状態は維持する。旧703b7e8のコードを使う更新2→4と契約不変を確認した。
-- alignmentの最後の全suiteは375成功・10 skip・1件は追加した保存adapterのimport許可リスト不足（478.94秒）。許可リストだけを更新し、その1件を再実行して成功。最終状態は全386項目中376成功・10 skipを確認した。部分実行35件や旧コード単独1件をこの件数へ加算しない。
-- 主2 Notebookのschema/Python/HTML、全7冊のschema/Python、58文書リンク、wheel全77 Python sourceのbyte一致、新規lint警告0件と実際のruntime pin検査を確認した。
-- benchmarkの広い検査は638成功・7 skip・5 GPU除外・31失敗。31件は無変更の旧packageでも同じnodeが失敗した。fixtureのfairseq submodule不足、Windowsでの既存source hash overlay検査、模擬測定seconds=0を含む。WindowsのGloo 2-process試験は待機したため除外。benchmark全suite成功とは扱わない。
-- ローカル1,024 WAV・8 ZIP・各3回の中央値は1/2/4 workerで3.591/2.181/1.585秒、ZIP/sは2.228/3.668/5.046。測定内容・CPU・一時容量・変更一覧と再開手順は [AUDIO_PACKS.md](AUDIO_PACKS.md)。DriveFS性能・Colab CUDA・本コーパスの全件処理は未検証。Windowsのこのvenvではcompiled samplerとbenchmark package metadataを含むCLI環境検査は未合格で、Colabでの必須preflightを代替しない。
+- The benchmark runtime is pinned to `0c0024ea888206149a3119bf096b86ba66d63b66`, based on `4361e55` with audio ZIP changes and merged as `9f04d6c97948f9b371626aef487af65acbab57c5`. Artifact and recipe lineage use `4361e55`. Both primary notebooks fetch the verified runtime pin.
+- Implemented one job per ZIP, two workers by default with an integer range of 1–4, bounded futures, separate worker directories, combined disk reservations, a VM OS lock, and cancellation and joining on failure. Verified 128 WAVs per ZIP, ZIP_STORED, namespace, order, plans, receipts, checksums, and file stamps. GPU recovery and training use the existing packs.
+- Passed 36 staging and 105 benchmark regression checks covering progress, streaming, Colab, and preprocessing. With 11 receipts and a twelfth unpublished receipt from `4361e55`, four workers completed all 17 ZIPs with the corresponding 24 source WAVs unavailable. The 12 existing ZIPs kept their bytes and modification times.
+- The controller uses its verified runtime to publish legacy T2TT saves while preserving the restored trainer hash, checkpoint contract, and optimizer. Updates 2 through 4 passed with the original `703b7e8` code and matching contract.
+- The alignment suite initially had 375 passes, 10 skips, and one import allowlist failure in 478.94 s. Updating only the allowlist resolved the failing case. Final accounting is 376 passes and 10 skips across 386 cases, excluding the separate 35-case subset and standalone legacy check.
+- Checked schema and Python for all seven notebooks, HTML for the two primary notebooks, 58 local documentation links, byte parity for 77 wheel Python sources, zero new lint warnings, and the actual runtime pin.
+- Broad benchmark checks had 638 passes, 7 skips, 5 GPU exclusions, and 31 failures reproducible in the prior package. Causes included a missing fairseq fixture submodule, an existing Windows source hash overlay check, and mock timing of zero seconds. The Windows two-process Gloo test was excluded after waiting.
+- With 1,024 local WAVs and eight ZIPs, median time over three runs at 1, 2, and 4 workers was 3.591, 2.181, and 1.585 s, or 2.228, 3.668, and 5.046 ZIP/s. DriveFS, Colab CUDA, and full-corpus processing remain untested. The Windows venv did not pass CLI checks for the compiled sampler and benchmark package metadata. [Measurement details and recovery](AUDIO_PACKS.md)
 
 ## 2026-11-05 — Baseline-only evaluation defaults
 
-- evaluate Notebookの転移比較スイッチを既定Falseへ変更した。Notebookの既定値を使ったBaseline単独の復元・推論・採点と、3条件を有効にした比較経路を検査した。学習処理の呼出しはない。
-- 関連検査は **12 passed**（4.19秒）。主2 Notebookのschema・Python・HTML、53文書リンクとwheel sourceの一致も確認した。直前の全suite結果へ合算しない。
-- GPU事前検査が合成音声を使うことを手順に明記した。実コーパスとColab CUDAでの実行は未検証。
+- The evaluation notebook now defaults transfer comparison switches to `False`. Tested Baseline-only restore, inference, and scoring, as well as comparison with three transfer conditions enabled. These paths perform evaluation.
+- Related checks **12 passed** in 4.19 s. Also verified the two primary notebook schemas, Python, and HTML, 53 links, and wheel source parity. These counts are separate from the preceding full suite.
+- Documented synthetic audio in GPU preflight. Full-corpus and Colab CUDA runs remain untested.
 
 ## 2026-11-05 — Corpus-independent inputs and experiment names
 
-- 公開Notebookの既定IDを `experiment-001` / `t2tt-001` とし、stage・Teacher・runtimeの名前を汎用化した。コーパス固有のDriveパスと固定件数は任意の設定例へ移した。入力ルート・manifest・任意のQC summaryを設定で選択し、件数はmanifestに従う。
-- 任意の相対音声パスとroot配下の絶対パスを扱う入口を追加し、元のrelease形式も維持した。旧CLIは互換入口として残す。旧runは元ID・revisionで再開する。
-- 合成音声のrelease形式とcanonical形式の両方で、ZIP staging・unit shard再利用・固定fairseq前処理・空test・Baseline登録・3条件plan・native更新・保存・再開を確認した。HuBERT推論はfixtureを使用した。
-- 全suiteは **368 passed, 10 skipped**（472.77秒）。CUDA関連とWindows固有のskipを含む。全7 Notebookのschema/Python、主2冊のHTML、53文書リンク、wheel全77 Python sourceのbyte一致、変更箇所の新規lint警告0件、pip checkを確認した。
-- Colab CUDA、実コーパス全件、本番400k更新と評価は未実行。
+- Set public notebook IDs to `experiment-001` and `t2tt-001` and generalized stage, teacher, and runtime names. Corpus-specific Drive paths and counts are in an optional example. Configure the input root, manifest, and optional QC summary independently.
+- Added an entry point for relative audio paths and absolute paths beneath the corpus root, alongside the original release format. Legacy CLI names remain available for existing runs. Resume with the original ID and revision.
+- Synthetic release and canonical formats covered ZIP staging, unit shard reuse, pinned fairseq preparation, empty test, Baseline registration, three condition plans, native updates, save, and resume. HuBERT inference used a fixture.
+- Full suite **368 passed, 10 skipped** in 472.77 s, including CUDA and Windows-specific skips. Verified seven notebook schemas and Python sources, HTML for the two primary notebooks, 53 links, 77 wheel sources, zero new lint warnings, and `pip check`.
+- Colab CUDA, full-corpus processing, 400k production training, and evaluation remain untested.
 
 ## 2026-11-05 — Unified training and evaluation notebooks
 
-- 学習・前処理を `training.ipynb`、推論・比較を `evaluate.ipynb` へ整理した。既存Notebookは `notebooks/legacy/` へ移し、旧フローの回帰検査を継続した。
-- 新しいNotebookの接続検査10件成功。CPU音声ZIPモードで学習がスキップされること、T2TT単独実行、共通入力での転移3条件、S2UT評価からの学習呼出しがないこと、Baseline単独評価、T2TT外部評価の音声非参照を確認した。
-- 関連回帰114件成功、2件スキップ。小規模nativeモデルを完成済みZIPから復元・登録し、評価用の復元処理が学習を実行せず完了することを確認した。
-- 全7 NotebookのschemaとPython構文、主2 NotebookのHTML、文書リンク、wheelを検証した。実データ・Colab GPUでの本学習と評価は未実行。
+- Consolidated training and preparation into `training.ipynb` and inference and comparison into `evaluate.ipynb`. Earlier notebooks moved to `notebooks/legacy/` and retain regression coverage.
+- Ten notebook wiring checks passed. They covered CPU ZIP-only mode, T2TT-only execution, common inputs for three transfer conditions, evaluation without training calls, Baseline-only evaluation, and audio-free external T2TT evaluation.
+- Related regressions passed 114 with two skips. A small native model restored and registered from a completed ZIP, and evaluation restoration completed without training.
+- Verified schemas and Python for all seven notebooks, HTML for the two primary notebooks, document links, and the wheel. Production Colab GPU training and evaluation remain untested.
 
 ## 2026-11-05 — Kokoro Baseline registration with an empty test split
 
-- 合成Kokoroデータのtrain 2対、dev 1対、test 0対で前処理と `prepared_identity()`、stock fairseq Baselineの2更新、登録と再読込、転移3条件のCLI planを確認した。train/devを空にすると登録時の検証が停止する。
-- 同じデータでAnnealed条件を1更新して保存し、検証付きZIPからcheckpointを復元して2更新目を実行した。CUDA版の同じテストをBaseline NotebookのGPU事前検査に追加した。
-- 関連回帰テスト79件成功、5件スキップ。Notebookのschema・Python構文・HTML、wheel、実際の小規模prepared dataに対するNotebookの登録事前検査も確認した。Colab CUDAでの事前検査と本学習は未実行。
+- Synthetic Kokoro data with two train, one dev, and zero test pairs covered preparation, `prepared_identity()`, two stock fairseq Baseline updates, registration, reread, and plans for three transfer conditions. Empty train or dev stops registration.
+- With the same data, Annealed ran one update, saved, restored from a verified ZIP, and ran update two. The CUDA variant became part of notebook preflight.
+- Related regressions passed 79 with five skips. Verified notebook schema, Python, and HTML, the wheel, and notebook registration preflight on small prepared data. Colab CUDA preflight and production training remain untested.
 
 ## 2026-11-05 — Kokoro JParaCrawl input and native Baseline
 
-- Windows CPUで全363件を実行。354成功、8スキップ、1件は新しいアダプターを許可するimport境界チェックの更新後に単独で再実行して成功。
-- 合成PCM16 WAVで、QCリリース取り込み、空test、元WAV移動後のZIP復元、unit shard再利用、固定fairseqの辞書・CTCラベル・データロック、Baselineのpaper recipe lockを検証した。HuBERT推論はfixtureで置き換えた。
-- 小規模fairseq SentencePiece T2TTをZIPへ保存し、元train/dev manifestのハッシュ照合、QC部分集合の全層Attention抽出、本文・split不一致の拒否を確認した。
-- 5 Notebookのschema・Python構文・HTML、Kokoro両NotebookのCLI引数と共通ロガー、wheel、依存解決を確認した。
-- 実コーパス全件の照合、Colab CUDAでのHuBERT/CTC、400,000-update Baseline、転移学習と評価は未実行。
+- Windows CPU ran 363 cases with 354 passes, eight skips, and one import-boundary failure. The isolated failure passed after allowing the new adapter.
+- Synthetic PCM16 WAVs covered QC release import, empty test, ZIP restore with originals moved, unit shard reuse, pinned fairseq dictionaries and CTC labels, data locking, and the Baseline paper recipe lock. HuBERT used a fixture.
+- Saved a small fairseq SentencePiece T2TT model to a ZIP and verified original train/dev manifest hashes, all-layer attention on the QC subset, and rejection of text or split mismatches.
+- Verified five notebook schemas, Python and HTML, CLI arguments and the shared logger for both Kokoro notebooks, the wheel, and dependency resolution.
+- Full-corpus verification, Colab CUDA HuBERT and CTC, 400,000-update Baseline training, transfer training, and evaluation remain untested.
 
 ## 2026-11-04 — Poster notation and calibration metadata
 
-Benchmark手順の表示名をAttention-level Knowledge Distillationへ修正した。τ校正の除外indexキーを`rejected_microbatches`へ統一し、near-zero/NaN/Inf/無効層のmicrobatch indexが新キーへ保存されることと、実native校正JSONにも新キーだけが入ることを検査した。
+The benchmark workflow now displays Attention-level Knowledge Distillation. Tests verify that near-zero gaps, NaN, Inf, and invalid-layer microbatches are recorded under `rejected_microbatches` and that the native calibration JSON uses that key.
 
-README・Method・projection・all-layer文書・主Notebookの数式を、projected teacherは\(\tilde A_l^{\mathrm{T2TT}}\)、層別KLは\(\ell_l^{\mathrm{KL}}\)、全体は\(\mathcal L=\mathcal L_{\mathrm{S2UT}}+\lambda\mathcal L_{\mathrm{align}}\)へ統一した。S2UT lossは従来のunit lossと補助lossを含み、数値演算・method ID・既存ログIDは変更しない。
+The README, method, projection, all-layer documents, and primary notebook use \(\tilde A_l^{\mathrm{T2TT}}\) for the projected teacher, \(\ell_l^{\mathrm{KL}}\) for per-layer KL, and \(\mathcal L=\mathcal L_{\mathrm{S2UT}}+\lambda\mathcal L_{\mathrm{align}}\) for the objective. S2UT loss includes the original unit and auxiliary losses. Existing computations, method IDs, and log IDs continue to apply.
 
-関連検査は **25 passed**（35.46秒）。校正の再現性・4条件の更新/再開・新キーのJSON保存を含む。lint 0件、表記/名称の残存検査、4 Notebookのschema/Python/HTML、44ローカル文書リンク、wheel全75 Python sourceのbyte一致も成功した。今回の25件は関連検査であり、直前の全suite 350件へ合算しない。長時間trainingは実行していない。
+Related checks **25 passed** in 35.46 s, including calibration reproducibility, update and resume for all four conditions, and the new JSON key. Verified zero lint findings, naming and notation, schema, Python and HTML for four notebooks, 44 links, and 75 byte-identical wheel sources. Counts are separate from the previous 350-case suite. Long training was outside this check.
 
 
 ## 2026-11-04 — Microbatch τ and policy-driven annealing
 
-最終全suiteは **350 passed, 8 skipped**（489.24秒）。8 skipはCUDA関連7件とWindows上のPOSIX process group試験1件。以下の関連検査件数を全suiteへ合算しない。
+Full suite **350 passed, 8 skipped** in 489.24 s. Skips were seven CUDA cases and one POSIX process-group case on Windows. Related counts below are separate.
 
-レビューの5点へ対応した。τは各microbatchの有効層lossから候補を作りmedianを取る。logical batch内の層lossを先に平均しない。固定16 logical batchesの入力とλのlogical-batch gradient norm校正は維持する。artifactは`alignment-calibration-v2`/`tau_calibration_unit=microbatch`で、microbatch数・logical/micro index・pair IDs・層loss/valid row数を保存する。旧v1は明確に拒否し、元artifactを上書きしない。
+τ now takes the median of candidates from valid layers in each microbatch. The fixed 16 logical batches and logical-batch λ gradient calibration are retained. `alignment-calibration-v2` records `tau_calibration_unit=microbatch`, batch counts and indices, pair IDs, layer losses, and valid rows. It rejects v1 and preserves existing files.
 
-相反する最悪層を持つ2 microbatchを平均するとgapが0になる例で、個々の候補からはworst/median weight比3を得ることを検証した。実際のtiny native校正でも2 logical×2 microの4組からτを再計算してJSONと照合し、再実行一致・optimizer更新0・4条件の更新/再開を維持した。
+Two microbatches with opposing worst layers showed that averaging could erase the gap, while individual candidates yield a worst-to-median weight ratio of 3. A tiny native test recomputed τ from two logical batches of two microbatches, checked the JSON, deterministic replay, zero optimizer updates, and update and resume for four conditions.
 
-canonical conditions YAML→plan policy→loss/logへfraction/scheduleを接続し、Python側のfraction既定値を削除した。0.7のYAML変更がplanへ届き、減衰の中点・終了点・task-onlyログが同じ値を使い、異なる設定でresumeしないことを確認した。cosine以外、0/NaN/範囲外/boolのfractionを拒否する。
+Canonical conditions YAML now drives the plan policy, loss, and logs. Changing the fraction to 0.7 affected the midpoint, end, and task-only logs and blocked resume with a conflicting policy. Validation rejects schedules other than cosine and zero, nonfinite, out-of-range, or Boolean fractions.
 
-無効層をKL mean/worst・entropyとdev診断平均から除外した。外向け名称はKL-based Attention Distillation、Annealed KL-based Attention Distillation、Attention-level Knowledge Distillation。内部IDは維持する。tailはtask-only、validation/inferenceはteacher-freeと表記し、ログ名もtask_onlyへ更新した。
+Invalid layers are excluded from KL mean and worst, entropy, and dev diagnostic means. The three public names are KL-based Attention Distillation, Annealed KL-based Attention Distillation, and Attention-level Knowledge Distillation. Internal IDs remain stable. The tail and its logs use `task_only`. Validation and inference are teacher-free.
 
-関連検査は **32 passed**（43.70秒）。変更Python 14ファイルのlintは0件。全sourceのAST・4冊のNotebook schema/Python/HTML・公開名称・44ローカル文書リンク・pip check・wheel全75 Python sourceのbyte一致も確認した。wheelにcanonical YAMLがbyte一致で含まれ、editable sourceに頼らないwheel importも通った。source archiveからwheelを再buildした場合も同じYAMLを同梱する。canonical設定の編集元は1ファイルで、wheel用のコピーはbuild時に生成する。
+Related checks **32 passed** in 43.70 s. Verified no lint findings in 14 changed Python files, source AST, four notebook schemas, Python and HTML, names, 44 links, `pip check`, and all 75 wheel sources. The wheel and source-archive rebuild bundled byte-identical canonical YAML and imported independently from the editable tree. The build generates the copy from one editable source.
 
-Notebookは`research-v3-*`へ派生先を分離し、旧v2の校正/checkpointを再利用しない。Baseline・corpus・T2TT Attention・projected teacher・native recipe・ZIP runtimeは変更しない。新stageでtop-p診断と校正を実行し直す。CUDA校正/FP16/6層VRAM/実コーパス品質は未測定で、本番長時間trainingは実行していない。Windowsのtiny calibration sampler fixtureの条件は前回と同じ。
+The notebook writes new calibration and checkpoint stages under `research-v3-*`. Run fresh top-p and calibration there. The Baseline, corpus, T2TT attention, projected teacher, native recipe, and ZIP runtime remain reusable. CUDA calibration, FP16, six-layer VRAM, real-corpus quality, and long training remain unmeasured. The Windows tiny sampler fixture follows the prior test setup.
 
 
 ## 2026-11-03 — Calibrated loss-only layer-wise distillation
 
-最終全suiteは **337 passed, 8 skipped**（494.94秒）。8 skipはCUDA関連7件とWindows上のPOSIX process group試験1件。以下はこの検証の内容で、過去の結果と合算しない。
+Full suite **337 passed, 8 skipped** in 494.94 s, with seven CUDA skips and one Windows POSIX process-group skip. The following results belong to this run.
 
-主比較をBaseline、Distillation、Annealed Distillation、Mask Distillationへ変更した。KLのteacher detach/valid row、stable top-pとpadding除外・包含関係・最低1 frame、Mask mass 1/0.7→loss 0/0.3、LogSumExpの数値安定性とsoftmax勾配、cosine scheduleの0/0.8T/後半を検査した。native forwardのcontextはshape/scopeだけを持ち、異なるpriorでもlogitsがbit一致する。
+Tested the Baseline and three loss conditions, detached KL teacher and valid rows, stable top-p with padding exclusion and at least one frame, mask loss 0 and 0.3 for mass 1 and 0.7, stable LogSumExp and its softmax gradient, and the cosine schedule at 0, 0.8T, and the tail. The native capture context carries shape and scope, and logits matched bitwise across different priors.
 
-実際の固定fairseq 2層モデルでtop-p診断→τ/λ校正→4条件の2更新、1更新で保存→resume→2更新を実行した。calibration中のAdam.stepを禁止し、モデルstate・update 0・未蓄積gradを確認した。再校正のJSONが一致し、Distillation/Annealed Distillationは同じλKL/τKLを共有する。校正α/λを変更したartifactによるresumeは拒否した。near-zero層差・非finite値・zero gradientにfallbackしない。
+On pinned two-layer fairseq, ran top-p diagnostics, τ and λ calibration, two updates per condition, and save after update one and resume to update two. Calibration blocked Adam.step and preserved state, update zero, and empty accumulated gradients. Recalibration reproduced JSON. Both KL conditions shared coefficients. Changed calibration α or λ rejected resume. Near-zero gaps, nonfinite values, and zero gradients stopped calibration.
 
-native criterionのloss差を`sample_size * lambda * worst-layer LogSumExp`へ直接照合し、λ=0のAnnealed tailはtask lossと一致した。旧global-row/layer-mean・native Guidance/Monotonic配線の試験を新定義へ置き換えた。単層/全層のzero-supervisionでstock fairseqのlogits/loss/update一致を維持し、checkpoint/recipe/data登録・FP16 overflow保護・verified ZIP・source-only generatorの既存試験を残した。standalone legacyの歴史的Guidanceは主比較から隔離する。
+The native loss difference matched `sample_size * lambda * worst-layer LogSumExp`, and the zero-λ tail matched task loss. Updated tests for the microbatch definition. Zero supervision in single and all-layer modes matched stock logits, losses, and updates. Registration, FP16 overflow, verified ZIP, and source-only generation regressions remained covered. Historical Guidance is in the standalone path.
 
-各条件で独立したteacher-forced dev診断、層別KL/Mask mass/weight分布、loss/layer curvesを実行した。Maskのnative checkpointからraw Attentionとteacher region maskのPNG/NPZを出力した。teacher directoryを削除してもnative validationとforwardが通り、生成器へteacherを渡さない。新per-update JSONLが既存freeze/ZIPへ入ることも検査した。
+Ran separate teacher-forced dev diagnostics for per-layer KL, mask mass, and weights, plus loss and layer curves. The Mask checkpoint produced raw attention and teacher-region PNG and NPZ files. Native validation and forward worked after removing the teacher directory. The new update JSONL entered the existing freeze and ZIP path.
 
-Notebookの実セルをCLI parserへ通し、4条件の順序・共通入力/校正/予算・同一推論/評価を検査した。学習/校正スイッチの既定False、top-p未選択時の停止、保存済み診断/校正stageの復元配線を確認した。READMEと主要研究文書を新しい式・method名・microbatch定義へ統一した。
+Ran notebook cells through CLI parsers and checked four-condition order, common inputs, calibration and budget, shared evaluation, default-disabled training and calibration, required top-p selection, and saved diagnostic and calibration recovery. Updated research notation and names.
 
-変更Python 20ファイルのpyflakesは0件、全sourceのAST、新CLI import/help、4冊のNotebook schema/Python/HTML、44ローカル文書リンク、pip check、wheel内全74 Python sourceのbyte一致を確認した。lint toolはoutputsへ隔離し、project依存は追加していない。
+Verified zero pyflakes findings for 20 changed Python files, source AST, CLI import and help, four notebook schemas, Python and HTML, 44 links, `pip check`, and 74 wheel source files. Lint tooling was isolated under `outputs`.
 
-Windows環境にはfairseqのcompiled batch samplerがないため、calibrationのtiny統合試験に限り、元tiny Baseline fixtureと同じsingleton batch samplerを使う。productionにsampler fallbackはなく、Colabのcompiled sampler preflightを維持する。実CUDAでのcalibration・FP16学習・VRAM、実コーパスのtop-p選択/校正値・長時間training・BLEU改善は未検証。本番trainingは実行していない。
+Windows tiny calibration tests use the same singleton batch sampler as the tiny Baseline fixture because the compiled sampler is unavailable there. Colab preflight requires the compiled sampler. CUDA calibration, FP16, VRAM, real-corpus top-p and coefficients, long training, and BLEU gains remain untested.
 
 
 ## External text-only T2TT
 
-最終全suiteは **342 passed, 8 skipped**（459.38秒）。8 skipはCUDA関連7件とWindows上のPOSIX process group試験1件。以下の個別結果は全suiteへ合算しない。
+Full suite **342 passed, 8 skipped** in 459.38 s. Skips were seven CUDA cases and one POSIX process-group test on Windows. Subset results below are separate.
 
-音声列のない4列manifestで、character/SentencePieceとsmoke/固定fairseqの各組合せを2更新学習し、dev生成・SacreBLEU・全層Attention抽出まで実行した。音声features/hash/パスresolve/存在検査を禁止した状態でも成功し、後から音声path/SHAを追加してもcheckpoint・評価・Attentionを無変更で再利用できた。text変更時の拒否、ID/split漏洩検査、従来speech hashの計算一致も確認した。
+A four-field audio-free manifest trained for two updates with character and SentencePiece on smoke and pinned fairseq, generated dev output and BLEU, and extracted all-layer attention. Tests blocked audio feature, hash, path resolution, and existence calls. Adding audio paths and hashes preserved checkpoint, evaluation, and attention reuse. Text changes and ID or split leakage were rejected, and the legacy speech hash matched.
 
-後から人工音声とCTC/unit fixtureを追加し、text-v1 Attentionからspeech identityを持つteacherへ投影した。S2UT・CTC・HuBERT/unit・teacher・speech評価・音声可視化へtext-onlyを渡すと明確なaudio-requiredエラーになり、CTC/unitは外部モデル取得前に停止する。旧checkpointは元音声metadataの旧hashで照合し、既存legacy評価/抽出/artifact再利用の試験も維持した。
+Added synthetic audio and CTC and unit fixtures and projected text-v1 attention into a speech-identity teacher. Audio-dependent stages reject text-only manifests, and CTC and units stop before model downloads. Legacy checkpoints use original audio metadata hashes and retain evaluation, extraction, and reuse coverage.
 
-character/SPM両方で実際の固定benchmark ZIP runtimeを使い、2更新で中断→ローカル作業消失を想定して復元→4更新を実行した。外部原本への音声列追加後もcanonical textのbytesが変わらず、連続4更新とmodel/optimizer/RNG/epoch/cursor/contractが厳密一致した。loss summaryのdurable updateも4と一致する。元データ・既存Baseline・固定benchmark sourceは変更しない。
+Both tokenizers resumed from pinned verified ZIPs after update two and VM-local loss, then reached update four. Added audio columns left canonical text bytes stable. Model, optimizer, RNG, epoch, cursor, and contract matched four uninterrupted updates exactly, and the durable summary reported four.
 
-新Colabの実セルを両tokenizerで各CLI parserへ通し、専用stage・完了gate・任意Attention・canonical loggerを検査した。外部評価Notebookの既存試験4件は、先に表示される追加診断表をBLEU比較表と取り違えていたため、表の内容で識別して同じBLEU/翻訳例を検査するよう修正した。修正後の外部評価/新Notebook関連は **40 passed**（65.29秒）。既存3冊のNotebookとsource pinは変更していない。
+Notebook cells for both tokenizers passed through CLI parsers, covering dedicated stages, completion gates, optional attention, and logging. Four external evaluation checks now locate the BLEU table by content despite an earlier diagnostic table. The final external and notebook subset **40 passed** in 65.29 s.
 
-全4冊のNotebook schema/Python/HTML、80ローカル文書リンク、pip check、wheel内全70 Python sourceのbyte一致を確認した。依存追加はない。実JParaCrawl・実GPU200k学習・実コーパスBLEUは未実行で、CPU小型接続試験を品質結果として扱わない。
+Checked four notebook schemas, Python and HTML, 80 local links, `pip check`, and 70 byte-identical wheel sources. Real JParaCrawl, 200k GPU training, and real-corpus BLEU remain untested.
 
 ## 2026-10-29 — SentencePiece T2TT
 
-SentencePiece Unigram対応後の全suiteは **314 passed, 8 skipped**（421.75秒）。日英別train-only・固定入力順・1 thread・identity・空白保持・特殊ID・serialized model/hash・原codepoint span・UTF-8 byte offset変換を検査した。全角/結合文字/emoji/tab/LF/CR/複数空白/特殊token風の原文もround-tripし、held-out文字は語彙へ追加せずUNKとして元位置を保持した。SentencePieceのimmutable piece viewのowner lifetimeも回帰試験で保護する。
+After SentencePiece Unigram, the full suite **314 passed, 8 skipped** in 421.75 s. Checked separate train-only vocabularies, fixed order, one thread, identity normalization, whitespace, special IDs, serialization, hashes, codepoint spans, and UTF-8 offsets. Fullwidth, combining, emoji, tab, LF, CR, repeated spaces, and special-token-like literals round-tripped. Held-out codepoints retained UNK positions. Tests cover immutable piece-view owner lifetime.
 
-最終確認でbestだけが残ったcharacter stageの保護も追加し、SPM全関連 **19 passed**（34.89秒）。last/bestどちらだけが残っていても、新SPMへの移動・上書き前に拒否する。Notebookの表示配線更新後は関連 **25 passed**（11.53秒）。全suiteの314件はその保護追加前、19件/25件は最終変更に対する関連検査の結果であり、合算して全suite件数にはしない。
+Added protection for character stages with only best or last present. The related SentencePiece subset **19 passed** in 34.89 s. After notebook display wiring, **25 passed** in 11.53 s. The 314-pass full suite preceded the protection change and is separate from both subsets.
 
-smokeと固定fairseq小型モデルで、SPM新規学習→同一tokenizer再開→dev生成/BLEU→single/all-layer抽出→文字CTCのsubword時刻集約→teacher prior→legacy S2UTまで実行した。native fairseqのdataset/criterion/backwardにもsubword teacherを通した。旧characterの評価・抽出・artifact無変更resumeと通常/延長保存の既存試験も成功。語彙変更・非identityモデル・asset hash変更・character/SPM混入・characterからのresume/上書きを拒否する。
+Small smoke and pinned fairseq models covered fresh SentencePiece training, same-tokenizer resume, dev BLEU, single and all-layer attention, character-to-subword CTC timing, teacher projection, legacy S2UT, and native dataset, criterion, and backward. Legacy character evaluation, extraction, resume and persistence passed. Rejected vocabulary, normalization, asset hash, tokenizer mix, and character resume or overwrite mismatches.
 
-固定300件評価は実際の固定benchmark loader/正規化/BLEUを使用し、neural生成だけを小型fixtureで置換してSPM復元とcodepoint OOV集計を検査した。原文長別BLEU・4-gram反復・empty/unique出力の診断を追加し、既存native/normalized corpus BLEUの条件は維持した。SPM fresh runtimeで検証付きZIPを2更新で中断→VM消失を想定して復元→4更新し、連続4更新とmodel/optimizer/RNG/epoch/cursor/contractがbit一致した。tokenizer model/vocab/診断も復旧し、完了済みcheckpointを再学習しない。
+Fixed 300 evaluation used the actual benchmark loader, normalization, and BLEU, with neural generation replaced by a fixture. Checked checkpoint tokenizer restore and codepoint OOVs. Added length buckets, repeated 4-grams, empty and unique counts. Fresh SentencePiece restored from a verified ZIP at update two and matched uninterrupted update four for model, optimizer, RNG, epoch, cursor, and contract. Tokenizer assets and diagnostics restored, and completed checkpoints performed no new updates.
 
-Colabのcharacter/SPM・20k/200k・single/all-layerの保存先/CLI/完了gateを検査。全Notebook schema/Python/HTML、74ローカル文書リンク、pip check、wheel全68 Python sourceのbyte一致も確認した。protobuf 4.25.3を追加してmodel内部設定を検証し、環境preflightへ含めた。8 skipはCUDA 7件とWindows上のPOSIX 1件。実GPUのSPM200k学習・実コーパス8000語彙生成/系列長・本評価のBLEUは未測定。
+Checked Colab paths, CLI wiring, and completion gates for both tokenizers, 20k and 200k, and single and all-layer modes. Verified notebook schema, Python and HTML, 74 links, `pip check`, and 68 wheel sources. Protobuf 4.25.3 was pinned for model-setting checks. Skips were seven CUDA and one Windows POSIX test. Real GPU training, real-corpus vocabulary and lengths, and production BLEU remain unmeasured.
 
-人工2 train/1 dev pair（語彙要求は日英各96）の実測はsource vocabulary=24、target=19。train平均は日本語21 codepoints→13 tokens、英語21→15。devは各1未知codepointを検出し、exact round-tripができないことを明示した。これらは小型接続試験の値で、実コーパスの8000語彙実験の値ではない。本実験の値は新runの`tokenization.json`で確認する。以下は過去の検証記録。
+The synthetic two-train, one-dev fixture requested 96 pieces per language and produced source vocabulary 24 and target 19. Train means were 21 Japanese codepoints to 13 tokens and 21 English codepoints to 15 tokens. Dev had one unknown codepoint per language, so exact round trips failed as expected. Use the production run's `tokenization.json` for real-corpus measurements. The entries below are historical.
 
-T2TT延長のloss監視・snapshot sidecarを追加し、延長・新監視・Notebook/loggerの関連検査は **56 passed**（266.56秒）。親processだけでローカルJSONLの完全な追記行を読み、train/devの測定updateを区別して出力する。書込み途中の行・監視エラー・終了時の最終出力とthread終了を確認した。小型の実verified ZIPへ添えたJSONを元のmetrics/checkpointと照合し、履歴上限・実dev値保持・source hash不変・改変したmetricsの拒否・summary保存失敗後のverified checkpoint保持・サマリー付きretentionを検査した。
+T2TT extension, loss monitoring, notebook, and logger checks **56 passed** in 266.56 s. The parent tails complete local JSONL rows and distinguishes train and dev measurement steps. Tested partial writes, monitoring errors, final output, and thread shutdown. Checked verified ZIP summaries against original metrics and checkpoints, history bounds, actual dev values, source hash stability, tamper rejection, checkpoint preservation after summary errors, and retention.
 
-保存済み旧control scriptのbyte/hashを保った再開、完了後の欠落サマリー生成も実行し、checkpointを再学習・変更しないことを確認した。従来のsmoke/fairseq完全一致continuation・旧Git source復元・中断復旧試験も成功。Notebook schema/Python/HTML、70ローカル文書リンク、pip check、wheel内64 Python sourceのbyte一致を確認した。実GPUでの新監視、実200k runのサマリー公開、実データのloss値取得は未実行。以下の全suite結果は層/head検査を追加した時点の記録で、今回の56件は関連suiteの結果である。
+Resumed with byte-identical saved controller code and generated a missing summary for a completed run without updating checkpoints. Smoke and fairseq exact continuation, original Git source recovery, and interruption recovery passed. Verified notebook schema, Python and HTML, 70 links, `pip check`, and 64 wheel sources. GPU monitoring, production 200k summary publication, and real loss values remain untested. The following full-suite counts precede this 56-case subset.
 
-追加レビューの単層teacher対応・legacy head対応・診断層指定を修正し、全suiteは **289 passed, 8 skipped**（403.32秒）。teacher/studentの単層番号を範囲検査してから正規化し、正負indexの同一層は受理、別層や不正な記録値は拒否する。legacyではhead集合の一致を要求する。記録のない旧packetは最終層・全head平均の既定で再利用でき、元artifactのhashが変わらないことも確認した。nativeはplan時と遅延データ読込時の照合を維持する。
+After single-layer teacher, legacy head, and diagnostic layer fixes, the full suite **289 passed, 8 skipped** in 403.32 s. Range-check before normalizing positive and negative layer indices, accept equivalent layers, and reject invalid or different ones. Legacy requires matching head sets. Packets without metadata can reuse final-layer all-head defaults with identical artifact hashes. Native checks plans and delayed input reads.
 
-smoke/fairseq両方で不一致の学習拒否、対応層での従来学習・可視化を検査し、smokeではselected-head teacherの抽出→構築→同じheadでの学習→表示まで実行した。診断の`--layer`で選択した層のteacher・投影prior・層別entropyを直接投影した結果と照合し、summary/pair metadataへ層・headを記録する。`--all-layers --layer -1`の明示的競合も拒否する。全Notebookのschema/Python/HTML、70ローカル文書リンク、CLI help、pip check、wheel内63 Python sourceのbyte一致を確認した。
+Smoke and fairseq rejected mismatches and trained and plotted matching layers. Smoke also extracted a selected-head teacher and trained and plotted with that head. `--layer` diagnostics matched direct teacher, prior, and entropy projection and recorded layer and head metadata. Explicit `--all-layers --layer -1` conflicts were rejected. Checked all notebook schemas, Python and HTML, 70 links, CLI help, `pip check`, and 63 wheel sources.
 
-8 skipはCUDA関連7件とWindows上のPOSIX 1件。実GPUのFP16学習・保存/復元・VRAMは未実行のままで、NotebookのGPU preflightで別途確認する。モデル・loss・更新予算・benchmark pin・Drive保存runtimeは変更していない。以下は過去の検証記録。
+Skips were seven CUDA cases and one Windows POSIX case. FP16 GPU training, recovery, and memory require notebook GPU preflight. The entries below are historical.
 
-全層実装へのレビュー指摘を現行コードで再現・修正した。最終全suiteは **264 passed, 8 skipped**（387.28秒）。全層teacherをsingle-layerへ使うときは指定層（負indexを含む）の配列を選び、学習・可視化の層番号を一致させる。対照的な2層行列による投影一致、元artifactのhash不変、中間層のlegacy学習・PNG/NPZ表示をsmoke/fairseq両方で検証した。
+Full suite **264 passed, 8 skipped** in 387.28 s after review fixes. Single-layer use of an all-layer teacher selects the requested layer, including negative indices, consistently across training and visualization. Verified projection with distinct two-layer matrices, original artifact hashes, and intermediate-layer legacy training and PNG and NPZ output on smoke and fairseq.
 
-nativeは全head平均を維持し、記録されたselected-head teacherをsingle/all双方のplan時に拒否する。比較の既定はscope固定のまま、`--allow-scope-ablation`を両比較CLIへ追加し、意図したscope変化を結果へ記録する。flagを付けてもmethod/prior・recipe・初期化・予算・係数・teacher等の照合は維持し、異なるteacher signatureを自動的に同一扱いにしない。legacyの異なるsingle層、nativeのfinal/all、CLI経由の出力と他設定の変更拒否を検査した。
+Native plans reject selected-head teachers in both scopes and use all-head averages. `--allow-scope-ablation` records intentional scope changes in both comparison CLIs while checking method, prior, recipe, initialization, budget, coefficients, teacher, and signatures. Tested legacy single-layer pairs, native final and all-layer comparisons, CLI output, and rejection of other changes.
 
-GPU preflightはDistillation/Annealed Guidance/Guidanceごとにtiny 2層FP16の1更新→保存/復元→2更新目、実forwardのbeta、実測peak allocated/reserved VRAMのJSON出力へ拡張し、Notebookの`-s`で表示する。ローカルではCUDA 7件とWindows上のPOSIX 1件がskipであり、GPU保存/復元・VRAMの実測はまだ行っていない。本番6層の性能・BLEUを推測しない。モデル・loss式・native Trainer hook・benchmark pin・Drive保存runtimeは変更していない。Notebook schema/Python/HTML、70ローカル文書リンク、CLI help、pip checkとwheel全63 Python sourceの同梱一致も確認した。
+GPU preflight covers a tiny two-layer FP16 update, save and restore, and second update for Distillation, Annealed Guidance, and Guidance, with measured beta and peak allocated and reserved VRAM JSON shown with `-s`. Seven CUDA cases and one Windows POSIX case were skipped locally. Full six-layer training, VRAM, and BLEU require GPU data. Verified schema, Python and HTML, 70 links, CLI help, `pip check`, and 63 wheel sources.
 
-全Decoder層のlayer-wise transferを追加。最終状態の全体 **249 passed, 6 skipped**（369.07秒）、native checkpoint可視化追加後の関連検査は **25 passed, 2 skipped**（110.98秒）。2層モデルでT2TT/S2UTを各1 forwardでcaptureし、層別prior・未知文字mask・FP32 NPZ・共有mappingによる`[L,U,F]`投影・memory budgetのL倍計算を確認した。旧single-layer抽出/teacherの読込・無変更resume、all-layerへの誤利用拒否、層数・scope・headsの不一致拒否も検査した。
+All-layer decoder transfer full suite **249 passed, 6 skipped** in 369.07 s. The visualization subset **25 passed, 2 skipped** in 110.98 s. Two-layer tests checked one-pass T2TT and S2UT capture, per-layer priors, UNK masks, FP32 NPZ, shared `[L,U,F]` projection, L-scaled memory budget, single-layer reuse, and rejection of incompatible scope, counts, and heads.
 
-層ごとに有効row数を変え、全microbatchの層別row総数で正規化後に層平均するKLとその勾配が一括計算に一致した。native criterionでもTrainerのmain token正規化を含む損失差を実測照合。2層のstock fairseqに対しsingle/all両modeでbeta=0のlogits（atol=rtol=0）、loss、更新後parameterが厳密一致し、全層のq/kへ有限の非0勾配を確認した。native TrainerでBaseline/Distillation/Annealed Guidance/Guidanceを各2更新、beta減衰、teacher削除後の共通native生成を完走した。
+Varying valid-row counts, gradients from per-layer normalization across microbatches and then layer averaging matched joint calculation. The native loss difference matched Trainer main-token normalization. With beta zero, single and all-layer modes matched stock fairseq logits exactly, loss, and post-update parameters. All layers had finite nonzero q and k gradients. The native Trainer completed two updates per historical condition, beta decay, and shared inference after removing the teacher.
 
-legacyとnativeのcheckpointから同じ層番号のteacher/raw/guidedを表示し、NPZの内容とPNGを確認した。Notebookの4条件生成・別stage・共通評価・旧single/Monotonic-only/T2TT延長との互換性も検査。新しい全層CUDA抽出parity・FP16/FP32 prior接続試験をNotebookのGPU preflightへ追加した。6 skipはCUDA 5件とWindows上のPOSIX process group 1件であり、実GPUの学習性能・VRAM・実データBLEU/研究効果は未測定。固定benchmark/fairseq pin・既存Baseline・T2TT recipe・S2UT更新budgetは変更していない。全Notebookのschema/Python/HTML、69ローカル文書リンク、CLI help、pip check、wheel内の全63 Python sourceのbyte一致も確認した。
+Legacy and native visualization produced corresponding teacher, raw, and guided layer PNGs and NPZs. Notebook wiring covered four conditions, independent stages, common evaluation, and single-layer, Monotonic-only, and T2TT-extension compatibility. Added CUDA all-layer parity and FP16 with FP32 prior checks. Skips were five CUDA and one Windows POSIX. Production GPU, VRAM, and real-corpus BLEU remain unmeasured. Checked notebook schema, Python and HTML, 69 links, CLI help, `pip check`, and 63 wheel sources.
 
-Colabの環境検査セル[10]では依存/CUDA検査が成功した後、延長学習のCPU完全一致試験3件が失敗した（223 passed）。fixtureが親processだけを `torch.set_num_threads(1)` にしており、新しい学習processに同じスレッド設定を渡していなかった。ローカルでも外部環境を `OMP_NUM_THREADS=2`・`MKL_NUM_THREADS=2` にするとsmoke/fairseqの2件で再現し、smokeのmodel parameter差は最大約3.53e-8だった。学習contractは一致していた。
+Colab cell [10] passed dependency and CUDA checks, then failed three exact CPU continuation cases with 223 passing. The fixture set `torch.set_num_threads(1)` in the parent only. Local `OMP_NUM_THREADS=2` and `MKL_NUM_THREADS=2` reproduced two smoke and fairseq cases, with smoke parameter difference up to about 3.53e-8 and matching contracts.
 
-試験fixtureに限定して親と子のCPUスレッド数を1へ揃え、終了時に元の設定へ戻すよう修正した。新しい子processの実スレッド数も回帰試験で検査する。意図的に外部環境を2スレッドにしたまま、関連 **26 passed**（159.00秒）。`torch.equal`によるmodel/optimizer/RNGの完全一致検査は維持した。本番training/runtime/Notebookのスレッド設定・checkpoint・scientific contractは変更していない。
+Set one CPU thread in parent and child within the fixture and restore settings afterward. Verify child thread count. With the outer environment still at two threads, related checks **26 passed** in 159.00 s. Model, optimizer, and RNG continue to be compared with `torch.equal`.
 
-同じ2スレッドの外部環境でColabと同じ `pytest -m 'not gpu'` を全実行し、**226 passed, 1 skipped, 3 deselected**（315.19秒）。skipはWindows上のPOSIX process group、deselectedはCUDA対象3件。これはローカルCPUでの再検証であり、修正後のColab/L4での結果はまだ取得していない。
+With that two-thread environment, `pytest -m 'not gpu'` gave **226 passed, 1 skipped, 3 deselected** in 315.19 s. The skip was a Windows POSIX process-group case and the deselected tests require CUDA. Colab L4 retest remains pending for this change.
 
-verified T2TT 20k→200kの独立stage延長を追加し、全suiteは **225 passed, 4 skipped**（310.39秒）。縮小した実学習と固定benchmarkの実ZIPで、last/best・Adam・epoch/cursor・best loss/bad validations・各RNGの継承、連続学習とのbit一致、source work/backupの全ファイル不変、途中target snapshotからのVM消失後の再開を検証した。公式fairseq小型モデルでも更新後parameterが連続学習と一致した。破損・欠落・異なるrevision/step/manifest/config/recipeの拒否、metricsの連続性、best選択の継承を確認した。
+The verified 20k-to-200k extension full suite **225 passed, 4 skipped** in 310.39 s. Small real training and benchmark ZIPs checked last and best, Adam, epoch and cursor, best loss and bad validations, RNG, exact continuation, unchanged source work and backups, and recovery after target VM loss. Small official fairseq parameters matched uninterrupted training. Verified rejection of corruption, missing files, revision, step, manifest, config, and recipe mismatches, as well as metric continuity and inherited best selection.
 
-checkpointのimplementation hashと一致する旧Git source（703b7e8）を実際にexportして学習・延長し、元trainer自身のcontract検証を通した。hashの書換えやmodel/trainerの変更は行っていない。validationとDrive保存間隔の分離、最新2個＋milestone保持、検証済みupload後だけの整理、削除失敗の非致命性も確認した。Windowsで進捗readerとatomic replaceが競合した場合に限る短い再試行を追加し、他のcheckpoint書込失敗はそのまま伝播することを検査した。
+Exported matching old Git source `703b7e8` and used the original trainer's contract validation. Checked separate dev and Drive save intervals, two recent snapshots plus milestones, cleanup only after verified upload, and nonfatal cleanup errors. Windows progress-reader and atomic-replace contention retries briefly while unrelated checkpoint errors propagate.
 
-Notebookは20k/200k両モードのdev・外部評価・Attention・teacher・S2UT保存先と共通checkpoint変数、評価前のAttention停止、完了済み200kの評価専用実行、Monotonic-onlyの互換性を検証した。全Notebookのschema/Python構文/HTML変換、CLI help、`pip check`、wheel内の全Python source同梱を確認した。既存training/CLI/colab runtimeとbenchmark pinは変更していない。4 skipはCUDA 3件とWindows上のPOSIX process group 1件。実際の20k checkpointによるGPU延長・200k学習結果・dev/FLEURS BLEUは未実行・未測定であり、ここでの数値はテスト結果だけである。
+Notebook checks covered 20k and 200k dev, external, attention, teacher, and S2UT paths, the shared checkpoint, evaluation gates, completed-run evaluation, and Monotonic-only compatibility. Verified schemas, Python and HTML, CLI help, `pip check`, and wheel packaging. Skips were three CUDA and one Windows POSIX. Real 20k GPU continuation, 200k results, and dev and FLEURS BLEU remain unmeasured.
 
-新しいVMの6.1.1で `t2tt/checkpoint_best.pt` が欠落していたため、外部評価セルへ保存済み入力の復元を追加した。**189 passed, 4 skipped**（136.14秒）。`restore-inputs` は固定benchmarkの `latest/restore` で既存ZIPを検証し、同じrun path・T2TT stage・完了済み予算・bestの存在を確認して復元する。trainerやgeneratorは起動せず、best欠落をlastで代用しない。元manifest/音声の再取得も不要。devは同じcheckpointの完了済み最終packからmetrics/predictionだけを検証してVMへ復元し、外部評価の親フォルダや異なるローカル結果を置き換えない。
+Added external evaluation input restoration after a fresh VM lacked `t2tt/checkpoint_best.pt`. **189 passed, 4 skipped** in 136.14 s. `restore-inputs` checks verified benchmark ZIPs, original run path and stage, completed budget, and best checkpoint. Restore only the model and matching dev metrics and predictions, preserving incomplete local and external results.
 
-実benchmark ZIPを使う7件の追加試験で、19k best/20k完了の区別、未公開ローカルファイルと外部結果の保持、Driveバックアップのbytes不変、再実行時の再復元なし、保存なし・未完了・破損ZIP・異なるstage・bestなし・異なるローカルdevの拒否を確認した。Notebookの復元→外部評価→読込専用検証の配線も既存のCLI parserに通した。Notebook schema/Python/HTML、CLI help、`pip check`も成功。T2TT/S2UT学習・Attention・既存保存runtime source・benchmark pinは変更していない。CUDA 3件とPOSIX 1件は引き続きローカル未実行であり、利用者の実モデルでの外部BLEU値は未取得。
+Seven added real-ZIP tests covered 19k best in a completed 20k run, retained unpublished local files and external results, identical Drive bytes, reuse on rerun, and rejection of missing, incomplete, corrupt, mismatched-stage, best-less, and conflicting dev results. Checked restore, external evaluation, and read-only verification wiring, schema, Python and HTML, CLI help, and `pip check`. Three CUDA and one POSIX cases were skipped. Real-model external BLEU remains unmeasured.
 
-Colabから報告された6.1.1の失敗は、固定8C 300件の取得・照合成功後に `text-evaluation/dev-text.json` がなく停止したもの。指示書ではdev結果は存在時だけ比較する任意入力だったが、実装で必須化していたため修正した。未保存のdev結果を自動生成したりT2TTを再学習したりせず、既存CLIから取得した同じbeam=5/max_chars=1000/length_penalty=1.0とnative BLEU設定で外部評価を行う。devが存在する場合のcheckpoint・metric/generation契約・predictionハッシュ検証は維持し、不完全・壊れたdev結果を「不在」として扱わない。
+Colab 6.1.1 loaded the fixed 8C 300 samples and then failed because optional `text-evaluation/dev-text.json` was missing. External evaluation now proceeds with beam 5, max chars 1000, length penalty 1.0, and native BLEU from the existing CLI. Existing dev data still requires checkpoint, generation, metric, and prediction checks, and partial or corrupt dev data raises an error.
 
-関連 **46 passed**（62.80秒）。dev JSONだけ不在、JSON/predictionとも不在、引数省略、既存devの欠落prediction・不正JSON object拒否、devなしNotebook実行と比較skip表示、devなし完了結果の再検証・再利用を追加した。既存の参照非混入・BLEU再計算・実ZIP復元・公式fairseq/人工checkpoint各300件の生成と既存dev/Notebook互換性も通過。Notebook schema/構文/HTMLとCLI helpも確認した。今回の修正では学習・generator・保存runtime・benchmark pinは変更せず、全suiteの再実行は行っていない（直前の全suiteは174 passed/4 skipped）。実Colabでの外部BLEU値は未取得。
+Related checks **46 passed** in 62.80 s. Covered absent dev JSON or prediction, omitted arguments, invalid existing dev, notebook comparison skip, and read-only revalidation and reuse. Reference isolation, BLEU recalculation, real ZIP restoration, 300 predictions from official fairseq and synthetic checkpoints, and notebook compatibility passed. Verified schema, Python and HTML, and CLI help. The previous full suite was 174 passes and four skips. Colab external BLEU remains unmeasured.
 
-外部テキスト評価の再点検は **174 passed, 4 skipped**（125.23秒）。CLIのmetrics出力を `dev-text.jsonl` にすると、別拡張子でも既存devと同じprediction名になり上書きできる問題を回帰テストで再現し、全派生出力と保護対象のパス照合で生成前に拒否するよう修正した。Notebookは完了済みZIPをスキップした場合も、表示直前に読込専用 `verify` でdev入力・checkpoint・固定セット・外部prediction・corpus BLEUを再検証する。未完了時には生成せず停止し、検証でモデル読込やファイル更新を行わないこと、壊れたdev predictionを拒否することを確認した。
+External evaluation review **174 passed, 4 skipped** in 125.23 s. Reproduced a `dev-text.jsonl` derived prediction collision and now checks all output paths against protected inputs before generation. Restored results undergo read-only dev, checkpoint, fixed-set, prediction, and corpus BLEU verification before display. Incomplete evaluation stops and corrupt dev predictions are rejected.
 
-推論をstubにした既存試験に加え、有限の人工重みを保存したsmokeと公式fairseqの小型checkpointを実際のloader・tokenizer・既存beam-5 generatorで読み、各300件の外部生成・採点・検証を実行した。EOS/UNK集計と実際のcheckpoint stepも確認。これはCPU上の人工条件による配線検証であり、学習済み実teacherの翻訳性能評価ではない。`pip check`、Notebookのschema/Python/HTML、verify CLI、wheel buildと全Python source同梱も成功。T2TT/S2UT学習・Attention・既存runtime source・benchmark pinは変更していない。skipは従来通りCUDA 3件とPOSIX 1件。実データ/GPUの外部BLEU値は引き続き未測定。
+Alongside stubbed tests, actual loaders, tokenizers, and beam-5 generation evaluated 300 cases each with smoke and official fairseq tiny synthetic checkpoints. Verified EOS, UNK, and actual checkpoint step, `pip check`, notebook schema, Python and HTML, verify CLI, and wheel source. Skips were three CUDA and one POSIX. These are CPU integration results. Real GPU external BLEU remains unmeasured.
 
-保存済み8C 300件によるT2TT外部テキスト評価を追加し、全suiteは **170 passed, 4 skipped**（114.29秒）。追加16件では固定ID集合・決定的な順序・重複/欠落/改変の拒否、referenceを変えてもsource-only生成入力・設定が不変であること、native/benchmark正規化corpus BLEUの再計算、既存の正規化規則、UNK集計、完了済み・途中cacheの再利用と改変検出、best checkpoint以外や異なるdev生成設定の拒否を検査した。実際の固定benchmark ZIP publisher/restorerで、100件生成後の失敗→VM消失→残り200件だけ生成→完了後のVM消失→再生成なしの復元も成功。ニューラル計算はこの外部評価の統合試験ではstubを使い、既存generator自体の実モデル検証は従来のdev評価テストが引き続き通過している。
+Fixed 8C 300-sample evaluation full suite **170 passed, 4 skipped** in 114.29 s. Sixteen cases checked IDs and order, tamper rejection, reference-independent source-only generation, native and normalized BLEU, normalization, UNK, cache recovery, and checkpoint and dev settings. Real benchmark ZIPs restored after 100 predictions, generated only the remaining 200, and restored completion without regeneration. This integration used stubbed neural generation, with actual generation covered by dev tests.
 
-Notebook 6.1.1のCLI配線・独立stage名・dev値の読込・10例表示を検査し、schema/Python構文/HTML変換も成功。`pip check`、新CLIのhelp、56ローカルMarkdownリンク、wheel buildと全Python source同梱の照合も成功した。既存のT2TT/S2UT学習・Attention・CTC・Baseline登録・runtimeのPython source、benchmark revision pinは変更していない。4 skipは従来のCUDA 3件とPOSIX 1件。**実Driveの保存済み300件・学習済みT2TTを使うGPU評価は未実行であり、実際のFLEURS BLEU値は報告しない。**
+Verified notebook 6.1.1 commands, separate stages, dev values, ten examples, schema, Python and HTML, `pip check`, CLI help, 56 local links, and wheel sources. Skips were three CUDA and one POSIX. GPU evaluation with the user's saved Drive set and trained checkpoint remains untested, so no actual FLEURS BLEU is reported.
 
-同日の再点検は**154 passed, 4 skipped**。固定seedで長さ・空白・引用符・Unicode・未知文字の異なる40 pairを作り、2層decoderの途中層/最終層について、smokeと公式fairseqの4条件で単体/batch Attentionの一致を追加検証した。既存の保存・復元・中断・hash・native学習の検査も再実行し、新たな不具合は見つからなかった。`pip check`とenvironment検査、22 CLI、3 Notebookのschema/Python/HTML、53ローカルリンク、wheel内の全Python sourceの一致も成功。実行コードとNotebookの固定revision `107605f4f5bd7b53722d73ced3fa5a76560e7a9d`は変更せず、追加テストと本記録だけを更新した。CUDAの3件とPOSIXの1件は引き続きローカルでは未実行であり、実Colabの全コーパス完走を確認したという意味ではない。
+Same-day rerun **154 passed, 4 skipped**. Forty seeded pairs with varied length, whitespace, quotes, Unicode, and unknown characters matched single and batched attention for intermediate and final layers on smoke and official fairseq. Save, restore, interruption, hash, and native training also passed, plus `pip check`, environment checks, 22 CLIs, three notebook schemas, Python and HTML, 53 links, and wheel sources. The source pin was `107605f4f5bd7b53722d73ced3fa5a76560e7a9d`. Three CUDA and one POSIX case were skipped.
 
-2026-10-27の横断再点検は**150 passed, 4 skipped**。Attentionの全head平均・単一head・複数head、可変長padding・未知文字mask、単体抽出との数値一致、batch size 1の厳密一致、書き込み途中の中断と再利用、token/Attention予算超過の停止を確認した。ColabのCUDA接続試験へ単体/batch Attentionの一致検査を追加したが、ローカルのPyTorchはCPU buildのため実行していない。skipはCUDA必須の3件とPOSIX process group中断試験の1件。
+The 2026-10-27 rerun **150 passed, 4 skipped**. Checked all-head, single-head, and multi-head attention, padding, UNK, single and batch parity, exact batch size one, partial writes and reuse, and budget limits. Added CUDA attention parity to notebook preflight. Local CPU skipped three CUDA cases and one POSIX process-group case.
 
-NPZ保存後・外部checksum保存前の切断で、旧publisherがNPZを含まない完了ZIPを作る問題を再現して修正した。各前処理producerは内部payloadとmetadataを検証した出力だけに不足checksumを補い、元NPZのhash・mtimeを変えない。読込専用`get()`は入力を書き換えない。正常終了時に未完了NPZを残したstageの公開を拒否し、失敗時は完成pairだけを保存する。実benchmark ZIPを使い、旧完了ZIPから1 pairが漏れた新VM復元→不足分の作成→新しい増分ZIPからの再復元も成功した。既存Baseline・元コーパス・benchmark sourceは変更していない。
+Reproduced a disconnect after NPZ write and before its sidecar that left a completed ZIP missing one pair. Producers now verify internal payload and metadata before filling missing checksums. NPZ hashes and modification times remain stable. Read-only `get()` preserves inputs. Normal completion rejects unfinished NPZs, and failure saves finished pairs. Real benchmark ZIPs recovered the old missing pair and restored the new incremental pack.
 
-依存metadata/importのenvironment検査と`pip check`、22 CLIのhelp、3 Notebookのschema/Python構文/HTML変換、Markdownのローカルリンク、wheel buildと全Python sourceの同梱を確認した。STREAMING文書が独立trainer向けであることを明記し、本比較の事前ZIP取得と区別した。モデル・学習条件・precision・checkpoint選択・benchmark runtimeのpinは変更しない。今回の結果も実Colab/GPUでの全コーパス完走や翻訳品質を保証するものではない。
+Checked dependency metadata and imports, `pip check`, 22 CLI helps, three notebook schemas, Python and HTML, local links, and wheel sources. Clarified standalone prefetch versus the primary workflow's ZIP staging. Real-corpus Colab GPU training and translation quality require separate validation.
 
-2026-10-27、Attention抽出がpairごとにcheckpoint全体と不変な語彙を再hashする問題を修正した。checkpoint SHA256は1回、forwardは最大8 pairずつとし、padding後のtoken/Attention要素数でbatchを制限する。公式fairseqとsmokeの可変長・空白・未知文字を含むデータで、旧単体抽出との数値一致（atol 2e-6 / rtol 2e-5）、旧metadataと保存済みpacketの再利用・既存file hash不変、checkpoint改変と混在packetの拒否、予算内batch、進捗と再利用表示を検査した。全suiteは**136 passed, 3 skipped**。3件はCUDA必須の2件とWindowsでは実行できないPOSIX process group中断試験。
+On 2026-10-27, attention extraction changed from per-pair checkpoint and vocabulary hashing to one checkpoint SHA-256 and up to eight pairs per forward pass, bounded by padded token and attention counts. Verified old single extraction parity (atol 2e-6, rtol 2e-5), legacy reuse and hashes, tamper and mixed-packet rejection, batch limits, progress, and reuse on smoke and official fairseq. Full suite **136 passed, 3 skipped**, including two CUDA and one Windows POSIX skip.
 
-CPUのtiny人工モデル・64 MiBのoptimizer相当payloadを加えたcheckpoint・128 pairでは、旧版9.80秒（checkpoint SHA 128回）から修正版2.78秒（SHA 1回・16 forward）になった。Attention最大絶対差は5.96e-8。ファイルをOS cacheから読める人工条件での約3.52倍であり、実GPU・実teacher・実コーパスの速度予測として扱わない。Colabでの実速度とCUDAでのbatch結果は未検証。
+A tiny CPU fixture with 128 pairs and a 64 MiB optimizer-like checkpoint payload took 9.80 s with 128 hashes and 2.78 s with one hash and 16 forwards. Maximum attention difference was 5.96e-8. This is about 3.52× with locally cached files. GPU batch parity and Colab performance remain unmeasured.
 
-Colabのfull-manifestで共通文章と補助文字labelの不一致が報告された。alignment側のTSV readerがCSVの引用符処理を有効にしていたため、引用符を含むliteral fairseq labelを変形し、閉じていない引用符では後続rowまで取り込む問題を再現した。固定benchmarkと同じ`QUOTE_NONE`へ合わせ、header・column数・空/重複IDの検査を維持した。引用符4種類のmanifest生成とresume、引用符によるrow連結、破損TSV、実際に変更された文章の拒否を検査し、全suiteは**127 passed, 3 skipped**。元データ・label・語彙・学習条件の書き換えや照合の無効化は行わない。実データの不一致がこの読込不具合だけに起因するかは、Colabでのliteral TSV照合または修正版の再実行で確認する。
+Colab full-manifest reported a mismatch between common text and auxiliary labels. The TSV reader's CSV quoting changed literal labels and could merge rows after an unclosed quote. Matched the benchmark's `QUOTE_NONE` and preserved header, column, and ID validation. Tested four quote forms, resume, row merging, malformed TSV, and real text mismatches. Full suite **127 passed, 3 skipped**. Real-data attribution requires a literal TSV check or Colab rerun.
 
-2026-10-26の全段階ログ統合後の再検証は**115 passed, 3 skipped**。隣接benchmark checkoutが別作業で更新されていたため、Colabが導入した固定runtimeをテストで優先するようfixtureを修正した。明示的な検証用sourceは`S2ST_BENCHMARK_TEST_ROOT`で指定でき、既存benchmark checkoutは変更しない。固定版sourceを別配置した全suiteと、環境からimportできる固定版を隣接checkoutより優先する保存・復元テストを実行した。モデル・学習条件・runtimeのpinは変更していない。
+After unified logging on 2026-10-26, **115 passed, 3 skipped**. The fixture prioritizes the Colab-installed pin over an unrelated updated sibling benchmark checkout. `S2ST_BENCHMARK_TEST_ROOT` selects a separate verification checkout. Ran the full suite with pinned source and tested source precedence in save and restore.
 
-Colabから報告されたCPU preflightではPython 3.10.22・依存metadata・fairseq provenance・compiled batch sampler・benchmark pinが成功し、matplotlibだけが失敗していた。Notebook kernel由来の`MPLBACKEND=module://matplotlib_inline.backend_inline`を別venvへ継承する同じエラーをローカルで再現し、3つのNotebookで`MPLBACKEND=Agg`を設定した。各Notebookの実際の設定を適用した新規subprocessでmatplotlibのimportとPNG保存を検証した。短い失敗コマンドで省略されていたpreflight JSONも、失敗時の末尾ログ表示で読めることを確認した。
+Colab CPU preflight passed Python 3.10.22, dependencies, fairseq provenance, the compiled sampler, and benchmark pin, then failed Matplotlib. Reproduced the inherited `MPLBACKEND=module://matplotlib_inline.backend_inline` failure in a separate venv and set `MPLBACKEND=Agg` in three notebooks. Their settings passed new-process Matplotlib import and PNG save. Failure log tails expose preflight JSON.
 
-ColabのCPU test報告（95 passed / 1 failed）から、command引数をファイルとして調べる`identity_for`が長い`python -c`コードに対してLinuxの`ENAMETOOLONG`を受け取る問題を確認した。ファイルになり得ないこの場合だけを処理し、文字列全体はcommand identityへ引き続き含める。外部ファイルのhash照合とアクセス権エラーの停止は維持する。Linuxの例外を明示的に発生させる回帰テスト、権限エラー検査、実ZIPの中断復元を含む8件のruntimeテストと全suiteを検証した。
+A Colab CPU result of 95 passes and one failure exposed Linux `ENAMETOOLONG` when `identity_for` tried to treat long `python -c` input as a file. Handle that case while binding the complete command and preserving external file hash and permission checks. Verified Linux error simulation, permission errors, real ZIP interruption and restore, eight runtime tests, and the full suite.
 
-入力stagingの表示経路を修正し、関連するNotebook/CLIテスト**27 passed**。benchmarkがstderrへ出す進捗をNotebookから逐次表示してローカルへflushし、stdout JSONは別ファイルとして保持する。子processが終わる前に画面表示されたことを同期markerで検証し、childの非zero終了・ログ保存・中断後のchild終了も確認した。stagingそのもののalgorithm・pack配置・checksum・再利用条件は変更しない。NotebookのschemaとPython構文も確認した。
+Staging output changes passed **27 notebook and CLI tests**. Verified live stderr display and local flushing, separate stdout JSON, live output before child completion, failed exits, saved logs, and interruption cleanup. Also verified notebook schema and Python.
 
-環境構築・検査・JSON取得・入力準備・前処理・学習・推論・評価を共通の標準ライブラリloggerへ統合した。3つのNotebookでgit/uv/pipを含めた直接subprocess呼び出しの残存を検出し、インストール前に埋め込む関数が共通sourceとAST一致することを検査した。無出力の子processが終了する前に生存通知と実行中metadataを読めること、速い途中行も画面とファイルへ保存されること、JSON stdoutの分離、起動失敗・異常終了・不正JSON・中断終了を確認した。既存のGPU CSV監視とbenchmarkのZIP/runtimeは維持する。
+Unified the standard-library logger for setup, checks, JSON, preparation, training, inference, and evaluation. Verified AST parity of pre-install helpers and no direct subprocess calls in three notebooks. Covered liveness and running metadata, fast lines, JSON separation, launch and exit failure, invalid JSON, and interruption. GPU CSV and benchmark ZIP paths remain covered.
 
-WindowsではPOSIXのprocess groupを実行できないため、入れ子のobserverがgroupを分離しない設定を検査し、実際のgroup中断試験はskipした。3件のskipはこのPOSIX中断試験とCUDA必須の2件。CPUでのnative Trainerの数値一致・checkpoint再開・実benchmarkによる保存/復元は全suite内で成功した。Notebookのschema/Python/HTML変換、文書リンク、wheel buildと共通loggerを含む全Python moduleの同梱も確認した。
+Windows checked nested observer process-group settings and skipped actual POSIX group interruption. The three skips were that case and two CUDA cases. Native Trainer parity, checkpoint resume, and real benchmark recovery passed on CPU. Verified notebook schema, Python and HTML, links, and wheel modules including the logger.
 
-独立したWindows / Python 3.10.22 / PyTorch 2.7.1 CPU環境で、`PYTHONUTF8=1 python -m pytest -q`は**115 passed, 3 skipped**。strongレシピのSentencePiece 0.2.0を含むoptional dependenciesを使用し、`pip check`も成功した。Windowsではnative TSV内の日本語を読むためUTF-8 modeを有効にする。
+In an isolated Windows Python 3.10.22 and PyTorch 2.7.1 CPU environment, `PYTHONUTF8=1 python -m pytest -q` gave **115 passed, 3 skipped**. Installed optional dependencies including SentencePiece 0.2.0 and passed `pip check`. UTF-8 mode is required to read Japanese native TSVs on Windows.
 
-fairseqはbenchmark checkoutではなく、公式repositoryからcommit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`を別途取得した。Windowsのsymlink/C++ build制約のため、検証環境ではupstreamの`READTHEDOCS=1`経路でpure-Python packageをbuildした。モデルのPyTorch層とsourceは変更していない。source commit、tracked sourceのclean状態、installed Python sourceの内容一致を検証した。
+Fetched official fairseq commit `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99` separately. Used upstream `READTHEDOCS=1` to build a pure-Python package due to Windows symlink and C++ build constraints. Verified the clean commit, tracked sources, and installed Python source contents.
 
-今回の横断確認では、全CLIのヘルプ起動、主要ライブラリのimport、wheel buildと同梱ファイル、Python構文、README/docsのローカルリンクを確認した。3つのNotebookはnbformat 5.10.4の標準schema検証（警告もエラー扱い）に通過し、nbconvert 7.16.6でHTMLへ変換できた。ブラウザでの実表示はローカル接続制約により確認していない。外部モデルを取得する検査やColab上のインストール試験とは区別する。
+Verified CLI help, imports, wheel contents, Python syntax, and local Markdown links. Three notebooks passed nbformat 5.10.4 schema validation with warnings treated as errors and HTML conversion in nbconvert 7.16.6. Browser rendering, external checkpoints, and Colab installation were outside the local check.
 
-依存関係は`pip check`に加え、新しい`environment` CLIでpreprocess/evaluation/dev extrasのバージョンとimportを検査する。CUDA・benchmarkの固定revision・native batch samplerは明示オプションで必須にできる。ローカルの通常preflightは成功し、`--native`では未buildの`fairseq.data.data_utils_fast`を検出して終了コード1になることを確認した。このWindows環境から本番native学習を開始できるという意味ではない。
+`environment` verifies metadata and imports for preprocess, evaluation, and dev extras alongside `pip check`. Explicit flags require CUDA, benchmark pin, and the native sampler. Normal local preflight passed. `--native` found unbuilt `fairseq.data.data_utils_fast` and exited 1.
 
-ローカル環境のPyYAML 6.0.3・Cython 3.3.0・setuptools 84.2.0は、ColabのPyYAML 6.0.2・Cython 3.2.9・setuptools<81と異なる。benchmarkはテストfixtureから固定sourceを読み込んでおり、ローカルのpackage metadataへ導入していない。従って`pip check`の成功はColabの依存環境全体の再現を証明しない。ColabからのCPU preflight報告ではcompiled batch samplerまで成功しているが、Linuxでのnative CLI epoch iterator全体・実GPU更新・外部モデル込みの実行は引き続き別途検証が必要。古いOmegaConfのmetadataに対するpipのdeprecationと、upstream fairseqのimportlib/autocast deprecationは残っているが、今回のテストではエラーではない。
+Local PyYAML 6.0.3, Cython 3.3.0, and setuptools 84.2.0 differ from the Colab pins 6.0.2, 3.2.9, and <81. The benchmark source was loaded from a test fixture outside package metadata. Colab CPU preflight reported a working compiled sampler. Linux native CLI epochs, GPU updates, and external models need separate verification. Existing OmegaConf metadata and fairseq importlib and autocast deprecations remained warnings.
 
-確認した内容:
+Checks covered the following behavior.
 
-- NotebookのT2TT/Monotonicの4通りのスイッチ、2条件/3条件・ASR有無の評価コマンドを実際のCLI parserへ渡して検証。Monotonicはteacher不要、評価は共通dev条件であることを確認。
-- standalone Notebookの全CLIコマンドと5条件を検査。シェルescapeを引数listと`check=True`へ変更し、空白付きpathの保持と失敗時の停止を検証。学習レシピ・更新数・既存のコードpinは保持した。
-- 環境preflightが依存不整合・optional extraの異なるversion・DLL import失敗・Python不一致・fairseq provenance不一致・native samplerの異常を検出することを確認。
+- Passed all four T2TT and Monotonic switch combinations and two- and three-condition evaluation with and without ASR through real CLI parsers. Monotonic uses no teacher and shares dev settings.
+- Checked all standalone notebook commands and five conditions. Argument lists with `check=True` preserve spaces in paths and stop on failure.
+- Environment preflight detects dependency conflicts, wrong optional versions, DLL import failures, Python and fairseq mismatches, and native sampler errors.
 
-- 固定revision `4361e55a99c7f4ea3a00c5c138f6820c34a07d06`のbenchmark runtimeを直接使用。実ZIP publisher・検証・復元を使い、pair処理の途中失敗→新VMを想定した復元→完了済みstageの再利用を検証。既存pairを後続増分packへ複製しない。
-- benchmarkのCPU WAV packを作成後、原本WAVを参照不能にしてもGPU側staging関数で復元可能。native fairseqの辞書・設定・TSV・音声も原本payloadを参照不能にした状態でローカルコピーから読み込めることを確認。
-- benchmarkの実常駐session/upload workerを通してT2TTを2更新し、ZIPへ保存。作業ディレクトリを失った状態から同じcheckpoint・optimizer・bestを復元し、完了済み更新を再学習しない。
-- Windowsでは開いているファイルのatomic replaceが拒否されるため、T2TTの常駐session統合試験は最終更新で1 snapshotを作成する設定を使用。native hook側で周期保存を別途検証する。Colab/Linux向けbenchmark実装にWindows用の変更は加えていない。
-- native S2UTにbenchmarkのperformance hooks・勾配監査を適用し、optimizer更新とsnapshot freeze protocolを検証。native contract・benchmark性能状態・optimizer・勾配監査を完全snapshotへ含める。
-- 壊れた増分ZIPと保存容量予算超過を拒否し、既存復旧点を保持。最後のupload失敗でローカルに残る完了markerを永続化済みと誤認せず、再実行時に再保存する。ColabのローカルROOT、Drive PERSISTENT、runtime pin、通常600秒間隔・1024GB予算を静的検証。
-- 別途学習した公式fairseq checkpointのrecipe/metadata/データhashを検証し、読み取り専用Baselineとして登録。snapshot ZIPのhash・member検査と、再開時のsnapshot固定を検証。
-- 新経路で公式Trainerの実optimizer更新を実行。転移モデルの初期重みは同じseedの公式モデルとbit一致し、beta=0の更新後parameterも公式Trainerとbit一致。
-- native optimizer/checkpointの保存・再開、完了runの再実行、teacher削除後のnative dev検証とstock SequenceGeneratorによるBaseline/転移モデルの共通推論を確認。
-- report-onlyの全dev unit main lossによるbest選択とvalidation前後のRNG保持を検証。FP16の確認済みoverflowだけを再試行する制御は人工scalerで同一batch・RNG・buffer復元を検査。
-- 元のfull train/dev・保存unit列のimportを検証し、prepared targetの変更・辞書やrecipeの改変・生成条件やcheckpointが異なる評価を検出。
-- 新Colabは登録BaselineからT2TT/teacher用backbone設定を生成。native FP16接続試験、full train/dev前処理、共通推論・評価の構文と既定値を検証。
-- native S2UT Baselineとlocal extensionのlogitが厳密一致。
-- beta=0がBaselineに厳密一致。uniform priorも丸め誤差内で一致。
-- biased priorが実際のcontext/outputを変更し、Cross-Attentionへ勾配が流れる。
-- T2TT/S2UTのnative Encoder/Decoder/Cross-Attention layer型と共有parameter shapeが一致。
-- 人工行列のprojection、row normalization、mask、invalid row、CTC繰返しlabel/Viterbi、unit reduction/timing、annealing endpoint。
-- train-only文字語彙、split leakage guard、artifact hash/metadata、外部checksum保存中断からの再利用。
-- 人工音声/CTC/unitを用い、nativeモデルのT2TT学習→Attention→projection→4条件のS2UT学習→可視化を実行。
-- 外部モデル不要のsmoke pipelineで4条件を完走し、T2TT/MT/CTC/teacherを削除した後にもunitとテスト音を生成。
-- checkpointと日本語音声だけをコピーした配置で推論成功。参照text付き推論入力は拒否。
-- 中断再開と連続学習のCPU parameterがbit一致。変更したseed/推論条件のresumeを拒否。
-- manifest/推論/評価のidempotent resumeと、source-only入力のexport。
-- T2TT/S2UT構成比較は全共有項目MATCH。4条件の制御変数比較も`fair_comparison=true`。
-- uniform混合でpadding・EOS・無効rowを復活させず、beta=0の結果が変わらない。
-- 有効row数の異なるmicrobatchで、KLの和/全有効row数が一括計算と勾配一致。実際のtrainerでも一括batchとgradient accumulationのloss・更新勾配が一致。
-- FBANK+Conv時刻supportが実際の畳み込みの勾配supportと一致し、端点paddingと出力長不一致を処理する。
-- 単調priorでT2TT/CTC teacherなしに学習でき、dev診断とteacher-free推論に対応する。
-- strongのsource/target文字補助decoderとdecoder CTCを学習し、重み付き補助lossがupstream fairseq MultitaskCriterionと数値一致。
-- strongの16-bit FBANK scale・utterance CMVNがnative特徴抽出と一致。SpecAugment・補助decoder dropoutを含む連続学習/再開のCPU parameterがbit一致。
-- strongのBaseline / Annealed Monotonic / Annealed T2TTで同じ初期重み・レシピを確認し、異なるsource mappingの比較を拒否。
-- train-only補助文字語彙/SP modelをcheckpointへ内包。強いbaselineもcheckpointと日本語音声だけでunit推論可能。
-- alignment診断で元の文字数に対するcoverage、unit row率、raw/平滑化entropy、PNG/NPZを生成。
-- 既定strong構成（encoder 12 / decoder 6、dim 256、補助decoder各2層）でも人工音声・unitによるforward/backwardと有限勾配を確認。
-- wheelにstrong YAMLと追加moduleを同梱。ColabのPython構文・CLI引数を静的検証（Colab上での実行とは別）。
-- pilotのtrain/dev部分集合の再現性、元split保持、test音声の非読み出し、入力hash/seed/上限を変えたresumeの拒否を確認。
-- corpus aliasと旧Colab音声pathの移設を扱い、除外するtest rowにある既知のsplit leakageも検出。
-- strongの3条件コマンドとbeta=0の後半区間を検査。コマンド失敗時の終了コード・ログ・所要時間を保存。
-- pilot集計で再開時のstep重複を扱い、条件間で異なるdev評価data/configの混在を拒否。専用notebookの構文と接続試験用JSONLを検証。
-- ローカルのGTX 1650でnvidia-smiのCSV採取とサンプラ終了を確認（GPU学習は行っていない）。
-- 先頭入力の消費と後続入力の取得が重なり、未完了の後続入力を待たずに先頭を使用できること、queue上限を確認。
-- `max_tokens`による部分消費でも順序を保持し、未消費の先読みをcheckpoint位置に含めない。
-- 5つのmethod/prior条件で、同期版・複数worker/cache版・worker数を変えたresumeのCPU parameter/RNGが一致。
-- native strongでもSpecAugmentと補助decoder dropoutを含め、同期・先読み/cache・resumeのCPU parameterが一致。
-- キャッシュ同時要求の重複生成防止、LRU容量制限、容量不足時の非保存、破損検知、元artifact hash保持、変更したsourceの拒否を確認。
-- dev payloadの読み出し前に最初の学習forwardへ進み、後続sampleのunit config不一致は消費時に停止することを確認。
-- pilotのdev上限は関数・CLI・Colabとも200件であることを確認。
-- T2TTのsource-only自己回帰生成・EOS/出力上限・dev全件のcorpus BLEUを検証。既知の完全一致訳でBLEU=100となり、参照訳をdecoderへ渡さず、音声がなくても評価できる。
-- native fairseq checkpointでもT2TT text生成/評価を実行。生成・評価の途中再開、変更した生成条件・dev data・改変した予測cacheの拒否を確認。
-- pilot集計でT2TT dev text評価を添付し、異なるteacher checkpoint・dev data・test評価の混入を拒否。wheelに新しい評価CLI/moduleを同梱し、両Colabの構文を確認。
+- Used benchmark revision `4361e55a99c7f4ea3a00c5c138f6820c34a07d06` directly. Real ZIP publication, verification, and restore recovered interrupted per-pair processing on a fresh VM fixture and reused completed stages. Incremental packs omit already saved pairs.
+- Restored GPU-side staging from CPU WAV packs with source WAVs unavailable. Native fairseq read dictionaries, config, TSVs, and audio from local copies.
+- Ran two T2TT updates through the real resident session and upload worker. Restored checkpoint, optimizer, and best from ZIP after losing work. The completed updates were retained.
+- Windows refuses atomic replacement of open files, so the resident T2TT test made one final snapshot. The native hook separately covered periodic saves.
+- Tested native S2UT optimizer updates and snapshot freeze through benchmark performance hooks and gradient auditing. Full snapshots included contract, performance, optimizer, and audit state.
+- Rejected corrupt incremental ZIPs and budget excess while retaining existing recovery points. An upload failure left local completion evidence that was republished on rerun. Checked Colab paths, pin, 600-second interval, and 1024 GB budget.
+- Registered a separately trained official fairseq checkpoint read-only after verifying recipe, metadata, and data hashes. Verified snapshot ZIP and member hashes and pinned restore.
+- Ran official Trainer updates. Transfer initial weights matched the same-seed official model bitwise, and beta-zero post-update parameters matched the official Trainer.
+- Verified native optimizer and checkpoint save and resume, rerunning completed runs, dev validation after teacher removal, and stock SequenceGenerator inference shared by Baseline and transfer.
+- Verified report-only best selection by full dev unit main loss and RNG preservation across validation. A synthetic scaler checked retries for confirmed FP16 overflow with the same batch, RNG, and buffers.
+- Verified full train/dev and saved unit import and rejected changed prepared targets, dictionaries, recipes, generation settings, and checkpoints.
+- The Colab workflow builds the T2TT and teacher backbone from Baseline registration. Checked native FP16 preflight, full train/dev preparation, and shared inference and evaluation defaults and syntax.
+- Native S2UT Baseline and local extension logits matched exactly.
+- Beta zero matched Baseline exactly. A uniform prior matched within rounding tolerance.
+- A biased prior changed context and output and backpropagated into cross-attention.
+- T2TT and S2UT matched native encoder, decoder, and cross-attention types and shared parameter shapes.
+- Checked synthetic projection, row normalization, masks, invalid rows, CTC repeats and Viterbi, unit reduction and timing, and the annealing endpoint.
+- Checked train-only character vocabulary, split leakage, artifact hash and metadata checks, and recovery after interrupted checksum writes.
+- Ran native T2TT training, attention, projection, four S2UT conditions, and visualization with synthetic audio, CTC, and units.
+- Ran four smoke conditions without external models. Generated units and test audio after removing T2TT, MT, CTC, and teacher data.
+- Inference worked with only the checkpoint and Japanese audio. Inputs containing reference text were rejected.
+- Interrupted and continuous CPU training matched parameters bitwise. Changed seeds or inference settings blocked resume.
+- Verified idempotent manifest, inference, and evaluation resume and source-only export.
+- All shared architecture settings were `MATCH`. Four-condition control comparison reported `fair_comparison=true`.
+- Uniform mixing preserved zero padding, EOS, and invalid rows and beta-zero output.
+- Across microbatches with varying valid rows, total KL divided by total valid rows matched joint gradients. The Trainer also matched full-batch and accumulated losses and gradients.
+- FBANK and convolution time support matched convolution gradient support, including endpoint padding and output-length mismatch checks.
+- Monotonic prior trained without T2TT or CTC and supported dev diagnostics and teacher-free inference.
+- Strong source and target character decoders and decoder CTC trained, and weighted auxiliary losses matched upstream fairseq MultitaskCriterion.
+- Strong 16-bit FBANK scaling and utterance CMVN matched native extraction. Continuous and resumed CPU runs matched parameters bitwise with SpecAugment and auxiliary decoder dropout.
+- Strong Baseline, Annealed Monotonic, and Annealed T2TT shared initial weights and recipe. Comparison rejected different source mappings.
+- Checkpoints embed train-only auxiliary character vocabularies and SentencePiece models. Strong Baseline infers units from the checkpoint and Japanese audio.
+- Alignment diagnostics produced original-character coverage, unit row rate, raw and smoothed entropy, and PNG and NPZ files.
+- The default strong model (12 encoder layers, 6 decoder layers, dimension 256, and two layers per auxiliary decoder) produced finite gradients on synthetic audio and units.
+- The wheel included the strong YAML and added modules. Checked Colab syntax and CLI arguments statically.
+- Pilot train/dev selection was reproducible, preserved splits, skipped test audio reads, and rejected changed input hashes, seed, or limits on resume.
+- Handled corpus aliases and moved Colab audio paths and detected known split leakage in excluded test rows.
+- Checked three strong commands and the beta-zero tail. Logged exit codes, full output, and elapsed time on command failure.
+- Pilot reporting deduplicated resumed steps and rejected mismatched dev data or config. Verified dedicated notebook syntax and integration JSONL.
+- Verified `nvidia-smi` CSV collection and sampler shutdown on a local GTX 1650.
+- Initial inputs were consumed while later inputs were being fetched, and the queue stayed bounded.
+- Partial consumption under `max_tokens` preserved order and kept unconsumed prefetch out of checkpoint position.
+- Across five method and prior conditions, synchronous, cached multiworker, and resumed worker-count variants matched CPU parameters and RNG.
+- Strong native parameters matched on CPU across synchronous, cached, and resumed loading with SpecAugment and auxiliary dropout.
+- Checked concurrent cache deduplication, LRU limits, no caching with insufficient space, corruption detection, original artifact hashes, and changed-source rejection.
+- The first training forward ran before dev payload reads. A later sample's unit config mismatch stopped when that sample was consumed.
+- Pilot dev limit was 200 in the function, CLI, and Colab.
+- Verified source-only T2TT autoregressive generation, EOS and output limits, and corpus BLEU on all dev samples. Exact translations scored 100, references stayed out of decoding, and evaluation worked without audio.
+- Native fairseq checkpoint text generation and evaluation passed. Tested interruption recovery and rejection of changed generation settings, dev data, and prediction caches.
+- Pilot summaries attached T2TT dev evaluation and rejected different teachers, dev data, or test evaluations. Checked new evaluation CLI and module in the wheel and syntax of both Colab notebooks.
 
-現在のCUDAに関する3件のskipは**native TrainerのFP16接続試験**、**T2TT Attentionの単体/batch一致試験**、**実CTC/HuBERT/公式vocoderを含むCUDA統合テスト**。加えてWindowsではPOSIXの入れ子process group中断試験をskipする。pure-Python fairseq環境にはCythonのbatch sampler拡張がないため、ローカルでは実Trainerのmicrobatch更新までを検証し、CLIのepoch iterator全体は未実行。Colabは通常のLinux buildを使う。
+Three CUDA skips cover native FP16 Trainer connectivity, single and batched T2TT attention parity, and full CTC, HuBERT, and official vocoder integration. Windows also skips nested POSIX process-group interruption. The pure-Python fairseq build covers Trainer microbatch updates. Colab's Linux build supplies the compiled sampler for the CLI epoch iterator.
 
-Drive上では`experiment-001`の`paper-fisher-v1` run、365000更新snapshot、対応するpreparedデータ・unitの保存先とJSONの学習設定を確認した。約1 GBの実checkpoint本体のローカル取得・登録、実コーパスの前処理、本学習、T2TT dev text BLEU、実音声品質、ASR-BLEUによる手法比較、Colab上の実行は未検証。人工smokeやnative Trainerテストの成功を研究仮説の検証結果として扱わない。
+Drive records confirmed `experiment-001`, recipe `paper-fisher-v1`, a 365000-update snapshot, prepared data and unit paths, and training config JSON. Download and registration of the approximately 1 GB checkpoint, real-corpus preparation and training, dev T2TT BLEU, audio quality, ASR-BLEU comparisons, and Colab execution remain unverified. Smoke and Trainer checks establish implementation behavior.
 
-ローカルで準備した検証環境は`outputs/native-venv/`。ここから`python -m pytest -q`、各CLIを実行できる。`outputs/`内のPython、依存package、取得したupstream source、checkpoint、音声、画像はGit対象外。
+The local verification environment is `outputs/native-venv/`. Use it for `python -m pytest -q` and CLI commands. Git excludes the downloaded Python and dependencies, upstream sources, checkpoints, audio, and images under `outputs/`.

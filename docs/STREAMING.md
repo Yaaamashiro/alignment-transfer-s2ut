@@ -1,25 +1,25 @@
-# 学習入力の先読みとローカルキャッシュ
+# Training input prefetch and local caching
 
-この文書はhistorical standalone経路の説明です。現在の主比較は[native研究フロー](BENCHMARK_COMPARISON.md)を使用してください。
+This page describes the historical standalone workflow. See the [native workflow](BENCHMARK_COMPARISON.md) for the current comparison.
 
-この文書は`--trainer legacy`の独立trainerとT2TTの入力先読みを対象とする。現行のColab S2UTは、固定benchmarkのZIP取得・検証をfairseqのデータローダーから呼び出す。 [Colabの入出力と再開](COLAB_RUNTIME.md)
+The standalone trainer (`--trainer legacy`) and T2TT use the prefetch pipeline below. Current Colab S2UT uses the fairseq data loader to fetch and verify ZIPs through the pinned benchmark runtime. [Colab I/O and recovery](COLAB_RUNTIME.md)
 
-必要な入力から読み出し、現在のbatchを学習している間にCPU workerが次の入力を準備する。全データをVMへコピーしてから学習を始める手順は不要。
+Workers fetch inputs as needed and prepare the next batch while the GPU trains on the current batch.
 
 ```text
-Drive上の音声・unit・teacher
-          ↓ 必要なsampleだけ取得・検証
-    CPU worker × 2 ── 未拡張FBANK/CMVN・artifactのlocal cache
-          ↓ 順序を保つ、上限付きの先読みqueue
-    現在のoptimizer更新用microbatches
-          ↓ main threadでSpecAugment → pinned memory転送
-        GPUで学習
-          └─ この間にもCPU workerが次の入力を取得・準備
+Audio, units, and teacher artifacts in Drive
+          ↓ Fetch and verify required samples
+    Two CPU workers and a local cache for unaugmented FBANK/CMVN and artifacts
+          ↓ Ordered, bounded prefetch queue
+    Microbatches for the current optimizer update
+          ↓ SpecAugment on the main thread, then pinned-memory transfer
+        GPU training
+          └─ CPU workers continue fetching and preparing inputs
 ```
 
-対象は、音声と前処理済みunit/teacherが元の保存先に存在する学習stage。CTC・HuBERT・teacherの生成は学習前に実行する。manifestの選択・hash生成や前処理CLIそのものを、GPU学習と同時実行する機能ではない。
+This pipeline applies to training stages with existing audio, unit, and teacher artifacts. Run CTC, HuBERT, and teacher construction before training. Manifest selection and hashing are also preparation steps.
 
-## 設定
+## Configuration
 
 ```bash
 python -m alignment_transfer_s2ut.train_s2ut --trainer legacy \
@@ -31,49 +31,49 @@ python -m alignment_transfer_s2ut.train_s2ut --trainer legacy \
   --pin-memory --device cuda --output outputs/annealed_t2tt
 ```
 
-| 引数 | 意味 |
+| Argument | Meaning |
 |---|---|
-| `--loader-workers` | CPU読み込みthread数。通常CLIの既定0は同期処理、pilotの既定は2 |
-| `--prefetch-batches` | 指定batch-size換算で保持する先読み量。既定2 |
-| `--cache-dir` | VM上の専用cache directory。未指定なら永続cacheなし |
-| `--cache-gb` | cache payloadの上限GiB。既定8 |
-| `--cache-reserve-gb` | 書き込み時に残す空きディスクGiB。既定1 |
-| `--pin-memory` | main threadからCUDAへpinned memory・non-blocking転送 |
+| `--loader-workers` | CPU loader threads. The CLI defaults to 0 for synchronous loading, and the pilot defaults to 2 |
+| `--prefetch-batches` | Prefetch capacity in units of the configured batch size. Default 2 |
+| `--cache-dir` | Dedicated local VM directory. Omit it to run without a persistent cache |
+| `--cache-gb` | Maximum cache payload in GiB. Default 8 |
+| `--cache-reserve-gb` | Free disk space to retain when writing, in GiB. Default 1 |
+| `--pin-memory` | Pinned memory and nonblocking transfer from the main thread to CUDA |
 
-batch size 8・prefetch 2では最大16 sample分を先読みする。これに加えて、現在のoptimizer更新に必要なupdate-frequency分のmicrobatchを保持する。実際のbyte数は音声・unit長に依存する。
+Batch size 8 and prefetch depth 2 prepare up to 16 samples, in addition to the microbatches needed for the current optimizer update. Actual bytes depend on audio and unit lengths.
 
-[専用pilot Colab](../notebooks/legacy/pilot.ipynb)は既定2 worker・2 batch先読み・8 GiB cacheを使用し、3条件で同じcacheを共有する。`LOADER_WORKERS`・`PREFETCH_BATCHES`・`LOCAL_CACHE`・`CACHE_GB`で設定する。T2TTの文字batchにも順序付き先読みを利用できる。
+The legacy pilot uses two workers, two prefetched batches, and an 8 GiB cache shared across three conditions. Configure them with `LOADER_WORKERS`, `PREFETCH_BATCHES`, `LOCAL_CACHE`, and `CACHE_GB`. T2TT character batches also support ordered prefetch. [Pilot notebook](../notebooks/legacy/pilot.ipynb)
 
-## キャッシュと検証
+## Cache and verification
 
-- 未拡張のsource特徴量（FBANKと任意のCMVN）、unit、teacherのnumeric payloadを必要時に保存する。SpecAugmentの結果は保存しない。
-- 特徴量のキーには音声path/size/mtime・manifest SHA256・backend・特徴量設定・実装と数値runtimeの識別を含む。初回作成時に音声SHA256を検証する。
-- unit/teacherは元artifactの内部payload hash・外部checksum・metadataを検証し、元のファイルhashも保存する。local cacheへ再格納してもteacherの`units_hash`は元artifactを指す。
-- 学習では固定manifestの英語音声hashをunit/teacher metadataと照合する。source音声の特徴量は、検証したsourceから作成する。
-- cache hitでもlocal payload hashを検証する。元fileのsize/mtimeやsidecarが変われば別entryとして検証し直す。入力は固定されたcanonical manifestとartifactを使用する。
-- 完成したpayloadだけatomicに公開する。容量が足りない場合は、使用中のentryを避けて古いcache payloadを削除する。保存できない大きさや空き容量なら、そのsampleをcacheへ残さず処理する。
-- cacheの削除対象は専用directory内の管理ファイルだけ。元の音声・unit・teacherは変更しない。空でない未知のdirectory、入力directory内、ColabのDrive配下はcacheとして拒否する。
+- Cache unaugmented source features (FBANK and optional CMVN), units, and numeric teacher payloads on demand. Apply SpecAugment after reading cached features.
+- Feature keys bind the audio path, size, and modification time, manifest SHA-256, backend, feature settings, implementation, and numeric runtime. Verify the audio SHA-256 when creating an entry.
+- Verify unit and teacher metadata, internal payload hashes, and external checksums, and retain the original file hashes. Teacher `units_hash` always refers to the original artifact.
+- Training checks the canonical manifest's English audio hash against unit and teacher metadata. Source features come from verified source audio.
+- Verify the local payload hash on cache hits. A changed source size, modification time, or sidecar is checked as a separate entry. Use fixed canonical inputs.
+- Publish complete payloads atomically. When space is limited, evict older entries that are out of use. Process oversized samples or samples that exceed available space without caching them.
+- Evict only managed files inside the dedicated cache. The cache rejects nonempty unknown directories, input directories, and locations on Colab Drive.
 
-cacheはVM上の一時領域として使用する。Colab再起動で消えても、必要なsampleから再作成する。3条件を順番に実行すると、同じVMのcacheを共有できる。
+The cache is temporary VM storage and is rebuilt on demand after a runtime reset. Sequential runs can share the same VM cache.
 
-## 順序・再開・エラー
+## Ordering, recovery, and errors
 
-workerの完了順に関わらず、sampleは既定のseed/epoch permutation順に取り出す。`max_tokens`でbatchを縮めても、先に準備済みの残りsampleを捨てない。先読みしただけではcheckpointのepoch/cursorは進まない。
+Consume samples in the original seed and epoch permutation regardless of worker completion order. Keep remaining prefetched samples if `max_tokens` shrinks a batch. Advance the checkpoint epoch and cursor only as training consumes samples.
 
-workerは読み込み・決定的な特徴量処理とprior投影だけを行う。NumPyのSpecAugment、モデルの乱数、CUDA操作は学習threadへ残す。CPU検証では、同期・先読み・cacheのcold/warm状態・worker数を変えた再開でparameterが一致する。
+Workers read inputs, compute deterministic features, and project priors. The training thread handles NumPy SpecAugment, model RNG, and CUDA. CPU tests found identical parameters across synchronous and prefetched loading, cold and warm caches, and worker changes on resume.
 
-起動時は基準1件のunit/teacherでconfig identityを固定し、他のartifactは取り出す際にそのidentity・split・manifest・hashを検証する。必要な入力の欠損・checksum不一致・config混入は呼び出し元へ伝え、sampleを飛ばさず停止する。先読みで未消費のsampleは学習済みと数えない。
+At startup, bind the configuration identity from one reference unit and teacher artifact. Check identity, split, manifest, and hashes when reading subsequent artifacts. Missing inputs, checksum errors, and incompatible settings stop the run at the affected sample. Prefetched samples count only when consumed.
 
-worker数・先読み数・cache位置などのI/O設定は`experiment.json`とcheckpointの`input_pipeline`へ記録する。これらは学習順や目的関数を変えず、同じコードのresumeでは変更できる。実験の速度を比較する場合は全条件で揃える。異なる実装コードのcheckpoint再開は既存のhash契約により拒否する。
+`experiment.json` and the checkpoint's `input_pipeline` record worker count, prefetch depth, cache path, and other I/O settings. You can change these when resuming with the same code because they preserve sample order and the objective. Match them for speed comparisons. The implementation hash controls checkpoint compatibility.
 
-## 計測
+## Timing
 
-`metrics.jsonl`へ更新ごとに次を保存する。
+Record these values per update in `metrics.jsonl`.
 
-- `input/data_wait_seconds`：必要なmicrobatchの取得待ちとCPU collateに実際に待ったwall time。background処理の総CPU時間ではない。
-- `input/optimization_seconds`：CPU augmentation・転送・forward/backward・optimizerのwall time。CUDAでは更新終了を同期して測定する。
-- `input/loader_workers`：その更新でのworker数。
+- `input/data_wait_seconds` measures wall-clock waiting for required microbatches and CPU collation.
+- `input/optimization_seconds` measures wall time for CPU augmentation, transfer, forward and backward passes, and the optimizer. On CUDA, synchronize at the end of the update.
+- `input/loader_workers` gives the worker count for the update.
 
-validation・checkpoint保存・ログI/Oは上記のoptimization時間に含まない。pilot summaryにも待ち時間とoptimization時間の合計を記録し、GPU使用率CSVと照合できる。
+Optimization timing excludes validation, checkpoint saves, and log I/O. The pilot summary also records total waiting and optimization time for comparison with the GPU utilization CSV.
 
-実コーパス・Colabでの速度向上率は未計測。ローカルでは取得と消費の重なり、queue上限、cache再利用/破損検知/容量制限、学習結果の一致を検証する。
+Local tests cover overlapping fetch and consumption, queue bounds, cache reuse, corruption detection, storage limits, and matching training results. Speedups on a real corpus in Colab remain unmeasured.

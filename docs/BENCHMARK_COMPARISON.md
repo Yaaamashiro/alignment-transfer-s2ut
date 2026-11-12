@@ -1,45 +1,45 @@
-# 学習と比較
+# Training and comparison
 
-主な入口は [training.ipynb](../notebooks/colab/training.ipynb) と [evaluate.ipynb](../notebooks/colab/evaluate.ipynb)。
+Use [training.ipynb](../notebooks/colab/training.ipynb) for preparation and training and [evaluate.ipynb](../notebooks/colab/evaluate.ipynb) for inference and comparison.
 
-## 入力と実験ID
+## Inputs and experiment IDs
 
-既定IDはEXPERIMENT_ID=experiment-001、T2TT_RUN_ID=t2tt-001。IDは保存先を識別する名前で、コーパスの種類や件数を指定しない。
+The defaults are `EXPERIMENT_ID=experiment-001` and `T2TT_RUN_ID=t2tt-001`. Each ID names a storage location. Select the corpus and manifest separately.
 
-DATA_CONFIGにデータ設定YAMLを選ぶ。既定の [colab.yaml](../configs/data/colab.yaml) のcorpus_rootとaccepted_manifest、またはNotebookのCORPUS_ROOT_OVERRIDEとSOURCE_MANIFEST_OVERRIDEに入力先を設定する。T2TTの元テキストはteacher_source_manifestかT2TT_SOURCE_MANIFEST_OVERRIDEへ指定する。
+Select a data YAML with `DATA_CONFIG`. Set `corpus_root` and `accepted_manifest` there, or set `CORPUS_ROOT_OVERRIDE` and `SOURCE_MANIFEST_OVERRIDE` in the notebook. Set the T2TT source text with `teacher_source_manifest` or `T2TT_SOURCE_MANIFEST_OVERRIDE`. [Default configuration](../configs/data/colab.yaml)
 
-speech manifestは `pair_id`、`split`、`ja_text`、`en_text`、`ja_audio`、`en_audio`、`ja_sha256`、`en_sha256`、`ja_duration`、`en_duration` を持つJSONL。durationは秒、sha256はWAV全体の小文字16進SHA-256。音声は16 kHz PCM16 WAVを使用する。audioはコーパスルートからの相対パス、またはルート配下の絶対パス。ja_wav_16k / en_wav_16k形式も読み込める。splitはtrain/dev/testを維持し、前処理と学習はtrain/devを使う。corpusとsource_idは任意。qc_statusがある場合はacceptedが必要。
+The speech manifest is JSONL with `pair_id`, `split`, `ja_text`, `en_text`, `ja_audio`, `en_audio`, `ja_sha256`, `en_sha256`, `ja_duration`, and `en_duration`. Durations are in seconds. Hashes are lowercase hexadecimal SHA-256 of the complete WAV. Use 16 kHz PCM16 WAVs and paths relative to the corpus root or absolute paths under it. The reader also accepts `ja_wav_16k` and `en_wav_16k`. Preserve the `train`, `dev`, and `test` labels. Preparation and training use `train` and `dev`. `corpus` and `source_id` are optional. If present, `qc_status` must be `accepted`.
 
-release_summaryは任意。QCリリースの場合はcompleteとsplit別accepted件数を検査する。expected_pairsを指定するとtrain/devの合計件数も検査する。未指定なら入力manifestの件数を使う。
+`release_summary` is optional. For a QC release, the importer checks `complete` and accepted counts by split. Set `expected_pairs` to verify the combined train and dev count. Otherwise the importer uses the manifest count.
 
-保存済みrunの再開では、元の実験IDと入出力設定を使う。 [コーパス設定例](../configs/data/kokoro_jparacrawl.example.yaml)
+Resume saved runs with the original experiment ID and input and output settings. [Example corpus configuration](../configs/data/kokoro_jparacrawl.example.yaml)
 
 ## training.ipynb
 
-1. EXPERIMENT_IDを設定し、CPUでPREPARE_AUDIO_PACKS=Trueにして音声ZIPを作る。AUDIO_PACK_WORKERSは既定2、整数1〜4でCPU作成のみ並列化する。完成済みZIPは再利用する。
-2. GPUへ切り替え、Falseにして同じ設定で上から実行する。小規模FP16の更新・保存・再開を合成音声で検査する。この事前検査は実コーパスでの実行確認を代替しない。
-3. T2TTは指定した保存先の学習済みSentencePieceを復元できる。新たに学習する場合は新しいT2TT_RUN_IDでRUN_T2TT=Trueにする。EVALUATE_T2TT=Trueでdev BLEU・翻訳例・曲線を確認する。
-4. unit・辞書・fairseqデータを準備し、登録事前検査を確認する。RUN_BASELINE=TrueでBaselineを400,000 updates学習する。
-5. RUN_TEACHER_ARTIFACTS=Trueで元T2TT manifestと音声manifestの全ID・split・本文を照合し、全層Attention・CTC alignment・projected Teacherを構築する。
-6. top-p診断を見てMASK_TOP_Pを明示設定し、λ/τを校正する。
-7. RUN_DISTILLATION / RUN_ANNEALED_DISTILLATION / RUN_MASK_DISTILLATIONで転移条件を学習する。RUN_ALIGNMENT_DIAGNOSTICS=Trueで層別診断と可視化を確認する。
+1. Set `EXPERIMENT_ID` and run a CPU runtime with `PREPARE_AUDIO_PACKS=True` to prepare audio ZIPs. `AUDIO_PACK_WORKERS` accepts integers from 1 to 4 and defaults to 2 for CPU preparation. Completed ZIPs are reused.
+2. Switch to GPU, set `PREPARE_AUDIO_PACKS=False`, and rerun from the top with the same settings. The preflight uses synthetic audio to check a small FP16 update, save, and resume sequence. Verify production execution on the real corpus separately.
+3. Restore a trained SentencePiece T2TT model from its configured location. For new training, use a new `T2TT_RUN_ID` and set `RUN_T2TT=True`. Use `EVALUATE_T2TT=True` to view dev BLEU, translation examples, and learning curves.
+4. Prepare units, dictionaries, and fairseq data, then check the registration preflight. Set `RUN_BASELINE=True` to train the Baseline for 400,000 updates.
+5. Set `RUN_TEACHER_ARTIFACTS=True` to verify all IDs, splits, and texts against the original T2TT manifest and build all-layer attention, CTC alignments, and the projected teacher.
+6. Inspect the top-p diagnostics, set `MASK_TOP_P` explicitly, and calibrate λ and τ.
+7. Use `RUN_DISTILLATION`, `RUN_ANNEALED_DISTILLATION`, and `RUN_MASK_DISTILLATION` to train transfer conditions. Set `RUN_ALIGNMENT_DIAGNOSTICS=True` to inspect per-layer diagnostics and visualizations.
 
-学習済みT2TTの再利用時は、T2TT_RUN_IDと元のtext manifestを指定する。Baselineと転移条件は同じ400k予算・初期化・native fairseqレシピを使う。学習済みモデルはそれぞれの検証付きsnapshotへ保存する。
+To reuse trained T2TT, specify its `T2TT_RUN_ID` and original text manifest. The Baseline and transfer conditions share the 400,000-update budget, initialization policy, and native fairseq recipe. Each model uses its own verified snapshots.
 
 ## evaluate.ipynb
 
-1. trainingと同じEXPERIMENT_ID、corpus設定を指定する。
-2. 前処理とBaselineを復元する。選択した転移モデルは完成済みの検証付きsnapshotから復元する。
-3. 共通のnative fairseq生成器でdevを推論し、UERと任意のASR-BLEUを比較する。
+1. Use the same `EXPERIMENT_ID` and corpus settings as training.
+2. Restore the preprocessing artifacts and Baseline, then restore selected transfer models from completed, verified snapshots.
+3. Generate dev predictions with the common native fairseq generator and compare UER and optional ASR-BLEU.
 
-EVALUATE_S2UT=TrueでS2UTを評価する。COMPARE_DISTILLATION / COMPARE_ANNEALED_DISTILLATION / COMPARE_MASK_DISTILLATIONは既定Falseで、Baselineのみを評価する。学習を完了した転移条件だけTrueにして比較する。validation/inferenceはteacher-free。
+Set `EVALUATE_S2UT=True` to evaluate S2UT. The three `COMPARE_*` transfer switches default to `False`, which evaluates the Baseline alone. Enable only completed transfer conditions. Validation and inference run teacher-free.
 
-EVALUATE_T2TT_EXTERNAL=TrueでT2TTの固定300件外部BLEUも確認できる。T2TTだけを評価するときはEVALUATE_S2UT=Falseにする。
+Set `EVALUATE_T2TT_EXTERNAL=True` to compute BLEU on the fixed 300-item T2TT external benchmark. Set `EVALUATE_S2UT=False` for a T2TT-only evaluation.
 
-## 容量と保存
+## Storage and recovery
 
-GPUでの起動時は音声ZIPを索引化し、必要になったZIPから取得・検証する。学習データの先読みはfairseqのローダーが担う。展開結果はVMに蓄積するため、参照する音声・checkpoint・Teacherに対応する作業領域が必要。4条件の学習予算は合計1,600,000 updates。 [Colabの入出力と再開](COLAB_RUNTIME.md)
+On GPU startup, the workflow indexes the audio ZIPs and fetches and verifies each pack on demand. The fairseq loader prefetches training data. Extracted data accumulates on the VM, which needs space for accessed audio, checkpoints, and teacher artifacts. The four conditions use a total budget of 1,600,000 updates. [Colab I/O and recovery](COLAB_RUNTIME.md)
 
-作業はVM、永続化は固定benchmarkのverified ZIP。S2UTは元の実験名・設定で再開する。音声ストリーミング追加前の74c5efaと互換性を検証した実装では、保存済みのS2UT学習契約をそのまま照合する。学習中のT2TTやその他の旧runを続ける場合は、そのrunに対応するrevisionを使う。 [過去のNotebook](../notebooks/legacy)
+Work stays on the VM and verified ZIPs from the pinned benchmark runtime persist in Drive. Resume S2UT with the original experiment name and settings. Builds verified as compatible with pre-streaming revision `74c5efa` check saved S2UT contracts against their existing identity. Resume T2TT and other legacy runs with their original revision. [Historical notebooks](../notebooks/legacy)
 
-詳細は [Method](METHOD.md)、[検証記録](VALIDATION.md)。
+[Method](METHOD.md) and [validation records](VALIDATION.md)

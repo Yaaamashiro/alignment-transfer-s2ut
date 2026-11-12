@@ -1,13 +1,13 @@
 # All-layer Attention Transfer
 
-T2TT Decoder層lの全head平均を、S2UT Decoder層lへ対応させる。全層抽出は1 decoder forward、保存は`[L,T,S]`。source/target modality mappingを共有し、各層で`M_tgt @ attention[l] @ M_src`を計算して`[L,U,F]`へ写す。6層をhard-codeしない。
+Match the attention averaged across all heads in T2TT decoder layer `l` to S2UT decoder layer `l`. Extract all layers in one decoder forward pass and store `[L,T,S]`. Share the source and target modality mappings across layers and compute `M_tgt @ attention[l] @ M_src` for each layer to obtain `[L,U,F]`. The implementation derives the layer count from the model.
 
-既存teacher packetの`mt_attention_layers`・文字/subword span・CTC timing・unit timing・extraction signatureを再利用する。層数/順序/headsが一致しなければ停止する。既存single-layer形式は単層ablation/旧実験のために残るが、主要4条件のNotebookはall-layerに固定する。
+Reuse `mt_attention_layers`, character and subword spans, CTC and unit timing, and the extraction signature from the teacher packet. The run stops when the layer count, order, or head configuration differs. Single-layer artifacts support ablations and historical runs. The primary notebook comparison uses all layers.
 
-新しい3条件はKL-based Attention Distillation、Annealed KL-based Attention Distillation、Attention-level Knowledge Distillation。層ごとのvalid-row meanをworst-layer LogSumExpで集約する。単純layer meanは主比較へ使わない。[式・microbatch定義・校正](METHOD.md)を参照。
+The three transfer conditions are KL-based Attention Distillation, Annealed KL-based Attention Distillation, and Attention-level Knowledge Distillation. Worst-layer LogSumExp aggregates the valid-row mean loss for each layer. [Equations, microbatch definition, and calibration](METHOD.md)
 
-native modelはstock Attentionをcaptureする。teacherの値はcriterionのlossだけが読み、forwardのcontextはshape/scopeだけを持つ。validation/inferenceではcapture contextもteacher dataset wrapperも使わない。
+The native model captures stock attention. The criterion reads teacher values for the loss, and the forward context carries shape and scope. Validation and inference use the stock path without the capture context or the teacher dataset wrapper.
 
-`alignment-train.jsonl`へ各updateの`alignment/D_l`・`alignment/w_l`・worst layer・loss・λ・τ・entropy・KL/Mask診断を保存する。別dev診断とAttention可視化も生成とは独立して行う。
+`alignment-train.jsonl` records `alignment/D_l`, `alignment/w_l`, the worst layer, loss, λ, τ, entropy, and KL and Mask diagnostics per update. Dev diagnostics and attention visualization run separately from generation.
 
-数式はprojected teacherを\(\tilde A_l^{\mathrm{T2TT}}\)、層別lossを\(\ell_l^{\mathrm{KL}}\) / \(\ell_l^{\mathrm{mask}}\)と書く。内部packet名・`alignment/D_l`等のログIDは維持する。全体の目的関数は\(\mathcal L=\mathcal L_{\mathrm{S2UT}}+\lambda\mathcal L_{\mathrm{align}}\)。
+The equations use \(\tilde A_l^{\mathrm{T2TT}}\) for the projected teacher and \(\ell_l^{\mathrm{KL}}\) or \(\ell_l^{\mathrm{mask}}\) for per-layer loss. The packet and log schema use identifiers such as `alignment/D_l`. The objective is \(\mathcal L=\mathcal L_{\mathrm{S2UT}}+\lambda\mathcal L_{\mathrm{align}}\).

@@ -2,54 +2,54 @@
 
 ## CTC
 
-`align_speech_text`は固定revisionの`AutoModelForCTC`のlog posteriorから、blankと繰返しlabelを考慮したViterbi pathを計算する。posteriorの値をdurationとして扱わない。spanは元のcodepoint位置へ戻して`[start_sec,end_sec]`で保存する。内部DPはemission frame間でのみ進み、soft attentionから架空の時刻を作らない。
+`align_speech_text` computes a Viterbi path from the log posteriors of a pinned `AutoModelForCTC`, accounting for blanks and repeated labels. The dynamic program advances through emission frames. It maps spans back to the original codepoint positions and stores them as `[start_sec,end_sec]`.
 
-英語モデルの大文字語彙への対応は設定の`text_transform: upper`で明示する。これはCTC語彙lookupだけに使い、T2TTのテキストは変えない。変換後に複数codepointへ広がる文字を単一labelへ無理に対応させない。`unknown_policy: mask`ではOOVとpunctuationのspanを`[-1,-1]`とし、元のindexをmetadataに記録する。`error`なら停止する。全labelが無効なsampleや、繰返しを含めてframe数が不足するsampleは失敗として報告する。
+Set `text_transform: upper` for the English CTC vocabulary. This transform applies only to CTC vocabulary lookup. A character that expands to multiple codepoints is ineligible for a single label. With `unknown_policy: mask`, out-of-vocabulary characters and punctuation receive `[-1,-1]` spans, and the metadata records their original indices. The `error` policy stops the stage. The stage reports failure for samples with no valid labels or too few frames to align all labels, including repeats.
 
-既定モデルは[Japanese](https://huggingface.co/jonatasgrosman/wav2vec2-large-xlsr-53-japanese/tree/cf031e020336460d15a417eba710bbc5bb43be9a)、[English](https://huggingface.co/facebook/wav2vec2-base-960h/tree/22aad52d435eb6dbaf354bdad9b0da84ce7d6156)。2026-10-20に公式model APIでrevisionを確認した。alignment品質の妥当性は別途実音声で評価する必要がある。
+The default checkpoints are [Japanese](https://huggingface.co/jonatasgrosman/wav2vec2-large-xlsr-53-japanese/tree/cf031e020336460d15a417eba710bbc5bb43be9a) and [English](https://huggingface.co/facebook/wav2vec2-base-960h/tree/22aad52d435eb6dbaf354bdad9b0da84ce7d6156). The official model API confirmed these revisions on 2026-10-20. Alignment quality requires evaluation with real speech.
 
 ## HuBERT units
 
-公式HuBERT Base固定revisionのhidden_states[6]に、checksum固定の公式100中心を適用する。waveformは16 kHz monoへ変換し、processorの正規化を用いる。unitの値は0–99。
+Apply the checksum-pinned set of 100 official centroids to `hidden_states[6]` from the pinned official HuBERT Base checkpoint. Convert audio to 16 kHz mono and apply the processor's normalization. Unit IDs range from 0 to 99.
 
-各sampleにoriginal units、reduced units、半開区間のrun `[start,end)`、original frame spans、reduced run spansを保存する。HuBERTのconv_kernel/strideから受容野とhopを計算し、各frame中心のVoronoi幅（1 hop）の時刻区間を使う。unit数を単に音声長へ均等分割してrun timingを推測しない。
+Each sample stores original and reduced units, half-open run intervals `[start,end)`, original frame spans, and reduced run spans. The HuBERT convolution kernels and strides determine the receptive field and hop size. Frame timing uses a one-hop interval around each frame center.
 
 ## Projection
 
-source token spanと`F`個の音声時間binのoverlapをrow normalizeして`M_src[S,F]`を作る。学習のCPU先読みでは実際のfeature長とfrontendの式からFを計算し、**各forwardでencoderの実測長との一致を検査する。** source保存artifactにencoder indexを焼き込まない。target reduced run spanとEnglish token spanのoverlapをrow normalizeして`M_tgt[U,T]`を作る。
+Row-normalize the overlap between source token spans and `F` audio time bins to obtain `M_src[S,F]`. CPU prefetch derives `F` from the actual feature length and frontend geometry, and each forward pass checks it against the measured encoder length. The source artifact stores times, and the loader derives encoder indices at runtime. Row-normalize the overlap between reduced run spans and English token spans to obtain `M_tgt[U,T]`.
 
-既定の`--source-mapping frontend`は実際のFBANK frame数とConvのkernel/stride/paddingから、各encoder位置の音響frontend supportを計算する。25 ms窓・10 ms shiftのFBANK、kernel 5/5・stride 2/2では、位置`j`の中心frameは`4j`、supportは元のFBANKの`4j-6`〜`4j+6`。有効なframe indexに切り詰め、各FBANK窓の開始・終了時刻を使う。畳み込みpaddingを観測音声として扱わず、出力長の予測とforwardの実測値が違えば停止する。これはfrontendの局所受容野であり、Transformer self-attention後の情報範囲を制限するものではない。
+The default `--source-mapping frontend` computes the acoustic support of each encoder position from the FBANK frame count and the convolution kernels, strides, and padding. With a 25 ms FBANK window, 10 ms shift, kernels 5/5, and strides 2/2, position `j` is centered on frame `4j` and covers `4j-6` through `4j+6`. Clip the indices to valid frames and use each FBANK window's start and end times. The implementation excludes convolution padding from observed speech and stops if the predicted and measured lengths differ. These intervals describe the frontend's local receptive field. Transformer self-attention can subsequently mix information across positions.
 
-`--source-mapping uniform`は従来の音声長/Fによる等分割。smoke backendではcentered STFTとstride 4のtest frontendに対応した別の時刻式を使う。各選択はcheckpointの再開契約・実験比較に含まれる。
+`--source-mapping uniform` divides the audio duration into `F` equal intervals. The smoke backend uses a separate timing formula for centered STFT and the stride-4 test frontend. The selected mapping is part of the checkpoint resume contract and experiment comparison.
 
-数式上のprojected teacherは
+The projected teacher is
 
 \[
 \tilde A_l^{\mathrm{T2TT}}=M_{\mathrm{tgt}}A_l^{\mathrm{T2TT}}M_{\mathrm{src}}
 \]
 
-と表し、有効rowで再正規化する。source/targetのinvalid span、未知文字を除く。paddingへepsilon質量を加えない。lossではlogに入れる値のみepsilonで安定化する。無効unit rowとEOSはalignment lossから除外する。
+Renormalize valid rows, excluding invalid source and target spans and unknown characters. Padding carries zero mass, and epsilon stabilizes only the arguments to logarithms in the loss. Exclude invalid unit rows and EOS from the alignment loss.
 
-主比較はraw projected priorをlossだけへ使い、forwardへのbias注入やuniform混合は行わない。過去の平滑化ビューは診断に残るが、本学習のpriorとは区別する。CTC blankや元token spanは変更しない。
+The primary comparison uses the raw projected prior in the loss. Historical smoothed views remain available for diagnostics. Projection preserves the CTC blanks and original token spans.
 
-teacher生成CLIは時刻spanとMT attentionを持つ**projection packet**を保存する。denseなU×F行列は学習のCPU先読みと可視化時に生成する。これはencoder長を前処理で固定しないための設計である。
+The teacher CLI stores a projection packet with time spans and MT attention. CPU prefetch and visualization build the dense U×F matrix after the encoder length is known.
 
 ## Integrity
 
-pair_idのSHA256をartifact filenameに使い、任意IDによるpath traversalを防ぐ。NPZはpickleなしで読み、metadata・array shape/dtype/contentの内部hashを検証する。外部`.sha256.json`も保存し、存在すれば検証する。外部hash保存直前に中断しても、内部hashで完成済みNPZを再利用できる。
+Artifact filenames use the SHA-256 of `pair_id` to prevent path traversal. NPZ loads disable pickle and check internal hashes for metadata and array shape, dtype, and contents. The loader also verifies the external `.sha256.json` when present. The internal hash lets a completed NPZ be reused after an interruption before the external receipt was written.
 
-teacher metadataはpair_id、split、manifest、MT checkpoint、MT/S2UT architecture、tokenizer、CTC artifacts、unit config/contentsのhashを含む。異なるsplit、architecture、checkpoint、tokenizer、unitの混入を拒否する。CTC/unitは入力音声のhashも保持する。
+Teacher metadata binds the pair ID, split, manifest, MT checkpoint, MT and S2UT architectures, tokenizer, CTC artifacts, and unit configuration and contents. Mismatches are rejected. CTC and unit artifacts also record input audio hashes.
 
-## 品質診断
+## Alignment quality diagnostics
 
-`diagnose_alignment`は指定splitからseed固定で最大500件を抽出する。`pairs.jsonl`、`summary.json`、先頭20件までのraw MT / 投影 / 平滑化 / 単調prior heatmapとNPZを保存する。
+`diagnose_alignment` draws up to 500 samples from the selected split using a fixed seed. It writes `pairs.jsonl`, `summary.json`, and heatmaps and NPZ files for up to the first 20 samples, covering raw MT attention, projected attention, smoothed attention, and the monotonic prior.
 
-| 指標 | 分子 / 分母 |
+| Metric | Numerator / denominator |
 |---|---|
-| 有効source token率 | frontend overlapがありMTから質量を受ける文字 / 元の日本語文字数 |
-| 有効target token率 | unit overlapがありMT rowが有効な文字 / 元の英語文字数 |
-| 有効unit row率 | 投影後の質量が正のrow / reduced unit数（EOS除外） |
-| prior entropy | 有効unit rowのentropy合計 / 有効unit row総数 |
-| zero cell率 | 有効row内の0セル数 / 有効rowの全セル数 |
+| Valid source token rate | Characters with frontend overlap and positive MT attention mass / original Japanese characters |
+| Valid target token rate | Characters with unit overlap and valid MT rows / original English characters |
+| Valid unit row rate | Rows with positive mass after projection / reduced units, excluding EOS |
+| Prior entropy | Sum of entropy over valid unit rows / valid unit rows |
+| Zero-cell rate | Zero cells in valid rows / all cells in valid rows |
 
-CTC span自体が有効なsource/target文字数も別途保存する。全体の率はsample別の率の単純平均ではなく、分子・分母を合算する。entropyはnatural log。これらはcoverageと不確実性の診断であり、forced alignmentの時刻精度を測る指標ではない。ASR CERをforced alignment精度の代用とせず、実音声とheatmapを対応させて境界を確認する。
+The output also records source and target character counts with valid CTC spans. Corpus rates sum the numerators and denominators across samples. Entropy uses natural logarithms. These metrics characterize coverage and uncertainty. Check boundary timing against the audio and heatmaps to evaluate forced alignment, since ASR CER measures recognition errors.

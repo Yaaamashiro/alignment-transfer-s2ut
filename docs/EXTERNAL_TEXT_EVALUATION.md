@@ -1,64 +1,64 @@
-# T2TTのFLEURS/FLORES外部テキスト評価
+# FLEURS/FLORES external text evaluation for T2TT
 
-学習済みT2TTの翻訳品質を、以前のCascade/S2UT外部評価と同じ保存済み8C 300件で診断する。T2TTの再学習・語彙拡張・サンプル再選択は行わない。音声・CTC・HuBERT・vocoder・Hugging Faceからの取得は不要。
+Evaluate a trained T2TT checkpoint on the same saved 300-sample 8C set used for prior Cascade and S2UT evaluation. This text-only workflow uses the existing checkpoint, vocabulary, and sample selection.
 
-## Notebookで実行
+## Current notebook
 
-現在の入口は [evaluate.ipynb](../notebooks/colab/evaluate.ipynb)。`EVALUATE_T2TT_EXTERNAL=True` と学習時の `T2TT_RUN_ID` を指定する。T2TTだけを評価する場合は `EVALUATE_S2UT=False` にし、固定300件の復元・翻訳・採点を実行する。
+Set `EVALUATE_T2TT_EXTERNAL=True` and the training run's `T2TT_RUN_ID`. Set `EVALUATE_S2UT=False` for T2TT-only evaluation. The notebook restores the fixed 300 samples, translates, and scores them. [evaluate.ipynb](../notebooks/colab/evaluate.ipynb)
 
-## 旧実験の評価
+## Legacy evaluation
 
-`notebooks/legacy/benchmark_comparison.ipynb` の **6.1c FLEURS/FLORES external text BLEU** を実行する。
+Run **6.1c FLEURS/FLORES external text BLEU** in `notebooks/legacy/benchmark_comparison.ipynb`.
 
-1. 既存の環境・Drive接続・`run(...)` helperを準備する。6.1aの学習を再実行する必要はない。
-2. `ROOT`・`PERSISTENT` とT2TTの選択を設定する。`USE_EXTENDED_T2TT=True`では200k完了済みbestを使い、Falseでは既存20k bestを使う。VMにbestがなければ、選択したstageの完了済みZIPから復元する。
-3. 6.1cセルの `RUN_EXTERNAL_TEXT=True` にする。保存済み8Cが複数ある場合だけ `SOURCE_8C` に既存identityのフォルダ名を指定する。
-4. このセルを実行する。固定300件の照合、生成、採点、ZIP保存、得点・固定seedの10例の表示まで行う。
+1. Prepare the environment, mount Drive, and load the `run(...)` helper. Use the saved checkpoint from 6.1a.
+2. Set `ROOT`, `PERSISTENT`, and the T2TT selection. `USE_EXTENDED_T2TT=True` selects the completed 200k best checkpoint. `False` selects the existing 20k best. Restore it from the selected stage's completed ZIP if needed.
+3. Set `RUN_EXTERNAL_TEXT=True` in 6.1c. If multiple saved 8C runs exist, set `SOURCE_8C` to the existing identity folder.
+4. Run the cell to verify the fixed 300 samples, generate, score, publish a ZIP, and display scores and ten examples selected by a fixed seed.
 
-最初に `restore-inputs` が固定benchmarkの `latest/restore` でZIP・member checksumを検証する。保存先・T2TT stage・固定benchmark revision・設定した更新予算の完了を照合し、**保存済み `checkpoint_best.pt` だけを評価に使用**する。既存のローカルbestは差し替えず、不完全なローカル学習ディレクトリは元runtimeの `.interrupted-*` 保持で残す。保存済みmodelがない・ZIPが壊れている・学習が未完了・bestが含まれない場合、学習やlast checkpointへの代替を行わず停止する。音声・元manifestの復元は不要。
+`restore-inputs` first verifies the ZIP and member checksums using the pinned benchmark's `latest/restore`. It verifies paths, the T2TT stage, benchmark revision, and completed budget, and evaluates the saved `checkpoint_best.pt`. An existing local best remains in place. Incomplete local training directories are retained under `.interrupted-*` as needed. A missing model, corrupt ZIP, unfinished run, or missing best checkpoint stops evaluation. Restore only the model and evaluation inputs.
 
-`PERSISTENT/stages/t2tt-dev` に完了済みdev結果があれば、同じbest checkpointの評価であることを確認してmetricsとpredictionを復元する。増分ZIPの最終packから必要な2ファイルだけをローカルへ戻し、外部評価用サブディレクトリを含む親フォルダは置き換えない。異なるローカルdev結果は上書きしない。devの再生成は行わない。
+If `PERSISTENT/stages/t2tt-dev` contains a completed dev evaluation, verify its best checkpoint and restore the metrics and predictions. Only the two files needed from the final incremental ZIP are restored, preserving the parent directory and any external evaluation. A conflicting local dev result stops restoration.
 
-dev結果がない場合も、既存 `evaluate_t2tt` の固定生成・BLEU設定で外部300件の評価を行う。devを再評価したりT2TTを学習したりせず、in-domain比較だけをスキップして明示する。devが存在する場合は、壊れた結果・欠落したprediction・異なるcheckpointや設定を拒否する。
+If dev results are absent, evaluate the fixed external 300 with the existing `evaluate_t2tt` generation and BLEU settings and report that the in-domain comparison was skipped. When dev is present, reject corruption, missing predictions, and checkpoint or settings mismatches.
 
-完了済みZIPの復元で生成stageがスキップされた場合も、表示直前に読込専用の `verify` を実行する。checkpoint・固定セット・存在するdev評価とそのpredictionのハッシュ、外部predictionのID・ハッシュ・corpus BLEUを再照合し、変更があれば停止する。この確認は生成やファイルの更新を行わず、未完了の結果から勝手に生成を始めることもない。
+Before displaying results, run the read-only `verify` command even if a restored ZIP skipped generation. It checks checkpoint and fixed-set hashes, available dev evaluation and prediction hashes, external prediction IDs and hashes, and corpus BLEU. Any mismatch stops display.
 
-表示するcheckpoint stepは**選択済みbestの実際の更新数**。学習予算20,000から推測して埋めない。devと外部のcheckpoint SHAが異なる場合は停止する。
+Display the actual update step of the selected best checkpoint. Dev and external results must share its checkpoint SHA.
 
-## 保存済み8Cの取得と検証
+## Verify saved 8C inputs
 
-`BENCHMARK/diagnostics/flores-fleurs-cascade/<identity>/` の次の小さな保存済みファイルを読む。元のbenchmark実験への書込みはしない。
+Read the following files from `BENCHMARK/diagnostics/flores-fleurs-cascade/<identity>/` as evidence for the fixed set.
 
-- `identity.json`: `selected` に入っている日英テキスト、ID、テキストSHA256。
-- `dataset-audit.json`: `selected_samples` と `selected=300`。
-- `metrics.json`: 完了済みreport、`identity_sha256`、`metrics.samples=300`、埋込みper-sample結果。
-- `per_sample.jsonl`: 実際に評価したID集合とテキスト。
+- `identity.json` records Japanese and English text, IDs, and text SHA-256 in `selected`.
+- `dataset-audit.json` records `selected_samples` and `selected=300`.
+- `metrics.json` contains the completed report, `identity_sha256`, `metrics.samples=300`, and per-sample results.
+- `per_sample.jsonl` records the actual evaluated IDs and text.
 
-固定runtimeの `direct_s2st.journal.digest` でidentityとフォルダ名を確認する。4箇所のID集合の完全一致、重複・欠落なし、テキストSHA、過去のBLEU実装との一致を確認する。順序は `sample_id` の昇順。元の順序が異なっても同じ300件・同じprediction順になる。
+Use the pinned `direct_s2st.journal.digest` to verify identity and folder name. The four ID sets must match exactly, with unique IDs, no omissions, matching text hashes, and matching historical BLEU implementation. Sort by `sample_id` to fix prediction order.
 
-300件の完了済みreportがなければ、`No completed saved 8C FLORES/FLEURS 300-sample identity found...` と停止する。複数ある場合もmtimeで勝手に決めず、既存identityの明示指定を要求する。新規のデータ選択・不一致時の縮小・失敗サンプルの除外は行わない。
+A missing completed 300-sample report raises `No completed saved 8C FLORES/FLEURS 300-sample identity found...`. Multiple reports require an explicit saved identity. The workflow requires the complete original set.
 
-確認したテキスト証拠をVMの `ROOT/external-text-input/fixed-8c.json` に固定する。これは評価stageへのファイル引数となり、既存Drive-safe runtimeの入力ハッシュにも束縛される。元の8C evidenceが変わった場合、同じ出力先での再開は拒否する。
+Write the verified evidence to `ROOT/external-text-input/fixed-8c.json` on the VM. The file becomes an evaluation argument and its hash enters the existing runtime identity. Changed 8C evidence requires a new output location.
 
-## 推論と指標
+## Inference and metrics
 
-既存の `evaluation.text.generate_text` をそのまま使う。日本語を既存文字tokenizerで符号化し、source-onlyのautoregressive生成を行う。設定はdev評価の既定と同じbeam=5、max_chars=1000、length_penalty=1.0。外部評価固有の生成オプションはない。devの保存契約がこの設定と異なる場合は停止する。
+The legacy workflow uses `evaluation.text.generate_text` with the checkpoint tokenizer for source-only autoregressive generation. Dev defaults are beam 5, `max_chars=1000`, and length penalty 1.0. A saved dev contract must match these settings.
 
-生成loopへ渡すレコードは `sample_id` と `source_text` のみ。English referenceやその長さをdecoder・beam選択・終了条件へ渡さない。全300件の生成後に初めて参照文を結合して採点する。途中cacheにも参照文を入れない。生成文への追加post-processingはない。
+The generation loop receives only `sample_id` and `source_text`. Join English references for scoring after generating all 300 predictions. Intermediate caches contain source and prediction data, and scoring uses the generated text.
 
-| 出力 | 用途・処理 |
+| Output | Meaning |
 |---|---|
-| `text_bleu` | devと同じSacreBLEU。13a、case-sensitive、exp smoothing、effective_order=False |
-| `benchmark_normalized_bleu` | 固定benchmarkの `normalize_english` を仮説・参照に適用後、同じ `corpus_bleu` で採点。以前のCascade/S2UT外部評価との比較用の主指標 |
-| `sentence_bleu` | 各例の診断用。短文にも対応するeffective_order=True。論文用の値はcorpus BLEU |
+| `text_bleu` | Same SacreBLEU as dev, with 13a, case sensitivity, exp smoothing, and `effective_order=False` |
+| `benchmark_normalized_bleu` | Apply pinned `normalize_english` to hypotheses and references, then score with `corpus_bleu`. Main metric for comparison with previous Cascade and S2UT external evaluations |
+| `sentence_bleu` | Per-sample diagnostic with `effective_order=True` for short text. Report corpus BLEU for the experiment |
 
-benchmarkの正規化はNFKC・小文字化・その実装が定める記号除去・空白整理を行う。**アポストロフィなど実装が残す文字もそのまま保持**する。独自の近似正規化に置き換えない。T2TTはテキスト出力を採点するため、Cascade/S2UTの最終ASR-BLEUとの差には音声生成・ASRの影響も含まれる。
+Benchmark normalization uses NFKC, lowercasing, its existing punctuation rules, and whitespace cleanup. Characters such as apostrophes follow the pinned implementation. Differences between T2TT text BLEU and Cascade or S2UT ASR-BLEU also include the effects of speech generation and ASR.
 
-未知文字は既存tokenizerのUNKのまま。Unicode codepoint数、UNK数・率、UNKを含む文数・割合、頻出未知文字を記録する。空白もtokenizer通り文字数に含む。語彙は変更しない。
+Unknown characters use the checkpoint tokenizer's UNK. Record Unicode codepoint counts including spaces, UNK counts and rates, sentence counts and rates with UNK, and common unknown characters.
 
-## 保存と再開
+## Storage and recovery
 
-VM上の独立ディレクトリ:
+Dedicated VM directory
 
 ```text
 ROOT/text-evaluation/flores-fleurs/
@@ -67,7 +67,7 @@ ROOT/text-evaluation/flores-fleurs/
   flores-fleurs-text-cache/*.json
 ```
 
-Drive上の独立stage:
+Dedicated Drive stage
 
 ```text
 PERSISTENT/stages/t2tt-flores-fleurs/<snapshot>/
@@ -75,17 +75,17 @@ PERSISTENT/stages/t2tt-flores-fleurs/<snapshot>/
   snapshot.zip
 ```
 
-既存 `run(...)` が、固定benchmark runtimeの検証付き増分ZIPでcacheと結果を保存・復元する。個別JSONを繰り返しDriveへコピーしない。`t2tt`・`t2tt-dev` のstage、既存checkpoint、Cascade/S2UT結果は変更しない。
+`run(...)` saves and restores cached predictions and results in verified incremental ZIPs. External text evaluation uses its own destination alongside the T2TT, dev, and Cascade and S2UT results.
 
-CLIで出力名を変えた場合も、metrics・prediction・cacheの全派生パスについて既存dev評価・prediction/cache・checkpoint・8C入力との重複を拒否する。たとえば `dev-text.jsonl` は、拡張子が異なっても既存devと同じprediction名になるため使えない。
+If overriding output names in the CLI, the derived metrics, prediction, and cache paths must remain separate from dev results, dev predictions and caches, the checkpoint, and fixed 8C inputs. For example, `dev-text.jsonl` can collide with an existing dev prediction filename despite a different extension.
 
-同じVMなら6.1cを再実行する。新しいVMなら同じrevision・パス・設定でセクション1・2の環境とDrive接続を準備後、6.1cを実行する。必要なbestと保存済みdev結果は冒頭で復元する。devの有無とハッシュも再開契約に含む。検証済みcacheを再利用し、完了済み評価は生成しない。CLI単体の再開でも契約・predictionハッシュ・corpus BLEUの再計算を照合する。最後のZIP保存以降にVMから失われた生成分は再計算する。
+On the same VM, rerun 6.1c. On a fresh VM, prepare the environment and Drive connection in sections 1 and 2 using the same revision, paths, and settings, then run 6.1c. It restores the required best checkpoint and saved dev results. The resume contract binds dev presence and hashes. Reuse verified caches and completed results. Standalone CLI resume also checks the contract, prediction hashes, and recomputed corpus BLEU. Predictions lost since the last ZIP are recomputed.
 
-既存学習の再開契約は全Pythonソースを束縛している。**未完了のT2TT/S2UT学習を、新しい評価コードへ更新したまま再開しない**。学習を元のrevisionで完了してから評価コードを使う。完成済みcheckpointの読込・外部評価には再学習は不要。
+Training resume binds all Python sources. Finish unfinished T2TT or S2UT training with its original revision. Use the evaluation revision to load completed checkpoints for external evaluation.
 
 ## CLI
 
-固定benchmark runtimeを導入済みの環境で、保存済み入力の復元・固定セット取得・評価の順に実行する。
+With the pinned benchmark runtime installed, restore saved inputs, freeze the fixed set, and evaluate in order.
 
 ```bash
 python -m alignment_transfer_s2ut.evaluate_t2tt_external restore-inputs \
@@ -105,8 +105,8 @@ python -m alignment_transfer_s2ut.evaluate_t2tt_external evaluate \
   --device cuda --resume
 ```
 
-Colabでは上のCLIを直接起動せず6.1cの共通logger・stage wrapper経由で実行する。
+In Colab, run the CLI through the common logger and stage wrapper in 6.1c.
 
-## 200k teacherの評価
+## Evaluate the 200k teacher
 
-`USE_EXTENDED_T2TT=True` は `T2TT_CHECKPOINT` を `ROOT/t2tt-200k/checkpoint_best.pt` に設定する。devは `text-evaluation/t2tt-200k/dev-text.json`、外部結果は `text-evaluation/t2tt-200k/flores-fleurs/`、Drive stageは `t2tt-dev-200k`・`t2tt-flores-fleurs-200k` に分離する。固定8C packetは20kと共用し、サンプルの再選択は行わない。Falseなら従来の20k保存先を使う。切替後は設定直下の保存先セルも再実行する。[延長・確認・Attentionへの実行順](T2TT_EXTENSION.md)
+`USE_EXTENDED_T2TT=True` sets `T2TT_CHECKPOINT` to `ROOT/t2tt-200k/checkpoint_best.pt`. Dev uses `text-evaluation/t2tt-200k/dev-text.json`, external results use `text-evaluation/t2tt-200k/flores-fleurs/`, and Drive uses `t2tt-dev-200k` and `t2tt-flores-fleurs-200k`. Both runs share the fixed 8C packet. `False` selects the 20k paths. Rerun the path cell after changing the setting. [Extension, verification, and attention workflow](T2TT_EXTENSION.md)

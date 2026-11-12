@@ -34,6 +34,8 @@ Audio ZIP preparation supports resumption and bounded parallel workers. See [aud
 
 Rerun the notebook with the same revision, settings, and storage paths to resume from verified Google Drive snapshots. Training switches default to `False`. Earlier experimental notebooks are available in [legacy](notebooks/legacy).
 
+For private GitHub access, configure the `GITHUB_TOKEN` secret in Colab before running setup. See the [GitHub access guide](docs/GITHUB_ACCESS.md).
+
 External text-only inputs use four fields, `pair_id`, `split`, `ja_text`, and `en_text`. See the [T2TT workflow](docs/TEXT_ONLY_T2TT.md).
 
 ## Environment

@@ -1,82 +1,82 @@
 # Verified T2TT 20k → 200k extension
 
-保存済み20k T2TTの**同じ学習**を200kまで継続する。新しいモデルの初期化学習や20k stageの書換えは行わない。200kの学習結果・BLEU値は、実際にColabで実行した結果で判断する。
+Continue the saved 20k T2TT run to 200k using its existing training state. The 20k stage remains the read-only source for a separate continuation stage. Measure the 200k results and BLEU in Colab.
 
-## Colabでの順番
+## Colab workflow
 
-`notebooks/legacy/benchmark_comparison.ipynb` を最新版で開く。
+Open the latest `notebooks/legacy/benchmark_comparison.ipynb`.
 
-1. Driveを接続し、学習時と同じ `ROOT`・`PERSISTENT`・`BENCHMARK` を設定する。
-2. 設定と直下のT2TT保存先セルを実行する。既定は下表のとおり。
-3. セクション2で環境検査、3〜5で元と同じ入力・Baseline metadata・manifest・backboneを準備する。
-4. 延長する場合だけ`RUN_T2TT_EXTENSION=True`（既定False）にし、**6.1a** を実行する。初回はverified 20kからseedし、2回目以降は200k stage自身から再開する。
-5. **6.1b** で200k完了を検証し、選択したbestのin-domain dev BLEUを測る。
-6. **6.1c** の `RUN_EXTERNAL_TEXT=True` で、同じ保存済み8C 300件の外部BLEUと翻訳例を表示する。
-7. **6.1d** でloss/LRの曲線と、保存済み20k・200k-bestの比較表を確認する。
-8. 確認後、設定セルの `RUN_TEACHER_ARTIFACTS=True` を実行して **6.2** へ進む。
-9. Attention・CTC・teacher alignment生成・診断を経て、必要ならS2UTへ進む。
+1. Connect Drive and set `ROOT`, `PERSISTENT`, and `BENCHMARK` to their original values.
+2. Run the settings cell and the T2TT storage-path cell immediately below it. Defaults are listed in the table.
+3. In section 2 run the environment check. In sections 3–5 prepare the original inputs, Baseline metadata, manifest, and backbone.
+4. Enable `RUN_T2TT_EXTENSION=True` when continuing training and run **6.1a**. The first run starts from a verified 20k snapshot. Later runs resume from the 200k stage.
+5. In **6.1b**, verify completion at 200k and measure in-domain dev BLEU for the selected best checkpoint.
+6. In **6.1c**, enable `RUN_EXTERNAL_TEXT=True` for external BLEU and translations on the same saved 8C 300 samples.
+7. In **6.1d**, review the loss and LR curves and the saved 20k and 200k best comparison.
+8. After reviewing evaluation, set `RUN_TEACHER_ARTIFACTS=True` and run **6.2**.
+9. Extract attention, align CTC, construct and diagnose the teacher, then proceed to S2UT if needed.
 
-既定の「すべて実行」は6.2で停止する。6.2は200k完了と、選択中のbestに一致するdev/外部評価結果も検査する。Monotonic-onlyの設定はこのteacher gateを通らず、従来どおりteacher処理をスキップする。
+Run all stops at the 6.2 teacher gate until 200k and matching dev and external results are complete for the selected best checkpoint. The Monotonic-only workflow skips teacher preparation.
 
-| 設定 | 既定値 | 意味 |
+| Setting | Default | Purpose |
 |---|---:|---|
-| `T2TT_BASE_UPDATES` | 20000 | sourceの完了予算。実際のlast stepも照合 |
-| `T2TT_TARGET_UPDATES` | 200000 | 新stageの終了上限 |
-| `RUN_T2TT_EXTENSION` | True | 6.1aの延長学習を実行 |
-| `USE_EXTENDED_T2TT` | True | 評価・後続処理で200k stageのbestを選択 |
-| `T2TT_SNAPSHOT_UPDATES` | 10000 | full Drive ZIPのupdate間隔 |
-| `T2TT_KEEP_LAST` | 2 | 最新の保持個数。milestoneは別途保持 |
-| `RUN_TEACHER_ARTIFACTS` | False | 評価確認後にAttentionへ進むための明示スイッチ |
+| `T2TT_BASE_UPDATES` | 20000 | Source budget. Also checked against the last checkpoint step |
+| `T2TT_TARGET_UPDATES` | 200000 | End of the continuation stage |
+| `RUN_T2TT_EXTENSION` | False | Enable to run extension in 6.1a |
+| `USE_EXTENDED_T2TT` | True | Use the best checkpoint from the 200k stage for evaluation and downstream stages |
+| `T2TT_SNAPSHOT_UPDATES` | 10000 | Update interval between full Drive ZIPs |
+| `T2TT_KEEP_LAST` | 2 | Recent snapshots to retain in addition to milestones |
+| `RUN_TEACHER_ARTIFACTS` | False | Explicit switch to prepare attention after evaluation |
 
-`T2TT_UPDATES` は旧20k予算の互換aliasであり、200kの終了上限には使用しない。`USE_EXTENDED_T2TT` を切り替えたら、直下の保存先セルも再実行する。学習済み200kを評価するだけなら `RUN_T2TT_EXTENSION=False`、`USE_EXTENDED_T2TT=True` とする。20kの再学習は起動しない。
+`T2TT_UPDATES` is a legacy alias for the 20k budget. The 200k limit comes from `T2TT_TARGET_UPDATES`. Rerun the storage-path cell after changing `USE_EXTENDED_T2TT`. To evaluate a completed 200k run, set `RUN_T2TT_EXTENSION=False` and `USE_EXTENDED_T2TT=True`.
 
-## 検証するsource
+## Source verification
 
-sourceは `PERSISTENT/stages/t2tt` のlatest **verified** ZIP。固定benchmark revisionの `latest/restore` をそのまま使い、ZIP SHA256・member一覧・各ファイルSHA256を確認する。
+Use the latest verified ZIP in `PERSISTENT/stages/t2tt`. The pinned benchmark's `latest/restore` checks the ZIP SHA-256, member list, and individual file hashes.
 
-- snapshotのbenchmark revision、training module、manifest/configの論理パスと内容hash、output、planned max updatesを照合する。interpreterを含む元の入力identityも照合する。
-- `checkpoint_last.pt`・`checkpoint_best.pt`・`experiment.json`・`metrics.jsonl` を必須とする。
-- snapshotのupdatesとlastの実stepが20,000であることを確認する。bestは同じcontractで、stepがlast以下でなければならない。
-- lastのmodel/Adam state、epoch、cursor、best loss、bad validations、Python/NumPy/Torch/CUDA RNGを必須とする。
-- last・best・experimentのscientific contract本体とそのhashを照合する。元の学習ログはstep 1からlastまで連続したprefixでなければならない。
+- Verify the benchmark revision, training module, logical manifest and config paths and their hashes, output, planned update budget, and original input identity including the interpreter.
+- Require `checkpoint_last.pt`, `checkpoint_best.pt`, `experiment.json`, and `metrics.jsonl`.
+- Require 20,000 updates in the snapshot and last checkpoint. The best checkpoint must share the contract and have a step at or before the last checkpoint.
+- Require model and Adam state, epoch, cursor, best loss, bad validation count, and Python, NumPy, Torch, and CUDA RNG state in the last checkpoint.
+- Verify the scientific contract and hash across last, best, and experiment metadata. Training metrics must contain a contiguous prefix from step 1 to the last update.
 
-不足・破損・異なる設定を検出した場合は停止する。update 0から再学習したり、bestからresumeしたり、contract hashを書き換えたりしない。
+Missing files, corruption, and configuration mismatches stop the extension. A verified last checkpoint and its original contract are required.
 
-## 元の学習コードを維持する理由
+## Recovering the original training code
 
-trainerのscientific contractは全Python sourceの `implementation_hash` を含む。現在のリポジトリへ評価・保存の機能を追加しただけでも、その値は20k時点と異なる。hashを上書きしてresume制約を解除すると、同一implementationの保証が失われる。
+The trainer's scientific contract binds the `implementation_hash` of all Python sources. Evaluation and persistence changes can change this hash. Continuation requires the original implementation.
 
-extensionはcheckpointのhashと一致する完全なsource treeを探す。現在のtreeが一致すればbyte単位でコピーし、異なる場合はGit履歴を照合して元revisionをexportする。隔離先は新stage内の `.training-runtime/`。一致しなければ停止する。
+The extension looks for the complete source tree matching the checkpoint hash. It copies an exact current tree or exports the matching revision from local Git history to `.training-runtime/` inside the new stage. It stops if the tree cannot be verified.
 
-隔離した元のCLI/parser/model/trainerを別processで実行する。初回とresume時には、まず終了上限を現在の保存stepにした**optimizer更新0回のpreflight**を実行する。元trainer自身のcontract検査・optimizer/RNGロードを通し、target contractがsourceと等しいことを確認する。checkpointのbytesは変更しない。その後、同じlastを再ロードして本継続を開始する。
+Run the isolated CLI, parser, model, and trainer in a separate process. On first launch and resume, run a zero-update preflight with the limit set to the saved step. The original trainer verifies the contract and loads the optimizer and RNG. After checking source and target contract equality, reload the same last checkpoint and continue.
 
-変更する科学的な実行条件は終了上限だけ。manifest、architecture、tokenizer、seed、LR/warmup、batch/update-frequency/max-tokens、clip、label smoothing、validation/save interval、patience、backend、train/dev、implementationは保持する。LRはglobal optimizer updateから続き、warmupはリセットしない。max updatesは従来どおりscientific contractに含めず、新stageのexperimentにだけ `planned_max_updates=200000` を保存する。
+Only the ending update limit changes. The continuation uses the original manifest, architecture, tokenizer, seed, LR and warmup, batch and update frequency, max tokens, clipping, label smoothing, validation and save intervals, patience, backend, splits, and implementation. LR follows the global optimizer update. The new stage records `planned_max_updates=200000` in the experiment metadata, outside the scientific contract.
 
-## 完全なcontinuationとbest選択
+## Continuation and best-checkpoint selection
 
-resume元は **`checkpoint_last.pt`**。model、optimizer、step、epoch/cursor、最良dev loss、bad validations、4種類のRNGを元trainerがそのまま復元する。
+Resume from `checkpoint_last.pt` to restore the model, optimizer, step, epoch and cursor, best dev loss, bad validation count, and all four RNG states.
 
-`checkpoint_best.pt` もそのままseedする。20k以後のdev/main_lossがさらに改善した場合だけ、元trainerが更新する。200kでの最終teacherは「200kまでに観測した最良dev lossのbest」であり、lastへ置き換えない。best stepが20kより前のままになる場合もある。
+Seed `checkpoint_best.pt` from the source. The original trainer updates it only when `dev/main_loss` improves after 20k. The final teacher is the best dev-loss checkpoint observed through 200k and may have a step before 20k.
 
-`extension-lineage.json` はsource stage/snapshot identity・ZIP SHA・last/best SHA・source/target契約hash・source/target予算を保存する。`extension-plan.json` は元command、隔離implementation、実行・保存policyを記録する。両方とmilestone記録・control scriptを各復旧ZIPにも含める。
+`extension-lineage.json` stores source stage and snapshot identity, ZIP and checkpoint hashes, source and target contract hashes, and budgets. `extension-plan.json` stores the original command, isolated implementation, and run and save policies. Recovery ZIPs include both files, milestones, and the controller.
 
-## 保存頻度と保持
+## Snapshot frequency and retention
 
-validation=1000、VM local checkpoint save=100は元のrecipeを変更しない。元trainerの**保存通知callbackだけ**を延長process内で包み、Driveへのfull ZIPを既定10000 updates、milestone、最終updateで公開する。local progressは従来のschemaで更新する。5000など、local save間隔の倍数へ変更できる。
+Validation runs every 1000 updates and local checkpoint saves every 100. The extension wraps the trainer's completed-save callback and publishes full Drive ZIPs every 10,000 updates by default, at milestones, and at the final update. Local progress uses the existing schema. The snapshot interval can use another multiple of the local save interval, such as 5000.
 
-sourceコードファイル・model/loss/optimizer処理は変更しない。queue・freeze・upload・checksum・復旧には固定benchmarkの実装を使う。元20k stageとS2UT stageのcallbackや保存頻度には影響しない。
+The pinned benchmark handles the queue, freeze, upload, checksum, and recovery for the extension stage. The continuation uses the original training code and save policy for the source 20k and S2UT stages.
 
-新しいZIPのuploadとchecksum検証が成功した後に、**新stageだけ**を最新2個＋50k/100k/150k/200k milestoneへ整理する。20k sourceは一切pruneしない。不明なファイルを含むdirectoryは保持し、削除失敗は記録して継続する。
+After a new ZIP uploads and passes checksum verification, retain the latest two snapshots plus the 50k, 100k, 150k, and 200k milestones within the extension stage. Keep all 20k source snapshots and directories with unknown files. Log deletion failures and continue.
 
-`extension-milestones.json` に20kおよび各milestoneの実best loss/best stepを記録する。各milestoneのZIPにはその時点のbestも入るため、後から同じ固定300件で再評価できる。
+`extension-milestones.json` records the actual best loss and step at 20k and each milestone. Each milestone ZIP contains its then-current best checkpoint for reevaluation on the same fixed 300 samples.
 
-異常終了の最終backupでは、復旧checkpointより後の未確定metrics行を**freezeされたbackupコピーだけ**から除外する。VM上の原ログは保持し、再開後にstepの重複を作らない。曲線reportもupdateの欠落・重複を警告する。
+On failure, the final backup trims metrics beyond the recovery checkpoint from the frozen backup copy. Keep the original VM log. The learning-curve report flags missing and duplicate steps.
 
-## 独立した保存先
+## Separate storage paths
 
-| 用途 | VMローカル | Drive stage |
+| Purpose | Local VM | Drive stage |
 |---|---|---|
-| source 20k | `ROOT/t2tt`（extensionからread-only） | `PERSISTENT/stages/t2tt`（read-only） |
+| Source 20k | `ROOT/t2tt` (read-only to the extension) | `PERSISTENT/stages/t2tt` (read-only) |
 | extended training | `ROOT/t2tt-200k` | `PERSISTENT/stages/t2tt-200k` |
 | extended dev | `ROOT/text-evaluation/t2tt-200k/dev-text.json` | `t2tt-dev-200k` |
 | extended FLEURS | `ROOT/text-evaluation/t2tt-200k/flores-fleurs/flores-fleurs-text.json` | `t2tt-flores-fleurs-200k` |
@@ -85,17 +85,17 @@ sourceコードファイル・model/loss/optimizer処理は変更しない。que
 | projected teacher | `ROOT/teacher-alignment-200k` | `teacher-alignment-200k` |
 | alignment audit | `ROOT/audit-200k` | `diagnostics-200k` |
 
-上表のstage略記はすべて `PERSISTENT/stages/` 以下。20kの従来の保存先は変更しない。FLEURSの入力は共通の `ROOT/external-text-input/fixed-8c.json` で、保存済み8Cの同じ300件を再利用する。
+Abbreviated Drive stages in the table are under `PERSISTENT/stages/`. Both runs share `ROOT/external-text-input/fixed-8c.json` and the same saved 8C set of 300 examples.
 
-`T2TT_CHECKPOINT = T2TT_ACTIVE_ROOT / 'checkpoint_best.pt'` がdev・外部評価・Attentionの唯一の参照元。teacher作成とS2UTも選択中のAttention/teacher directoryを参照する。extended teacherを使うS2UT結果は `annealed-t2tt-200k` へ分離する。
+`T2TT_CHECKPOINT = T2TT_ACTIVE_ROOT / 'checkpoint_best.pt'` supplies dev evaluation, external evaluation, and attention extraction. Teacher construction and S2UT use the selected attention and teacher directories. S2UT with the extended teacher writes to `annealed-t2tt-200k`.
 
-## 学習中のlossとDrive用サマリー
+## Live loss and Drive summaries
 
-延長を起動した親processが、VMローカルの`metrics.jsonl`を1秒ごとに追記読み込みする。100 updatesごと、または新しいdev測定があれば、`[T2TT loss]`としてtrain loss・LR・最新dev lossとその測定update・観測済みbestを標準エラーへ出す。通常のprocess loggerがNotebookへ表示して`.log`へ保存する。開始時と終了時にも最新行を表示し、書込み途中のJSONL行は次の読込みまで待つ。これは未保存の更新を含むローカル観測であり、durable progressの代用にはしない。
+The parent process tails the VM-local `metrics.jsonl` once per second. Every 100 updates or on a new dev measurement, it writes `[T2TT loss]` with train loss, LR, latest dev loss and update, and best observed loss to stderr. The shared logger displays and saves it. The monitor reports at startup and exit and waits for incomplete JSONL lines. Live observations can be ahead of the latest durable checkpoint.
 
-各full ZIPを固定benchmark実装で公開・検証した後、そのsnapshot directoryへ`metrics-summary.json`を1回保存する。材料は学習が更新している原本ではなく、そのZIP用にfreezeしてcheckpoint updateまでtrimしたローカルコピー。snapshot ZIP SHA・metrics SHA・best checkpoint SHA・contract・durable updateで対応付ける。最新train/dev、dev測定update、実際のbest checkpoint step/loss、履歴を含める。
+After publishing and verifying each full ZIP, write `metrics-summary.json` once in its snapshot directory. Use the frozen metrics copy trimmed to the checkpoint update. Bind the summary to the ZIP, metrics, and best-checkpoint hashes, contract, and durable update. Include latest train and dev values, dev measurement step, actual best step and loss, and history.
 
-履歴は最大2000個の実測点。validation点は1000個以下ならすべて保持し、残りにtrainの観測点を均等抽出する。それを超えるvalidationも間引く。平均・補間・loss値の推定は行わず、全履歴は従来どおりZIP内の`metrics.jsonl`に残す。Driveへの細かな連続書込みは追加しない。サマリー作成・保存の失敗は警告し、公開済みcheckpointを失敗扱いにしない。retentionは同じsnapshotに対応するサマリーだけを併せて整理する。
+Keep up to 2000 measured points. Retain all dev measurements up to 1000 and fill remaining slots with evenly sampled training points. Sample dev points when there are more than 1000. The ZIP's `metrics.jsonl` contains the complete history. Summary failure emits a warning and the published checkpoint remains usable. Retention removes summaries with their corresponding snapshots.
 
 ```text
 PERSISTENT/stages/t2tt-200k/<update>-<id>/
@@ -104,15 +104,15 @@ PERSISTENT/stages/t2tt-200k/<update>-<id>/
   metrics-summary.json
 ```
 
-サマリーは診断用で、復旧の根拠は引き続き検証済みZIP/receipt。親processの監視だけで元の学習source・worker control hash・scientific contractを変更しない。保存済み旧control scriptのrunでも通常の延長再開時から利用できる。完了済みstageを再確認するときも、サマリーがなければ復元済みローカル履歴から作り、checkpointを再学習しない。
+The verified ZIP and receipt remain the recovery source. Monitoring lives in the parent process and uses the original trainer and worker contract. It can monitor a resumed run with an older saved controller. For completed stages missing summaries, regenerate them from restored local history.
 
-すでに動いているprocessにはコード更新が自動反映されない。loss表示のためだけに停止する必要はない。今すぐ数値を見るにはColabのファイル欄から`ROOT/t2tt-200k/metrics.jsonl`をダウンロードし、次の通常再開時に更新したNotebookを使う。実行中セルがあると別のコードセルは待機するため、並行セルの実行を手順にしない。
+An active process uses its loaded code. To view live history, download `ROOT/t2tt-200k/metrics.jsonl` from Colab's Files panel. Use the updated notebook at the next normal resume. A second code cell waits while the training cell is active.
 
-## 再開
+## Resume
 
-同じrevision・設定・入力パスでNotebookを再実行する。`t2tt-200k` 自身にverified snapshotがあれば、source stageを読み直さず、そこからlastを復元して続ける。必要な元implementationも保存したrevision/hashで再構築する。完了済み200kではoptimizer更新を再実行しない。
+Rerun with the same revision, settings, and input paths. If `t2tt-200k` has a verified snapshot, restore its last checkpoint and original implementation directly from the saved revision and hash. Completed 200k stages perform zero optimizer updates.
 
-新stageにまだverified snapshotがなければ、sourceのverified 20kからseedする。未公開のローカル作業は元のbenchmark復元規則で `.interrupted-*` に保持する。新stageのZIPがすべて破損している場合は20kへの巻戻しを自動実行せず停止する。最後のdurable ZIP以降の更新は、VM消失時に再計算する。
+Before the first verified continuation snapshot, seed from verified 20k and retain unpublished local work in `.interrupted-*`. If the 200k stage has ZIPs but none pass verification, stop for inspection. If the VM is lost, recompute updates after the last durable snapshot.
 
 ## CLI
 
@@ -128,7 +128,7 @@ python -m alignment_transfer_s2ut.t2tt_extension extend \
   --snapshot-updates 10000 --keep-last 2
 ```
 
-Colabでは6.1aの共通logger＋GPU監視経由で実行する。通常の `train_session()` に20k directoryのまま別budgetを渡す方法は使用しない。
+In Colab, run 6.1a through the shared logger with GPU monitoring. The dedicated extension runner owns the budget change and uses a separate stage.
 
 ```bash
 python -m alignment_transfer_s2ut.t2tt_extension status \
@@ -137,10 +137,10 @@ python -m alignment_transfer_s2ut.t2tt_extension report \
   --work /local/work/t2tt-200k --output /local/work/t2tt-200k/diagnostics
 ```
 
-reportはtrain/main_loss・dev/main_loss・train/learning_rateをoptimizer updateに対して描く。20k比較欄はVM上にある従来の保存JSONから読み、欠落した値は空欄とする。得点をハードコードしない。
+The report plots `train/main_loss`, `dev/main_loss`, and `train/learning_rate` against optimizer update. It reads 20k comparison values from saved local JSON and leaves missing entries blank.
 
-## CPU継続試験の実行条件
+## CPU continuation tests
 
-縮小モデルの完全一致試験では、基準を学習するpytest processと、延長を学習する新しいPython processのCPUスレッド数をともに1へ揃える。`torch.set_num_threads(1)` は子processへ継承されないため、試験fixture内だけで `OMP_NUM_THREADS=1`・`MKL_NUM_THREADS=1` も設定し、終了時に元へ戻す。比較には引き続き `torch.equal` を使用する。本番のT2TT/S2UT学習・Notebook全体のスレッド数は変更しない。
+Set one CPU thread in both the pytest baseline and the extension subprocess for exact equality. `torch.set_num_threads(1)` is process-local, so the test fixture also sets `OMP_NUM_THREADS=1` and `MKL_NUM_THREADS=1` for child processes and restores them at exit. Compare tensors with `torch.equal`.
 
-全層転移では、Attention/teacher/audit/転移runの上記保存先へ`-all-layers`を付けて分離する。T2TT学習・dev/外部評価・CTCの保存先は変えない。[全層の実行設定](ALL_LAYER_TRANSFER.md)を参照。
+All-layer runs add `-all-layers` to the attention, teacher, audit, and transfer paths. They share the T2TT training, dev and external evaluation, and CTC paths. [All-layer settings](ALL_LAYER_TRANSFER.md)
