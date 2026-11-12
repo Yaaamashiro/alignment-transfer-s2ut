@@ -28,7 +28,7 @@ To reuse trained T2TT, specify its `T2TT_RUN_ID` and original text manifest. The
 
 ## evaluate.ipynb
 
-1. Use the same `EXPERIMENT_ID` and corpus settings as training.
+1. Use the same `EXPERIMENT_ID`, `TRANSFER_EXPERIMENT_ID`, and corpus settings as training.
 2. Restore the preprocessing artifacts and Baseline, then restore selected transfer models from completed, verified snapshots.
 3. Generate dev predictions with the common native fairseq generator and compare UER and optional ASR-BLEU.
 

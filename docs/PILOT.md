@@ -22,7 +22,7 @@ Each probe runs in a separate process. It reads the saved model and the first ca
 
 ## Continue to 400,000 updates
 
-Set `TRANSFER_RUN_MODE='full'`, keep the same selected conditions and paths, and rerun from setup on a fresh runtime or rerun the settings and transfer sections in the existing runtime. The verified snapshot restores the last durable update. The optimizer, scheduler, and sampler continue from that point. Use a new experiment ID for changes to data, teacher, seed, calibration, top-p, or other scientific settings.
+Set `TRANSFER_RUN_MODE='full'`, keep the same selected conditions and paths, and rerun from setup on a fresh runtime or rerun the settings and transfer sections in the existing runtime. The verified snapshot restores the last durable update. The optimizer, scheduler, and sampler continue from that point. For a new calibration or top-p trial, set a new `TRANSFER_EXPERIMENT_ID` and keep `EXPERIMENT_ID` to reuse the original Baseline and corpus. Use the same `TRANSFER_EXPERIMENT_ID` in the evaluation notebook. A different corpus, seed, or recipe requires a matching Baseline registration.
 
 The native CLI accepts `benchmark train --stop-after-update N` as an operational limit. The same command without that argument resumes to the registered training budget. After successful publication the session reports `COMPLETED` at the full budget. Errors and runtime interruptions retain verified snapshots for recovery. The final registration and [evaluate.ipynb](../notebooks/colab/evaluate.ipynb) require a completed transfer run.
 

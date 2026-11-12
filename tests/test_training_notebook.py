@@ -43,6 +43,21 @@ def test_primary_notebooks_have_canonical_logging_and_no_raw_subprocesses():
                     assert not (isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess")
 
 
+def test_transfer_id_isolates_transfer_paths_and_reuses_original_inputs(tmp_path):
+    changed = []
+    for name in ("training", "evaluate"):
+        source, ns = namespace(tmp_path, name)
+        exec(source["paths"], ns)
+        original = {key: ns[key] for key in ("ROOT", "PERSISTENT", "BACKUP", "PREPARED", "BASELINE")}
+        research = ns["RESEARCH_ROOT"]
+        ns["TRANSFER_EXPERIMENT_ID"] = "top-p-95"
+        exec(source["paths"], ns)
+        assert {key: ns[key] for key in original} == original
+        assert ns["RESEARCH_ROOT"] != research and ns["RESEARCH_ROOT"].name.endswith("-run-top-p-95")
+        changed.append(ns["RESEARCH_ROOT"])
+    assert changed[0] == changed[1]
+
+
 def test_training_cpu_pack_mode_skips_all_model_training(tmp_path):
     source, ns = namespace(tmp_path, "training")
     ns.update(NEED_TEACHER=True, NEED_TEXT=True, RUN_BASELINE=True, RUN_T2TT=True)

@@ -1,5 +1,13 @@
 # Validation record
 
+## 2026-11-13 — Native transfer Pilot and diagnostics
+
+- Passed 102 targeted CPU tests covering native training, calibration, ZIP recovery, Baseline registration, and the notebook commands. For all three transfer conditions, the tiny two-update run saved at update 1, rejected final registration while paused, restored a verified ZIP to the original path from a cold local directory, and continued to update 2. The resumed and uninterrupted runs matched model weights, optimizer state, scheduler state, iterator, RNG, and checkpoint selection. The KL case paused between regular saves and also produced a teacher-free dev UER score.
+- Passed four CUDA tests on a GTX 1650 Max-Q with PyTorch 2.7.1+cu126. The Annealed KL Pilot also matched FP32 master weights and FP16 loss-scaler counters after recovery. The other three checks exercised the existing FP16 training and corpus integration paths.
+- Passed four additional CPU checks, including an exact replay of the old `1c4ed71` calibration for λ, τ, per-layer losses and counts, and logical gradient norms. Verified the LF and CRLF Baseline-only compatibility rules and checked the wheel's new CLI and packaged source files.
+- Passed 31 notebook and command tests after pinning training and evaluation to the tested implementation. The alternate transfer ID isolates transfer paths and shares the original Baseline and prepared data. Both notebooks passed schema, Python syntax, and HTML rendering checks.
+- Verified Baseline registration and the unchanged native recipe on local fixtures. The active Colab session and its Drive artifacts were not accessed. Production corpus execution, Colab/Drive performance, and Pilot ASR-BLEU still require a Colab run.
+
 ## 2026-11-12 — Colab GitHub authentication and English documentation
 
 - Verified anonymous clone, fetch, and checkout against the public GitHub repository at the exact revisions pinned in the training and evaluation notebooks. Checked that `origin` retained the plain HTTPS URL and that the public benchmark remote was reachable.
