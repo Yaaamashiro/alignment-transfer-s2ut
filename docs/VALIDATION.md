@@ -1,5 +1,11 @@
 # Validation record
 
+## 2026-11-13 — Baseline provenance and Pilot recovery check
+
+- Tested the historical `fcfbbfc` adapter against the exact Baseline runtime lock and checked successful and conflicting launch evidence, altered checkpoints, and missing revision evidence. The provenance check only reads the original Baseline artifacts.
+- Four CUDA tests passed on a GTX 1650 Max-Q. The synthetic FP16 run published update 2, restored it into an empty run directory, passed the update-4 recovery check, and continued to update 5. The result matched uninterrupted training across the synthetic epoch boundaries, including model, optimizer, scheduler, RNG, sampler, scaler counters, and FP32 master weights.
+- Forty focused provenance, notebook, and CLI checks passed. Verified the training notebook schema, Python cells, and HTML rendering. The actual Baseline launch logs, real corpus, Colab GPU, and DriveFS recovery remain to be checked in Colab.
+
 ## 2026-11-13 — Native transfer Pilot and diagnostics
 
 - Passed 102 targeted CPU tests covering native training, calibration, ZIP recovery, Baseline registration, and the notebook commands. For all three transfer conditions, the tiny two-update run saved at update 1, rejected final registration while paused, restored a verified ZIP to the original path from a cold local directory, and continued to update 2. The resumed and uninterrupted runs matched model weights, optimizer state, scheduler state, iterator, RNG, and checkpoint selection. The KL case paused between regular saves and also produced a teacher-free dev UER score.
