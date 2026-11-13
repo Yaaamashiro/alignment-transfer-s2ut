@@ -21,7 +21,7 @@ from ..benchmark import read_record, artifact_contract
 from ..config import BackboneConfig
 from ..data.manifest import load_manifest
 from ..io import ArtifactStore, read_json, write_jsonl, read_jsonl
-from ..alignment.losses import loss_and_logs
+from ..alignment.losses import encoder_padding_mask, loss_and_logs
 from ..training import prior_builder
 
 
@@ -169,8 +169,7 @@ class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
             return super().forward(model, sample, reduce)
         task_loss, size, logs, raw = self.components(model, sample, reduce)
         policy = self.task.transfer_policy
-        lengths = model.encoder.subsample.get_out_seq_lens_tensor(sample["net_input"]["src_lengths"])
-        padding = torch.arange(raw.size(-1), device=raw.device)[None] >= lengths[:,None]
+        padding = encoder_padding_mask(model, sample, raw)
         alignment, diagnostics = loss_and_logs(sample["alignment_prior"], raw, policy,
             model.alignment_updates, self.task.training_budget, padding)
         loss = task_loss + size * alignment

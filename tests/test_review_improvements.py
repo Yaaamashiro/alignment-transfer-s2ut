@@ -137,6 +137,8 @@ def test_monotonic_training_and_audit(review_data, tmp_path):
     assert summary["valid_source_tokens_ratio"] < 1
     assert summary["valid_target_tokens_ratio"] < 1
     assert summary["smoothed_entropy"] >= summary["prior_entropy"]
+    assert summary["pair_ids"] and 0 <= summary["layers"][0]["unmapped_source_mass_ratio"] <= 1
+    assert (tmp_path / "audit/layers.csv").is_file()
     assert list((tmp_path / "audit/heatmaps").glob("*.png"))
 
 

@@ -53,6 +53,69 @@ def test_native_calibration_is_reproducible_and_binds_plan(calibrated):
         b.make_plan(root/"baseline.json",root/"missing",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher")
 
 
+@pytest.mark.parametrize("native_data", [2], indirect=True)
+def test_both_calibration_passes_use_native_encoder_padding(calibrated, monkeypatch):
+    from fairseq import tasks
+    from alignment_transfer_s2ut.s2ut import benchmark_extension as extension
+    from alignment_transfer_s2ut.alignment.losses import encoder_padding_mask
+
+    root, _ = calibrated
+    plan = b.make_plan(root / "baseline.json", root / "run", manifest=root / "manifest.jsonl",
+                       units=root / "units", teacher=root / "teacher", for_calibration=True)
+    def padded_batches(trainer, count):
+        trainer.task.load_dataset("train")
+        dataset = trainer.task.dataset("train")
+        for _ in range(count):
+            yield [dataset.collater([dataset[0], dataset[1]])]
+
+    monkeypatch.setattr(c, "logical_batches", padded_batches)
+    analysis = root / "analysis/padded-top-p.json"
+    c.diagnostics(plan, analysis, batches=2)
+    seen = []
+    original = c.layer_statistics
+
+    def capture(teacher, student, kind, top_p, source_padding=None):
+        assert source_padding is not None
+        seen.append(source_padding.clone())
+        return original(teacher, student, kind, top_p, source_padding)
+
+    monkeypatch.setattr(c, "layer_statistics", capture)
+    c.calibrate(plan, root / "analysis/padding.json", analysis, .8, batches=2)
+    assert len(seen) == 8
+    assert all(torch.equal(seen[0], mask) for mask in seen)
+
+    run = root / "native"
+    plan = b.make_plan(root / "baseline.json", run, manifest=root / "manifest.jsonl",
+                       units=root / "units", teacher=root / "teacher", calibration=root / "analysis/alignment-calibration.json")
+    write_json(run / "native-run.json", plan)
+    cfg = b.native_config(plan["config"])
+    task = tasks.setup_task(cfg.task)
+    task.load_dataset("train")
+    dataset = task.dataset("train")
+    sample = dataset.collater([dataset[0], dataset[1]])
+    model, criterion = task.build_model(cfg.model), task.build_criterion(cfg.criterion)
+    for name, auxiliary in task.multitask_tasks.items():
+        criterion.set_multitask_loss_weight(name, auxiliary.args.get_loss_weight(0))
+    native_masks = []
+    native_loss = extension.loss_and_logs
+
+    def capture_native(teacher, student, policy, step, budget, padding):
+        native_masks.append(padding)
+        return native_loss(teacher, student, policy, step, budget, padding)
+
+    monkeypatch.setattr(extension, "loss_and_logs", capture_native)
+    criterion(model, sample)
+    mask, = native_masks
+    assert mask.any() and (~mask).any()
+    torch.testing.assert_close(mask, seen[0])
+    torch.testing.assert_close(mask, encoder_padding_mask(model, sample, sample["alignment_prior"]))
+    prior = sample["alignment_prior"]
+    assert not prior.masked_select(mask[:, None, None, :]).count_nonzero()
+    target_lengths = sample["target"].ne(task.target_dictionary.pad()).sum(-1)
+    for batch, size in enumerate(target_lengths.tolist()):
+        assert not prior[batch, :, size - 1:].count_nonzero()
+
+
 @pytest.mark.parametrize("native_data",[2],indirect=True)
 def test_yaml_fraction_reaches_plan_and_changes_resume_contract(calibrated,monkeypatch):
     import yaml

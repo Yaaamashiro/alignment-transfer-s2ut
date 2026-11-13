@@ -43,6 +43,36 @@ def test_ctc_repeated_labels_require_blank_and_viterbi_spans():
         viterbi_spans(probs[:2], [1, 1], 0, 0.2)
 
 
+def test_projection_audit_counts_blank_gaps_and_teacher_mass_before_normalization():
+    from alignment_transfer_s2ut.diagnose_alignment import projection_metrics, summarize_projection, timing_metrics
+    from alignment_transfer_s2ut.tokenization.alignment import aggregate_ctc_spans
+
+    characters = np.array([[0., .125], [.25, .375], [-1., -1.], [.5, .625]])
+    tokens = np.array([[0, 2], [2, 3], [3, 4]])
+    spans = aggregate_ctc_spans(characters, tokens)
+    info = timing_metrics({"source_spans": spans, "source_token_spans": tokens,
+                           "source_codepoint_spans": characters}, "source", .75)
+    np.testing.assert_allclose(info["ctc_gap_intervals_seconds"], [[.125, .25], [.375, .5], [.625, .75]])
+    assert info["masked_codepoints"] == 1
+    assert info["single_codepoint_valid_tokens"] == 1 and info["multi_codepoint_valid_tokens"] == 1
+    assert info["multi_codepoint_span_seconds_sum"] == .375
+    src = source_mapping(spans, .75, 6)
+    tgt = np.array([[1., 0.], [.5, .5], [0., 1.], [0., 0.]])
+    mt = np.array([[.25, .5, .25], [0., 1., 0.]])
+    projected = compose(mt, src, tgt)
+    expected = [.1666667, .1666667, .1666667, 0., .5, 0.]
+    np.testing.assert_allclose(projected[:2], [expected, expected], atol=1e-7)
+    np.testing.assert_array_equal(projected[2:], np.zeros((2, 6)))
+    result = summarize_projection([projection_metrics(mt, src, tgt, torch.tensor(projected))])
+    assert result["unmapped_source_mass_ratio"] == pytest.approx(.75)
+    assert result["unit_unmapped_source_mass_ratio"] == pytest.approx(.75)
+    assert result["valid_unit_rows_ratio"] == .5
+    assert result["zero_cell_ratio"] == pytest.approx(1 / 3)
+    assert result["unit_rows_without_target_overlap"] == 1
+    assert result["unit_rows_with_teacher_mass_but_zero_projection"] == 1
+    assert result["projected_row_sum_max_error"] < 1e-12
+
+
 def test_beta_zero_uniform_prior_padding_and_gradients():
     torch.manual_seed(42)
     scores = torch.randn(2, 3, 4, 5, requires_grad=True)
