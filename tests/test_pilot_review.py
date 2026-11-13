@@ -1,11 +1,13 @@
 from pathlib import Path
+import json
 import runpy
+import sys
 
 import pytest
 import torch
 
 from alignment_transfer_s2ut.colab_runtime import BENCHMARK_REVISION, BENCHMARK_RUNTIME_REVISION
-from alignment_transfer_s2ut.io import digest, file_hash, write_json, write_jsonl
+from alignment_transfer_s2ut.io import digest, file_hash, read_json, write_json, write_jsonl
 
 ROOT = Path(__file__).resolve().parents[1]
 REVIEW = runpy.run_path(str(ROOT / "tools/review_transfer_pilot.py"))
@@ -22,7 +24,6 @@ def test_original_revision_matches_historical_baseline_adapter():
 def test_completed_baseline_binds_snapshot_checkpoint_recipe_and_launch(tmp_path, monkeypatch):
     pytest.importorskip("omegaconf")
     from types import ModuleType
-    import sys
 
     paper = ModuleType("direct_s2st.s2ut.paper_recipe")
     paper.MAX_UPDATES = 400000
@@ -59,9 +60,13 @@ def test_completed_baseline_binds_snapshot_checkpoint_recipe_and_launch(tmp_path
     monkeypatch.setattr(b, "read_record", lambda _: record)
     verify = REVIEW["verify_baseline"]
     report = verify("fixture", backup, tmp_path / "reports", ROOT)
-    assert report["comparison_recipe_verified"] and report["alignment_revision_source"] == "unavailable"
+    assert report["recipe_verified"] is True
+    assert report["executed_revision_verified"] is False and report["alignment_revision_source"] == "unavailable"
+    assert "No alignment commit SHA" in report["warnings"][0]
     candidate = verify("fixture", backup, tmp_path / "reports", ROOT, revision=REVISION)
-    assert candidate["alignment_revision_source"] == "notebook_pin"
+    assert candidate["recipe_verified"] is True
+    assert candidate["executed_revision_verified"] is False and candidate["alignment_revision_source"] == "notebook_pin"
+    assert "notebook pin matches" in candidate["warnings"][0]
     assert candidate["report_path"] != report["report_path"]
 
     logs = tmp_path / "logs"
@@ -73,11 +78,36 @@ def test_completed_baseline_binds_snapshot_checkpoint_recipe_and_launch(tmp_path
             "baseline", "--train", "--work", str(work), "--backup", str(backup)]})
     result = verify("fixture", backup, tmp_path / "reports", ROOT, logs=logs)
     assert result["alignment_revision_source"] == "launch_log" and result["alignment_revision"] == REVISION
+    assert result["executed_revision_verified"] is True and result["warnings"] == []
     with pytest.raises(ValueError, match="sources disagree"):
         verify("fixture", backup, tmp_path / "reports", ROOT, revision="0" * 40, logs=logs)
+
+    metadata["alignment_revision"] = REVISION
+    write_json(meta, metadata, overwrite=True)
+    record["provenance"]["metadata_hash"] = file_hash(meta)
+    receipt_path = backup / "final/snapshot.json"
+    receipt = read_json(receipt_path)
+    receipt["files"]["research-metadata.json"] = file_hash(meta)
+    write_json(receipt_path, receipt, overwrite=True)
+    result = verify("fixture", backup, tmp_path / "reports", ROOT)
+    assert result["alignment_revision_source"] == "metadata" and result["alignment_revision"] == REVISION
+    assert result["executed_revision_verified"] is True and result["warnings"] == []
+
     last.write_bytes(b"changed")
     with pytest.raises(ValueError, match="no completed Baseline snapshot"):
         verify("fixture", backup, tmp_path / "reports", ROOT)
+
+
+def test_baseline_cli_emits_warning_to_stderr_and_json_to_stdout(monkeypatch, capsys):
+    main = REVIEW["main"]
+    report = {"recipe_verified": True, "executed_revision_verified": False, "warnings": ["Baseline revision unverified"]}
+    monkeypatch.setitem(main.__globals__, "verify_baseline", lambda **kwargs: report)
+    monkeypatch.setattr(sys, "argv", ["review_transfer_pilot.py", "baseline", "--baseline", "record",
+                                    "--backup", "backup", "--output", "report", "--repo", "."])
+    main()
+    output = capsys.readouterr()
+    assert json.loads(output.out) == report
+    assert output.err.strip() == "WARNING: Baseline revision unverified"
 
 
 def test_short_recovery_requires_cold_directory_and_optimizer_history(tmp_path):

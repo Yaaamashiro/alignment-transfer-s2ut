@@ -2,7 +2,7 @@
 
 Use the Pilot after the 400,000-update Baseline has published its final Drive snapshot. Use the original Baseline experiment ID, corpus, prepared data, and snapshot location. In **Baseline**, the notebook checks the last and best checkpoints against the snapshot receipt, recipe, runtime lock, and registered scientific configuration. It saves a JSON report under the transfer run's `baseline-provenance` directory.
 
-Set `BASELINE_NOTEBOOK_REVISION` to the full alignment commit SHA from the original Baseline notebook when available. Set `BASELINE_EXECUTION_LOGS` to the exported `execution` directory from the original run to verify the checkout and matching Baseline launch. The report labels the source as `launch_log`, `metadata`, `notebook_pin`, or `unavailable`. A matching notebook pin establishes adapter compatibility for that candidate commit. The launch log or recorded metadata supplies evidence of the executed revision. The report stops on conflicting evidence or an incompatible lock.
+Set `BASELINE_NOTEBOOK_REVISION` to the full alignment commit SHA from the original Baseline notebook when available. Set `BASELINE_EXECUTION_LOGS` to the exported `execution` directory from the original run to verify the checkout and matching Baseline launch. The JSON report records `recipe_verified` and `executed_revision_verified` separately. The executed revision is verified when matching launch logs or recorded metadata supply the SHA. A compatible notebook pin identifies a candidate commit. The notebook displays and records a warning when it only has the notebook pin or has no revision evidence. Conflicting evidence or an incompatible lock stops verification.
 
 ## Configure the experiment
 

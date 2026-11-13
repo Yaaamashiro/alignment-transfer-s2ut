@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 import torch
 
@@ -143,8 +144,16 @@ def verify_baseline(baseline, backup, output, repo, revision=None, logs=None):
     if candidate:
         verify_adapter(repo, candidate, lock["adapter_sha256"])
     source = "launch_log" if entries else "metadata" if recorded else "notebook_pin" if revision else "unavailable"
+    executed_revision_verified = source in {"launch_log", "metadata"}
+    warnings = []
+    if not executed_revision_verified:
+        detail = ("The notebook pin matches the adapter lock." if source == "notebook_pin"
+                  else "No alignment commit SHA was available for the adapter check.")
+        warnings.append("Baseline executed revision is unverified. " + detail
+                        + " Supply the original Colab execution logs to verify the launch.")
     evidence = {**baseline_evidence(record),
-        "comparison_recipe_verified": True, "baseline_record_hash": record["record_hash"],
+        "recipe_verified": True, "executed_revision_verified": executed_revision_verified,
+        "warnings": warnings, "baseline_record_hash": record["record_hash"],
         "snapshot_receipt_sha256": file_hash(marker), "checkpoint_hashes": hashes,
         "adapter_sha256": lock["adapter_sha256"], "alignment_revision": candidate,
         "alignment_revision_source": source, "launch_evidence": entries}
@@ -226,7 +235,12 @@ def main():
     child.add_argument("--output")
     args = vars(parser.parse_args())
     action = args.pop("action")
-    result = verify_baseline(**args) if action == "baseline" else recovery_check(**args)
+    if action == "baseline":
+        result = verify_baseline(**args)
+        for warning in result["warnings"]:
+            print("WARNING: " + warning, file=sys.stderr, flush=True)
+    else:
+        result = recovery_check(**args)
     print(json.dumps(result, allow_nan=False))
 
 
