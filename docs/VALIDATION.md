@@ -1,5 +1,12 @@
 # Validation record
 
+## 2026-11-14 — Calibration padding and teacher projection audit
+
+- Compared identical teacher/student inputs with and without a source-padding mask before changing production code. With zero padding, KL, top-p region and mass, gradient norms and cosine, and λ and τ matched. Coverage by layer changed from `[.2500, .6250]` to `[.2917, .7083]`.
+- With deliberately nonzero teacher padding, masking changed first-layer KL from 29.3471 to 1.1090 and top-p student region mass from .04988 to .17907. KL τ and λ changed from 19.9735 and 3.6096 to .25587 and 2.8299. Mask τ and λ changed from .57658 and 21.7486 to .45898 and 11.7326. Task gradient norm remained 2.4617. These are synthetic stress-test measurements.
+- Verified that both calibration passes and the native criterion receive the same mask for a padded fairseq batch. Verified that the native teacher collater leaves source padding and target EOS/padding zero. The audit fixture measures .75 unmapped source mass, .50 valid unit row rate, and normalized valid projection rows. CPU regression suite passed 127 checks, followed by 23 focused checks on the final mask and projection cases.
+- Drive discovery found the experiment's common, prepared data, and unit extraction stages, plus the WAV packs. It did not find completed transfer manifest, imported Units, and Teacher stages under that experiment. Production projection coverage and T2TT link quality remain unmeasured. [Read-only Colab procedure](ALIGNMENT.md#run-on-saved-production-artifacts-in-colab)
+
 ## 2026-11-13 — Baseline revision reporting and shared notebook pin
 
 - Passed 66 focused provenance, notebook, authentication, and logging checks. The POSIX process-group cancellation test was skipped on Windows. Verified both primary notebooks' schema, Python syntax, HTML rendering, and shared `5b398b5` pin.

@@ -46,6 +46,12 @@ def test_native_calibration_is_reproducible_and_binds_plan(calibrated):
         assert saved["rejected_microbatches"]==expected["rejected_microbatches"]
         assert "rejected_batches" not in saved
     ordinary=b.make_plan(root/"baseline.json",root/"ordinary",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher",calibration=root/"analysis/again.json")
+    previous = {**result, "implementation_hash": "0" * 64}
+    previous["artifact_hash"] = digest({key: value for key, value in previous.items() if key != "artifact_hash"})
+    write_json(root / "analysis/previous.json", previous)
+    with pytest.raises(ValueError, match="implementation mismatch"):
+        b.make_plan(root/"baseline.json",root/"ordinary",manifest=root/"manifest.jsonl",units=root/"units",
+                    teacher=root/"teacher",calibration=root/"analysis/previous.json")
     annealed=b.make_plan(root/"baseline.json",root/"annealed",method="annealed_distillation",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher",calibration=root/"analysis/again.json")
     assert ordinary["transfer"]["calibrated"]==annealed["transfer"]["calibrated"]
     assert file_hash(b.read_record(root/"baseline.json")["checkpoint"]) == read_json(root/"baseline.json")["checkpoint_hash"]
