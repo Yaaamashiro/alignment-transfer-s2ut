@@ -1,8 +1,10 @@
 import math
 import os
 import random
+import runpy
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -66,9 +68,9 @@ def assert_nested_equal(left, right):
     pytest.param("distillation", (2, "cpu", 1, None), id="kl-mid-epoch"),
     pytest.param("annealed_distillation", (2, "cpu", 2, 2), id="annealed-report-only"),
     pytest.param("mask_distillation", 2, id="mask-native"),
-    pytest.param("annealed_distillation", (2, "cuda", 2, 2), marks=pytest.mark.gpu, id="annealed-fp16"),
+    pytest.param("annealed_distillation", (2, "cuda", 2, 2, 5), marks=pytest.mark.gpu, id="annealed-fp16"),
 ], indirect=["native_data"])
-def test_native_pilot_restore_and_continue_matches_resident_run(calibrated, benchmark_runtime, method, monkeypatch):
+def test_native_pilot_restore_and_continue_matches_resident_run(calibrated, native_data, benchmark_runtime, method, monkeypatch):
     root, calibration = calibrated
     shim = root / "sampler"
     shim.mkdir()
@@ -105,10 +107,15 @@ def test_native_pilot_restore_and_continue_matches_resident_run(calibrated, benc
 
     split, continuous = root / "split", root / "continuous"
     backup = root / "split-backup"
-    state = colab_runtime.train_session([*command(split), "--stop-after-update", "1"], split, backup)
-    assert state == {"status": "PILOT_PAUSED", "durable_updates": 1, "training_budget": 2}
+    budget = native_data.record["training_budget"]
+    paused = 2 if budget == 5 else 1
+    check = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/review_transfer_pilot.py"))["recovery_check"]
+    if budget == 5:
+        assert check(split, backup, method, "save")["target"] == paused
+    state = colab_runtime.train_session([*command(split), "--stop-after-update", str(paused)], split, backup)
+    assert state == {"status": "PILOT_PAUSED", "durable_updates": paused, "training_budget": budget}
     plan = read_json(split / "native-run.json")
-    assert plan["config"]["optimization"]["max_update"] == 2
+    assert plan["config"]["optimization"]["max_update"] == budget
     last = split / "checkpoints/checkpoint_last.pt"
     checkpoint = benchmark.load_native(last)
     assert checkpoint["last_optimizer_state"] and checkpoint["optimizer_history"][-1]["lr_scheduler_state"] is not None
@@ -123,13 +130,13 @@ def test_native_pilot_restore_and_continue_matches_resident_run(calibrated, benc
 
     before = file_hash(last)
     rng = (random.getstate(), np.random.get_state(), torch.get_rng_state())
-    probe = transfer_pilot.probe(split, 1, calibration_path, root / "probe/probe.json")
+    probe = transfer_pilot.probe(split, paused, calibration_path, root / "probe/probe.json")
     assert_nested_equal(rng, (random.getstate(), np.random.get_state(), torch.get_rng_state()))
-    assert probe["step"] == 1 and probe["status"] == "PILOT_PAUSED" and probe["dev"]["split"] == "dev"
+    assert probe["step"] == paused and probe["status"] == "PILOT_PAUSED" and probe["dev"]["split"] == "dev"
     if plan["config"]["common"]["fp16"]:
         assert probe["peak_cuda_bytes"] > 0 and probe["loss_scale"] == checkpoint["last_optimizer_state"]["loss_scale"]
     assert probe["lambda_t"] == pytest.approx(calibration["lambda_" + ("mask" if method.startswith("mask") else "kl")] *
-        ((1 + math.cos(math.pi / 1.6)) / 2 if method == "annealed_distillation" else 1))
+        ((1 + math.cos(math.pi * paused / (.8 * budget))) / 2 if method == "annealed_distillation" else 1))
     assert file_hash(last) == before
     if method == "distillation":
         scores = transfer_pilot.translate(root / "pilot-score/result.json", root / "manifest.jsonl", root / "units", run=split)
@@ -140,9 +147,13 @@ def test_native_pilot_restore_and_continue_matches_resident_run(calibrated, benc
     changed.extend(["--mask-top-p", ".95"])
     with pytest.raises(subprocess.CalledProcessError, match="returned non-zero exit status"):
         colab_runtime.train_session(changed, split, backup)
+    if budget == 5:
+        target = check(split, backup, method, "resume")["target"]
+        colab_runtime.train_session([*command(split), "--stop-after-update", str(target)], split, backup)
+        assert check(split, backup, method, "resume", report=True)["status"] == "RECOVERY_CHECK_PASSED"
     resumed = colab_runtime.train_session(command(split), split, backup)
     whole = colab_runtime.train_session(command(continuous), continuous, root / "continuous-backup")
-    assert resumed == whole == {"status": "COMPLETED", "durable_updates": 2, "training_budget": 2}
+    assert resumed == whole == {"status": "COMPLETED", "durable_updates": budget, "training_budget": budget}
     final = benchmark.load_native(last)
     reference = benchmark.load_native(continuous / "checkpoints/checkpoint_last.pt")
     for key in ("model", "last_optimizer_state"):
@@ -151,8 +162,8 @@ def test_native_pilot_restore_and_continue_matches_resident_run(calibrated, benc
     assert_nested_equal(final["optimizer_history"][-1], reference["optimizer_history"][-1])
     for key in ("alignment_rng", "train_iterator", "alignment_selection", "best", "alignment_fp16_scaler", "alignment_fp32_master"):
         assert_nested_equal(final["extra_state"].get(key), reference["extra_state"].get(key))
-    assert [row["step"] for row in read_jsonl(split / "alignment-train.jsonl")] == [1, 2]
+    assert [row["step"] for row in read_jsonl(split / "alignment-train.jsonl")] == list(range(1, budget + 1))
     record = benchmark.register_transfer(split, last.with_name("checkpoint_best.pt"), root / "final.json")
     assert record["scientific_config"] == read_json(baseline)["scientific_config"]
-    assert record["training_budget"] == 2 and record["method"] == method
+    assert record["training_budget"] == budget and record["method"] == method
     assert {path: file_hash(path) for path in protected} == protected

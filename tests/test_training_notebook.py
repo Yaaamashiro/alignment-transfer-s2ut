@@ -58,6 +58,37 @@ def test_transfer_id_isolates_transfer_paths_and_reuses_original_inputs(tmp_path
     assert changed[0] == changed[1]
 
 
+@pytest.mark.parametrize("phase,target", [("save", 2), ("resume", 4)])
+def test_training_recovery_check_routes_one_native_condition(tmp_path, phase, target):
+    source, ns = namespace(tmp_path, "training")
+    assert ns["TRANSFER_PILOT_UPDATES"] == 20000
+    assert ns["TRANSFER_DIAGNOSTIC_STEPS"] == [1000, 5000, 10000, 20000]
+    ns.update(PREPARE_AUDIO_PACKS=False, TRANSFER_RECOVERY_CHECK=phase, MASK_TOP_P=.8,
+              RESEARCH_ROOT=tmp_path / "research", CALIBRATION=tmp_path / "calibration.json",
+              TEACHER_ROOT=tmp_path / "teacher", RESEARCH_CONDITIONS=[("distillation", "KL", True)])
+    write_json(ns["CALIBRATION"], {})
+    calls = []
+
+    def execute_json(*args, **kw):
+        calls.append(args)
+        if args[1] == "-m":
+            return {"training_budget": 400000, "initialization": "fresh", "selection_policy": {},
+                    "transfer": {"calibration_hash": "fixture"}}
+        assert args[2] == "recovery" and args[args.index("--phase") + 1] == phase
+        return {"target": target}
+
+    def run(name, module, *args, **kw):
+        calls.append(args)
+        assert module == "alignment_transfer_s2ut.benchmark" and args[0] == "train"
+        assert args[args.index("--stop-after-update") + 1] == target
+        assert "--max-update" not in args
+        validate_command(module, args)
+
+    ns.update(execute_json=execute_json, run=run)
+    exec(source["transfer-training"], ns)
+    assert len(calls) == 4 and calls[-1][-1] == "--report" and ns["PILOT_RESULTS"] == []
+
+
 def test_training_cpu_pack_mode_skips_all_model_training(tmp_path):
     source, ns = namespace(tmp_path, "training")
     ns.update(NEED_TEACHER=True, NEED_TEXT=True, RUN_BASELINE=True, RUN_T2TT=True)

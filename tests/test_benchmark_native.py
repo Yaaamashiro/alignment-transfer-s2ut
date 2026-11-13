@@ -87,10 +87,12 @@ def native_data(tmp_path, request):
         (data / (split + ".tsv")).write_text("id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames\n" + "".join(
             f"{r['pair_id']}\t{r['ja_audio']}\t{50 + int(r['pair_id'])}\t0 1 0 1 0 1\t6\n" for r in rows if r["split"] == split), encoding="utf-8")
     options = getattr(request, "param", 1)
-    layers, device, frequency, monitor = options if isinstance(options, tuple) else (options, "cpu", 2, None)
+    layers, device, frequency, monitor, *budget = options if isinstance(options, tuple) else (options, "cpu", 2, None)
+    budget = budget[0] if budget else 2
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("native pilot FP16 integration requires CUDA")
     cfg = tiny_fairseq_config(data, root / "baseline/checkpoints", layers, device=device)
+    cfg.optimization.max_update = budget
     if device == "cuda":
         cfg.common.fp16_scale_window = 2
     if frequency != 2:
@@ -106,8 +108,8 @@ def native_data(tmp_path, request):
     dataset = task.dataset("train")
     samples = [dataset.collater([dataset[i]]) for i in range(2)]
     from alignment_transfer_s2ut.s2ut.benchmark_extension import completed_step
-    for i in range(2):
-        batch = samples if frequency == 2 else [samples[i]]
+    for i in range(budget):
+        batch = samples if frequency == 2 else [samples[i % len(samples)]]
         completed_step(trainer, batch, trainer.train_step)
     identity = b.prepared_identity(data)
     recipe = {"recipe": {"fixture": True}, "command": ["direct_s2st.s2ut.fairseq_train", str(data)], "data": identity["files"]}
@@ -115,7 +117,7 @@ def native_data(tmp_path, request):
     recipe["recipe"]["training_fingerprint"] = fingerprint
     write_json(root / "recipe.json", recipe)
     metadata = {"training_fingerprint": fingerprint, "fairseq_revision": b.REVISION,
-                "dataset_fingerprint": identity["data_lock"], "completed_updates": 2}
+                "dataset_fingerprint": identity["data_lock"], "completed_updates": budget}
     if monitor:
         metadata["monitoring"] = {"policy": {"mode": "report_only", "interval": monitor}}
     write_json(root / "metadata.json", metadata)
