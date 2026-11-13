@@ -1,5 +1,10 @@
 # Validation record
 
+## 2026-11-13 — Baseline revision reporting and shared notebook pin
+
+- Passed 66 focused provenance, notebook, authentication, and logging checks. The POSIX process-group cancellation test was skipped on Windows. Verified both primary notebooks' schema, Python syntax, HTML rendering, and shared `5b398b5` pin.
+- Verified that matching launch logs or metadata set `executed_revision_verified`, while a compatible notebook pin or missing evidence yields a warning on stderr and in the JSON report. The live Baseline revision and real-corpus Colab recovery still require verification with the original run evidence and GPU runtime.
+
 ## 2026-11-13 — Baseline provenance and Pilot recovery check
 
 - Tested the historical `fcfbbfc` adapter against the exact Baseline runtime lock and checked successful and conflicting launch evidence, altered checkpoints, and missing revision evidence. The provenance check only reads the original Baseline artifacts.

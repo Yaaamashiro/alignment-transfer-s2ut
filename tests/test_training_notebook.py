@@ -43,6 +43,11 @@ def test_primary_notebooks_have_canonical_logging_and_no_raw_subprocesses():
                     assert not (isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess")
 
 
+def test_primary_notebooks_share_the_alignment_revision(tmp_path):
+    revisions = [namespace(tmp_path, name)[1]["REPO_REVISION"] for name in ("training", "evaluate")]
+    assert len(revisions[0]) == 40 and revisions[0] == revisions[1]
+
+
 def test_transfer_id_isolates_transfer_paths_and_reuses_original_inputs(tmp_path):
     changed = []
     for name in ("training", "evaluate"):
