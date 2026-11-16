@@ -32,7 +32,7 @@ print(json.dumps(states, ensure_ascii=True))
 """
 
 
-def prepare_colab_release(execute, log_event, *, notebook, notebook_version, experiment_id, transfer_id,
+def prepare_colab_release(execute, log_event, *, notebook, notebook_updated_at, experiment_id, transfer_id,
                           alignment, benchmark, logs, persistent):
     """Checkout only the pinned SHAs, record both observations, and fail closed."""
     checkouts = dict(alignment=alignment, benchmark_runtime=benchmark)
@@ -65,9 +65,9 @@ def prepare_colab_release(execute, log_event, *, notebook, notebook_version, exp
             errors.append(f"{key}: HEAD differs from the pinned revision")
         if state["worktree"] != "clean":
             errors.append(f"{key}: worktree is {state['worktree']}")
-    report = dict(schema="colab-release-v1", run_id=uuid.uuid4().hex,
+    report = dict(schema="colab-release-v2", run_id=uuid.uuid4().hex,
                   started_utc=datetime.now(timezone.utc).isoformat(), notebook=notebook,
-                  notebook_version=notebook_version, experiment_id=experiment_id,
+                  notebook_updated_at=notebook_updated_at, experiment_id=experiment_id,
                   transfer_experiment_id=transfer_id, status="FAIL" if errors else "PASS",
                   repositories=repositories, errors=errors)
     payload = json.dumps(report, ensure_ascii=True, indent=2, allow_nan=False) + "\n"
@@ -76,24 +76,32 @@ def prepare_colab_release(execute, log_event, *, notebook, notebook_version, exp
         root.mkdir(parents=True, exist_ok=True)
         with (root / filename).open("x", encoding="utf-8") as target:
             target.write(payload)
-    log_event("colab-version-check", report["status"], logs, json.dumps(report, ensure_ascii=True))
+    log_event("colab-revision-check", report["status"], logs, json.dumps(report, ensure_ascii=True))
     print(payload, end="", flush=True)
     if errors:
-        raise RuntimeError("Colab version check failed. Resolve the reported Git state before running the experiment.")
+        raise RuntimeError("Colab revision check failed. Resolve the reported Git state before running the experiment.")
     return report
 
 
 # END NOTEBOOK BOOTSTRAP
 
 
+def notebook_update_label(value):
+    updated = datetime.fromisoformat(value)
+    if updated.isoformat(timespec="minutes") != value or not value.endswith("+09:00"):
+        raise ValueError("expected NOTEBOOK_UPDATED_AT in YYYY-MM-DDTHH:MM+09:00 format")
+    return updated.strftime("%Y-%m-%d %H:%M JST")
+
+
 def sync_colab_release(root, *, check=False):
     """Apply a reviewed release manifest to both standalone notebooks."""
     notebooks = root / "notebooks" / "colab"
     release = json.loads((notebooks / "release.json").read_text(encoding="utf-8"))
-    names = ("NOTEBOOK_VERSION", "REPO_REVISION", "BENCHMARK_RUNTIME_REVISION")
-    if set(release) != set(names) or not release["NOTEBOOK_VERSION"] or any(
+    names = ("NOTEBOOK_UPDATED_AT", "REPO_REVISION", "BENCHMARK_RUNTIME_REVISION")
+    if set(release) != set(names) or any(
             not re.fullmatch(r"[0-9a-f]{40}", release[name]) for name in names[1:]):
-        raise ValueError("expected a notebook version and two fixed Git SHAs")
+        raise ValueError("expected a notebook update time and two fixed Git SHAs")
+    updated_label = notebook_update_label(release["NOTEBOOK_UPDATED_AT"])
     bootstrap = (root / "tools" / "colab_release.py").read_text(encoding="utf-8").split(
         "# END NOTEBOOK BOOTSTRAP", 1)[0].rstrip()
     for name in ("training", "evaluate"):
@@ -107,21 +115,18 @@ def sync_colab_release(root, *, check=False):
             if count != 1:
                 raise ValueError(f"{name}: expected one assignment to {key}")
             cell["source"] = contents.splitlines(keepends=True)
-        settings = cells["settings"]
-        headings = "".join(settings["source"])
-        version_label = "#@markdown Notebook Version: "
-        form = version_label + f"`{release['NOTEBOOK_VERSION']}`"
-        headings, found_label = re.subn(rf"(?m)^{re.escape(version_label)}.*", form, headings)
-        if not found_label:
-            headings = re.sub(r"(?m)^NOTEBOOK_VERSION = .*", form + r"\n\g<0>", headings, count=1)
-        settings["source"] = headings.splitlines(keepends=True)
-        version = cells["release-check"]
-        marker = "# Start the version check\n"
-        _, found, suffix = "".join(version["source"]).partition(marker)
+        for cell, label in ((notebook["cells"][0], "**Last updated** "),
+                            (cells["settings"], "#@markdown **Last updated** ")):
+            title, _, rest = "".join(cell["source"]).partition("\n")
+            rest = re.sub(rf"(?m)^{re.escape(label)}[^\n]*\n?", "", rest, count=1).lstrip("\n")
+            cell["source"] = (f"{title}\n\n{label}{updated_label}\n\n" + rest).splitlines(keepends=True)
+        revision = cells["release-check"]
+        marker = "# Start the revision check\n"
+        _, found, suffix = "".join(revision["source"]).partition(marker)
         if not found:
             raise ValueError(f"{name}: missing bootstrap entry point")
-        version["source"] = ("#@title Check and record notebook and Git versions\n" +
-                             bootstrap + "\n\n" + found + suffix).splitlines(keepends=True)
+        revision["source"] = ("#@title Verify Git revisions and record the notebook update time\n" +
+                              bootstrap + "\n\n" + found + suffix).splitlines(keepends=True)
         updated = json.dumps(notebook, ensure_ascii=False, indent=1) + "\n"
         if updated != original:
             if check:
