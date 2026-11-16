@@ -28,9 +28,9 @@ The projected teacher is
 \tilde A_l^{\mathrm{T2TT}}=M_{\mathrm{tgt}}A_l^{\mathrm{T2TT}}M_{\mathrm{src}}
 \]
 
-Renormalize valid rows, excluding invalid source and target spans and unknown characters. Padding carries zero mass, and epsilon stabilizes only the arguments to logarithms in the loss. Exclude invalid unit rows and EOS from the alignment loss.
+Renormalize valid rows. Source or target tokens with no valid time overlap contribute zero. A subword with some valid characters uses the interval from its first to its last aligned character. Padded columns and target padding and EOS rows carry zero mass. The native loss and both calibration passes use the same source-padding mask.
 
-The primary comparison uses the raw projected prior in the loss. Historical smoothed views remain available for diagnostics. Projection preserves the CTC blanks and original token spans.
+The primary comparison uses the raw projected prior in the loss. Historical smoothed views remain available for diagnostics. Individual CTC character spans exclude blank frames. A multi-character token can span intervening blanks, and an acoustic frontend window can overlap both a character and a blank interval.
 
 The teacher CLI stores a projection packet with time spans and MT attention. CPU prefetch and visualization build the dense U×F matrix after the encoder length is known.
 
@@ -42,14 +42,59 @@ Teacher metadata binds the pair ID, split, manifest, MT checkpoint, MT and S2UT 
 
 ## Alignment quality diagnostics
 
-`diagnose_alignment` draws up to 500 samples from the selected split using a fixed seed. It writes `pairs.jsonl`, `summary.json`, and heatmaps and NPZ files for up to the first 20 samples, covering raw MT attention, projected attention, smoothed attention, and the monotonic prior.
+`diagnose_alignment` defaults to at most 500 dev pairs with seed 1. It writes `summary.json`, `pairs.jsonl`, `layers.csv`, and PNG/NPZ heatmaps for the first 20 selected pairs by default. For all-layer audits the JSON and CSV cover every decoder layer and the heatmaps show the final layer.
 
 | Metric | Numerator / denominator |
 |---|---|
-| Valid source token rate | Characters with frontend overlap and positive MT attention mass / original Japanese characters |
-| Valid target token rate | Characters with unit overlap and valid MT rows / original English characters |
+| Valid source token rate | Tokens with frontend overlap and positive MT attention mass / Japanese tokens |
+| Valid target token rate | Tokens with unit overlap and positive MT row mass / English tokens |
 | Valid unit row rate | Rows with positive mass after projection / reduced units, excluding EOS |
 | Prior entropy | Sum of entropy over valid unit rows / valid unit rows |
 | Zero-cell rate | Zero cells in valid rows / all cells in valid rows |
+| Unmapped source mass | MT attention on source tokens with no frontend overlap / total normalized MT mass |
+| Unit-weighted unmapped source mass | Lost source mass weighted by the target unit mapping / teacher mass available to mapped units before the source mapping |
 
-The output also records source and target character counts with valid CTC spans. Corpus rates sum the numerators and denominators across samples. Entropy uses natural logarithms. These metrics characterize coverage and uncertainty. Check boundary timing against the audio and heatmaps to evaluate forced alignment, since ASR CER measures recognition errors.
+`pairs.jsonl` records CTC character-span gaps, masked codepoint counts, token offsets and time spans, and separate statistics for one-codepoint and multi-codepoint tokens. Gaps are the complement of saved character intervals. The packets do not store the original per-frame CTC path or distinguish masked unknowns from ignored characters. `layers.csv` distinguishes units with no target overlap from units that receive teacher mass and still project to zero. Corpus rates sum numerators and denominators across samples. Entropy uses natural logarithms. Valid rows should sum to one within FP32 rounding.
+
+### Run on saved production artifacts in Colab
+
+Use a separate CPU runtime with the branch's installed alignment package, PyTorch, Torchaudio, and Matplotlib. Use the benchmark runtime at its existing pin if restoring ZIPs or using the on-demand WAV mapping. The diagnostic itself uses CPU FBANK and projection. CUDA is required for the separate native FP16 calibration and Pilot.
+
+1. Prepare VM-local inputs from the original experiment. Use the **full, ordered speech manifest** used to build the teacher, the matching Teacher and Units artifact directories with their checksum files, and the matching S2UT backbone configuration. The diagnostic also reads the sampled Japanese WAVs for actual feature lengths. Mount Drive and use the existing verified WAV ZIP index and local cache when those WAVs are archived. The original English WAVs, CTC model, HuBERT model, and T2TT checkpoint are unnecessary for this projection audit.
+2. Reuse existing local artifacts when available. On a fresh CPU runtime, run the setup and path cells and the helper definitions. For archived WAVs, call `corpus_common(restore_only=True)` and `corpus_stage_audio(create=False)`. For the manifest, units, and teacher, use the original stage commands with `restore_only=True` as shown below. Keep the original logical paths and use the original `BACKBONE_CONFIG`. The restore-only option requires completed stage snapshots.
+3. Run the diagnostic directly from a Colab code cell with the notebook's logging helper. Set the variables to the restored input paths and use a new local output directory. The command samples dev internally and preserves the manifest identity.
+
+```python
+# Restore completed stages only. Skip these calls if the corresponding local inputs exist.
+run("full-manifest", "alignment_transfer_s2ut.benchmark_data", "manifest",
+    "--common", COMMON, "--prepared", PREPARED, "--output", MANIFEST, "--resume",
+    restore_only=True)
+run("import-units", "alignment_transfer_s2ut.benchmark_data", "units",
+    "--manifest", MANIFEST, "--benchmark-units", BENCHMARK_UNITS, "--prepared", PREPARED,
+    "--output", Path(ROOT) / "units", "--resume", restore_only=True)
+run(TEACHER_STAGE, "alignment_transfer_s2ut.build_teacher_alignment",
+    "--manifest", MANIFEST, "--mt-attention", T2TT_ATTENTION_ROOT,
+    "--alignment", CTC_ROOT, "--units", Path(ROOT) / "units", "--config", BACKBONE_CONFIG,
+    "--output", TEACHER_ROOT, "--resume", restore_only=True)
+```
+
+If the teacher stage's identity check requires the original backbone file, use the original copy or recreate the same JSON from the registered Baseline backbone. If a stage receipt is missing, supply the existing verified local artifacts directly. A projection audit only requires the completed packets.
+
+```python
+AUDIT_OUTPUT = Path("/content/attention-audit/dev-seed1")
+execute(PYTHON, "-m", "alignment_transfer_s2ut.diagnose_alignment",
+        "--manifest", str(MANIFEST), "--teacher", str(TEACHER_ROOT),
+        "--units", str(Path(ROOT) / "units"), "--config", str(BACKBONE_CONFIG),
+        "--split", "dev", "--seed", "1", "--max-samples", "500",
+        "--all-layers", "--heatmaps", "20", "--source-mapping", "frontend",
+        "--prior-smoothing", "0", "--output", str(AUDIT_OUTPUT),
+        name="teacher-projection-audit")
+```
+
+Open `summary.json` for the sampled IDs and corpus and layer totals. Sort `layers.csv` by lost mass and valid row rate to find outliers. High lost mass can be hidden by the final renormalization. Sparse rows and low entropy can arise from confident alignments or from truncated support. Review outliers together with ordinary pairs and compare their token spans and raw/projected heatmaps against the audio. The PNGs show an additional monotonic reference. Copy the resulting report directory to a separate Drive location if needed.
+
+Coverage and entropy describe the projection, while text BLEU measures translation quality. To assess whether T2TT attention corresponds to translation alignment, check the matching checkpoint's saved dev BLEU and translations, then inspect bilingual source/target links on the same fixed dev sample. Review ordinary examples and mass-loss outliers across layers, including reordering and ignored or unknown characters. With annotated links, report alignment precision and recall on those examples and compare against a monotonic reference. [Saved T2TT text evaluation](EXTERNAL_TEXT_EVALUATION.md)
+
+### Regenerate calibration for the masked implementation
+
+The correction changes the implementation hash used by top-p reports, calibration artifacts, and native transfer checkpoints. Generate the top-p report and calibration again on this branch. The training notebook writes them under the new masked calibration paths. Keep earlier artifacts and checkpoints at their original revision. For an experiment with existing transfer checkpoints, use a new `TRANSFER_EXPERIMENT_ID` to train with the new calibration. Teacher and Units artifacts and the registered Baseline retain their existing identities.

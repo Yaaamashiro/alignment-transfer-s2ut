@@ -85,7 +85,7 @@ def gradient_probe(plan, saved, updates, calibration, directory):
             torch.cuda.reset_peak_memory_stats(device)
         started = time.perf_counter()
         gradients, weights = logical_gradients(model, criterion, samples, parameters, {kind: tau},
-                                               policy["mask_top_p"], source_padding=True, loss_scale=scale)
+                                               policy["mask_top_p"], loss_scale=scale)
         norms = {key: gradient_norm(value) for key, value in gradients.items()}
         metrics = gradient_diagnostics(gradients["task"], gradients[kind], norms["task"], norms[kind], coefficient)
         if device.type == "cuda":

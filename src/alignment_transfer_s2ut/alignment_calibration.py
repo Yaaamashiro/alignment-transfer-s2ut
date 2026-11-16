@@ -8,7 +8,7 @@ import torch
 from . import benchmark as b
 from .io import digest, read_json, write_json
 from .progress import progress
-from .alignment.losses import layer_statistics, worst_layer, top_p_mask, distributions
+from .alignment.losses import layer_statistics, worst_layer, top_p_mask, distributions, encoder_padding_mask
 from .alignment.calibration import calibrate_tau, calibrate_lambda, gradient_norm, binding, runtime_identity
 from .alignment.calibration import distribution_summary, gradient_diagnostics, layer_weight_summary
 
@@ -132,8 +132,8 @@ def diagnostics(plan, output, batches=16, candidates=(.8,.9,.95)):
                 prior = sample["alignment_prior"].float()
                 if prior.ndim == 3:
                     prior = prior[:,None]
-                lengths = model.encoder.subsample.get_out_seq_lens_tensor(sample["net_input"]["src_lengths"])
-                padding = torch.arange(prior.size(-1), device=prior.device)[None] >= lengths[:,None]
+                padding = encoder_padding_mask(model, sample, prior)
+                lengths = (~padding).sum(-1)
                 normalized, _, valid, _ = distributions(prior, prior, padding)
                 entropy = -(normalized * normalized.clamp_min(1e-30).log()).sum(-1)
                 indexes = valid.nonzero()
@@ -157,8 +157,7 @@ def diagnostics(plan, output, batches=16, candidates=(.8,.9,.95)):
         candidates={key:coverage_summary(values, invalid) for key,values in records.items()}, selected_top_p=None))
 
 
-def logical_gradients(model, criterion, samples, parameters, temperatures, top_p, *,
-                      source_padding=False, loss_scale=1.):
+def logical_gradients(model, criterion, samples, parameters, temperatures, top_p, *, loss_scale=1.):
     """Accumulate separate native logical objectives without writing parameter gradients."""
     total = sum(s["target"].size(0) if criterion.sentence_avg else s["ntokens"] for s in samples)
     gradients = {key:[None]*len(parameters) for key in ("task", *temperatures)}
@@ -166,10 +165,7 @@ def logical_gradients(model, criterion, samples, parameters, temperatures, top_p
     for sample in samples:
         task_loss, size, _, raw = criterion.components(model, sample)
         objectives = {"task":task_loss / total}
-        padding = None
-        if source_padding:
-            lengths = model.encoder.subsample.get_out_seq_lens_tensor(sample["net_input"]["src_lengths"])
-            padding = torch.arange(raw.size(-1), device=raw.device)[None] >= lengths[:, None]
+        padding = encoder_padding_mask(model, sample, raw)
         for kind in temperatures:
             stats = layer_statistics(sample["alignment_prior"], raw, kind, top_p, padding)
             value, weights = worst_layer(stats["losses"], temperatures[kind], stats["counts"])
@@ -214,10 +210,11 @@ def calibrate(plan, output, analysis, top_p, batches=16, alpha=.5, ratio=3.):
                 ids.append(sample_ids(trainer, samples))
                 for micro_index, sample in enumerate(samples):
                     _, size, _, raw = criterion.components(model, sample)
+                    padding = encoder_padding_mask(model, sample, raw)
                     microbatches.append(dict(logical_batch_index=index, microbatch_index=micro_index,
                         pair_ids=ids[-1][micro_index], sample_size=int(size)))
                     for kind in layer_batches:
-                        stats = layer_statistics(sample["alignment_prior"], raw, kind, top_p)
+                        stats = layer_statistics(sample["alignment_prior"], raw, kind, top_p, padding)
                         layer_batches[kind].append(stats["losses"].cpu().double().tolist())
                         layer_counts[kind].append(stats["counts"].cpu().tolist())
                 progress("calibration: layer scale", index+1, batches)

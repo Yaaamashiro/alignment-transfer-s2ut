@@ -11,6 +11,11 @@ METHOD_LABELS = {
 }
 
 
+def encoder_padding_mask(model, sample, attention):
+    lengths = model.encoder.subsample.get_out_seq_lens_tensor(sample["net_input"]["src_lengths"])
+    return torch.arange(attention.size(-1), device=attention.device)[None] >= lengths[:, None]
+
+
 def distributions(teacher, student, source_padding=None):
     if teacher.ndim == 3:
         teacher, student = teacher[:, None], student[:, None]
