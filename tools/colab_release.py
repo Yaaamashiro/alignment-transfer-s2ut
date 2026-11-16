@@ -109,17 +109,17 @@ def sync_colab_release(root, *, check=False):
         original = path.read_text(encoding="utf-8")
         notebook = json.loads(original)
         cells = {cell.get("id"): cell for cell in notebook["cells"]}
-        for key, cell_id in zip(names, ("settings", "paths", "paths"), strict=True):
-            cell = cells[cell_id]
-            contents, count = re.subn(rf"(?m)^{key} = .*", f"{key} = {release[key]!r}", "".join(cell["source"]))
+        paths = cells["paths"]
+        contents = "".join(paths["source"])
+        for key in names:
+            contents, count = re.subn(rf"(?m)^{key} = .*", f"{key} = {release[key]!r}", contents)
             if count != 1:
                 raise ValueError(f"{name}: expected one assignment to {key}")
-            cell["source"] = contents.splitlines(keepends=True)
-        for cell, label in ((notebook["cells"][0], "**Last updated** "),
-                            (cells["settings"], "#@markdown **Last updated** ")):
-            title, _, rest = "".join(cell["source"]).partition("\n")
-            rest = re.sub(rf"(?m)^{re.escape(label)}[^\n]*\n?", "", rest, count=1).lstrip("\n")
-            cell["source"] = (f"{title}\n\n{label}{updated_label}\n\n" + rest).splitlines(keepends=True)
+        paths["source"] = contents.splitlines(keepends=True)
+        intro = notebook["cells"][0]
+        title, _, rest = "".join(intro["source"]).partition("\n")
+        rest = re.sub(r"(?m)^(?:\*\*Last updated\*\*|Last updated) [^\n]*\n?", "", rest, count=1).lstrip("\n")
+        intro["source"] = (f"{title}\n\nLast updated {updated_label}\n\n" + rest).splitlines(keepends=True)
         revision = cells["release-check"]
         marker = "# Start the revision check\n"
         _, found, suffix = "".join(revision["source"]).partition(marker)

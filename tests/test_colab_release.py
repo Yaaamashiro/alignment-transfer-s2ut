@@ -20,7 +20,7 @@ PINS = ("a" * 40, "b" * 40)
 def test_release_manifest_and_notebook_forms():
     RELEASE["sync_colab_release"](ROOT, check=True)
     release = json.loads((ROOT / "notebooks/colab/release.json").read_text(encoding="utf-8"))
-    label = "**Last updated** " + RELEASE["notebook_update_label"](release["NOTEBOOK_UPDATED_AT"])
+    label = "Last updated " + RELEASE["notebook_update_label"](release["NOTEBOOK_UPDATED_AT"])
     settings = cells("training")["settings"]
     headings = [line.split("### ", 1)[1] for line in settings.splitlines() if line.startswith("#@markdown ### ")]
     assert headings == ["Experiment", "Data and audio preparation", "T2TT teacher model",
@@ -30,7 +30,9 @@ def test_release_manifest_and_notebook_forms():
         notebook = json.loads((ROOT / f"notebooks/colab/{name}.ipynb").read_text(encoding="utf-8"))
         assert notebook["nbformat"] == 4
         assert notebook["cells"][0]["source"][2].strip() == label
-        assert cells(name)["settings"].splitlines()[2] == "#@markdown " + label
+        assert "Last updated" not in cells(name)["settings"]
+        assert "NOTEBOOK_UPDATED_AT" not in cells(name)["settings"]
+        assert f"NOTEBOOK_UPDATED_AT = {release['NOTEBOOK_UPDATED_AT']!r}" in cells(name)["paths"]
         for identity, code in cells(name).items():
             compile(code, f"{name}:{identity}", "exec")
         order = list(cells(name))
