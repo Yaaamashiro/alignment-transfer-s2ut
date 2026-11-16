@@ -15,6 +15,9 @@ def fixture_plan(baseline,output,method="distillation",prior_type="t2tt",manifes
     plan=b.make_plan(baseline,output,method,prior_type,manifest,units,teacher,all_layers=all_layers,for_calibration=True)
     value=dict(format="alignment-calibration-v2",tau_calibration_unit="microbatch",runtime=runtime_identity(),binding=binding(plan),implementation_hash=plan["implementation_hash"],
         lambda_kl=1.,lambda_mask=1.,tau_kl=.4,tau_mask=.4,selected_top_p=.8,synthetic_test_fixture=True)
+    if plan["config"]["common"]["fp16"]:
+        value.update(format="alignment-calibration-v3", number_of_batches=2, gradient_precision=dict(
+            loss_scale=1024, gradient_dtype="float32", qualified_batches=2, precision_artifact_hash="a" * 64))
     value["artifact_hash"]=digest(value)
     path=Path(output).with_suffix(".calibration.json");write_json(path,value,overwrite=True)
     plan=b.make_plan(baseline,output,method,prior_type,manifest,units,teacher,all_layers=all_layers,calibration=path)
