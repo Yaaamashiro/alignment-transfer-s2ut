@@ -119,14 +119,26 @@ def binding(plan):
 
 
 def validate_artifact(value, plan):
-    if value.get("format") != "alignment-calibration-v2" or value.get("tau_calibration_unit") != "microbatch":
-        raise ValueError("microbatch tau calibration v2 required; regenerate the calibration artifact")
+    if value.get("format") not in {"alignment-calibration-v2", "alignment-calibration-v3"} or value.get("tau_calibration_unit") != "microbatch":
+        raise ValueError("microbatch tau calibration v2 or v3 required; regenerate the calibration artifact")
     if value.get("artifact_hash") != digest({k:v for k,v in value.items() if k != "artifact_hash"}):
         raise ValueError("corrupt alignment calibration artifact")
     if value.get("binding") != binding(plan) or value.get("implementation_hash") != plan["implementation_hash"]:
         raise ValueError("calibration data/teacher/initialization/implementation mismatch")
     if value.get("runtime") != runtime_identity():
         raise ValueError("calibration runtime differs")
+    if plan["config"]["common"]["fp16"]:
+        from .precision import SCALES
+
+        precision = value.get("gradient_precision") or {}
+        receipt = precision.get("precision_artifact_hash", "")
+        if (value["format"] != "alignment-calibration-v3" or precision.get("loss_scale") not in SCALES
+                or precision.get("gradient_dtype") != "float32"
+                or not isinstance(precision.get("qualified_batches"), int)
+                or not 0 < precision["qualified_batches"] == value.get("number_of_batches")
+                or not isinstance(receipt, str) or len(receipt) != 64
+                or any(character not in "0123456789abcdef" for character in receipt)):
+            raise ValueError("FP16 transfer requires a precision-qualified calibration v3")
     for key in ("lambda_kl", "lambda_mask", "tau_kl", "tau_mask"):
         if not isinstance(value.get(key), (int,float)) or not math.isfinite(value[key]) or value[key] <= 0:
             raise ValueError("invalid calibrated coefficient: " + key)

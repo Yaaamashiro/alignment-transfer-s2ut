@@ -21,11 +21,12 @@ def calibrated(native_data,monkeypatch):
         monkeypatch.setattr(FairseqDataset,"batch_by_size",lambda self,indices,**kw:[[int(i)] for i in indices])
     root=native_data.root; layered_teacher(root)
     plan=b.make_plan(root/"baseline.json",root/"calibration",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher",for_calibration=True)
+    batches = 16 if plan["config"]["common"]["fp16"] else 2
     def forbidden(*a,**kw):raise AssertionError("calibration called optimizer.step")
     with monkeypatch.context() as protected:
         protected.setattr(torch.optim.Adam,"step",forbidden)
-        c.diagnostics(plan,root/"analysis/top-p.json",batches=2)
-        result=c.calibrate(plan,root/"analysis/alignment-calibration.json",root/"analysis/top-p.json",.8,batches=2)
+        c.diagnostics(plan,root/"analysis/top-p.json",batches=batches)
+        result=c.calibrate(plan,root/"analysis/alignment-calibration.json",root/"analysis/top-p.json",.8,batches=batches)
     return root,result
 
 
@@ -57,6 +58,40 @@ def test_native_calibration_is_reproducible_and_binds_plan(calibrated):
     assert file_hash(b.read_record(root/"baseline.json")["checkpoint"]) == read_json(root/"baseline.json")["checkpoint_hash"]
     with pytest.raises(ValueError,match="requires --calibration"):
         b.make_plan(root/"baseline.json",root/"missing",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher")
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("native_data", [(2, "cuda", 2, None)], indirect=True)
+def test_fp16_precision_receipt_and_legacy_migration(calibrated):
+    root, result = calibrated
+    plan = b.make_plan(root / "baseline.json", root / "calibration", manifest=root / "manifest.jsonl",
+                       units=root / "units", teacher=root / "teacher", for_calibration=True)
+    assert result["format"] == "alignment-calibration-v3"
+    assert result["number_of_batches"] == 16
+    report = read_json(root / "analysis/alignment-calibration-precision.json")
+    scale = report["selected_loss_scale"]
+    assert report["candidates"][str(scale)]["qualified"]
+    assert result["gradient_precision"]["precision_artifact_hash"] == report["artifact_hash"]
+    for batch in report["per_batch"]:
+        assert batch["fp32"] == "measured"
+        assert not any(metric["nonfinite"] for metric in batch["metrics"][str(scale)].values())
+    old = root / "previous-calibration" / "alignment-calibration.json"
+    previous = deepcopy(result)
+    previous["format"] = "alignment-calibration-v2"
+    previous.pop("gradient_precision")
+    previous["artifact_hash"] = digest({key: value for key, value in previous.items() if key != "artifact_hash"})
+    write_json(old, previous)
+    previous_hash = file_hash(old)
+    with pytest.raises(ValueError, match="precision-qualified"):
+        b.make_plan(root / "baseline.json", root / "transfer", manifest=root / "manifest.jsonl",
+                    units=root / "units", teacher=root / "teacher", calibration=old)
+    with pytest.raises(ValueError, match="separate path"):
+        c.calibrate(plan, old, root / "analysis/top-p.json", .8, 16, previous_calibration=old)
+    repeated = c.calibrate(plan, root / "new/alignment-calibration.json", root / "analysis/top-p.json", .8, 16,
+                           previous_calibration=old)
+    assert repeated["previous_calibration"]["tau_matches"]
+    assert file_hash(old) == previous_hash
+    assert repeated["per_batch"] == result["per_batch"]
 
 
 @pytest.mark.parametrize("native_data", [2], indirect=True)

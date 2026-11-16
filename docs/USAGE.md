@@ -52,4 +52,4 @@ Per-layer diagnostics run on teacher-forced dev inputs independently from genera
 
 `--trainer legacy`, the smoke backend, and the old pilot and pipeline notebooks support historical controlled experiments and regression testing. Guidance names belong to these historical workflows. Resume a saved run with its original source revision. Use `training.ipynb` for training and `evaluate.ipynb` for inference and comparison.
 
-Calibration requires a v2 JSON with microbatch estimates. Regenerate top-p diagnostics and calibration in a new output directory when migrating from v1. To change annealing, edit the fraction and schedule in `configs/experiments/conditions.yaml` and start a separate run.
+FP16 transfer requires a precision-qualified v3 calibration JSON with microbatch τ estimates. See [FP16 recalibration](CALIBRATION_PRECISION.md) for verified Top-p reuse and comparison with v2. To change annealing, edit the fraction and schedule in `configs/experiments/conditions.yaml` and start a separate run.

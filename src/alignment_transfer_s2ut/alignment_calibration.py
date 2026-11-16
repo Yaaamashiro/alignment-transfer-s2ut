@@ -1,6 +1,7 @@
 """Teacher top-p analysis and no-update native fairseq gradient calibration."""
 import argparse
 from contextlib import contextmanager
+from hashlib import sha256
 from pathlib import Path
 import json
 import math
@@ -11,6 +12,45 @@ from .progress import progress
 from .alignment.losses import layer_statistics, worst_layer, top_p_mask, distributions, encoder_padding_mask
 from .alignment.calibration import calibrate_tau, calibrate_lambda, gradient_norm, binding, runtime_identity
 from .alignment.calibration import distribution_summary, gradient_diagnostics, layer_weight_summary
+from .alignment import precision
+
+
+# Exact source bytes used by the verified 920514d Top-p artifact. Restore only
+# these entries when checking its fingerprint; every other source must match.
+PREVIOUS_CALIBRATION_SOURCES = {
+    "alignment_calibration.py": "a9cb30a6abee5e06d6e8b6fba1642bcde795ac2012eedf12b51a0c43a80b19fe",
+    "alignment/calibration.py": "04a5dafea3c466bb43e09aeefa87b3594d6253e64f6847642049e00417bed626",
+}
+
+
+def compatible_top_p_hashes(plan):
+    from .colab_runtime import s2ut_implementation_files
+
+    package = Path(__file__).parent
+    accepted = {plan["implementation_hash"]}
+    reviewed = read_json(package / "top-p-compatibility.json")
+    # Require the reviewed new bytes as well as the old source fingerprint.
+    # Future changes to diagnostics in these files must re-establish compatibility.
+    if all(sha256((package / name).read_text(encoding="utf-8").encode("utf-8")).hexdigest() == expected
+           for name, expected in reviewed.items()):
+        sources = s2ut_implementation_files(package)
+        del sources["alignment/precision.py"]
+        sources.update(PREVIOUS_CALIBRATION_SOURCES)
+        accepted.add(digest({str(Path(name)): value for name, value in sources.items()}))
+    return accepted
+
+
+def verified_previous(path, plan, report, top_p, batches, alpha, ratio):
+    previous = read_json(path)
+    required = dict(format="alignment-calibration-v2", tau_calibration_unit="microbatch", runtime=runtime_identity(),
+                    binding=binding(plan), implementation_hash=report["implementation_hash"], number_of_batches=batches,
+                    selected_top_p=top_p, alpha=alpha, target_worst_median_ratio=ratio, optimizer_updates=0,
+                    calibration_pair_ids=report["calibration_pair_ids"], calibration_pair_hash=report["calibration_pair_hash"])
+    if (previous.get("artifact_hash") != digest({k: v for k, v in previous.items() if k != "artifact_hash"})
+            or any(previous.get(k) != value for k, value in required.items())
+            or previous.get("top_p_diagnostics") != report):
+        raise ValueError("previous calibration does not match the verified Top-p, runtime or calibration inputs")
+    return previous
 
 
 def write_result(output, result):
@@ -159,8 +199,14 @@ def diagnostics(plan, output, batches=16, candidates=(.8,.9,.95)):
 
 def logical_gradients(model, criterion, samples, parameters, temperatures, top_p, *, loss_scale=1.):
     """Accumulate separate native logical objectives without writing parameter gradients."""
+    gradients, weights = scaled_gradients(model, criterion, samples, parameters, temperatures, top_p, (loss_scale,))
+    return gradients[loss_scale], weights
+
+
+def scaled_gradients(model, criterion, samples, parameters, temperatures, top_p, scales):
+    """Measure all requested scales on one forward per microbatch."""
     total = sum(s["target"].size(0) if criterion.sentence_avg else s["ntokens"] for s in samples)
-    gradients = {key:[None]*len(parameters) for key in ("task", *temperatures)}
+    gradients = {scale: {key: [None] * len(parameters) for key in ("task", *temperatures)} for scale in scales}
     weight_logs = {kind: [] for kind in temperatures}
     for sample in samples:
         task_loss, size, _, raw = criterion.components(model, sample)
@@ -171,34 +217,74 @@ def logical_gradients(model, criterion, samples, parameters, temperatures, top_p
             value, weights = worst_layer(stats["losses"], temperatures[kind], stats["counts"])
             objectives[kind] = value * size / total
             weight_logs[kind].append(weights.detach().cpu().tolist())
-        for index, (key, objective) in enumerate(objectives.items()):
-            if loss_scale != 1.:
-                objective = objective.float() * loss_scale
-            grads = torch.autograd.grad(objective, parameters, retain_graph=index + 1 < len(objectives), allow_unused=True)
+        jobs = [(scale, key, objective) for scale in scales for key, objective in objectives.items()]
+        for index, (scale, key, objective) in enumerate(jobs):
+            objective = objective.float() * scale if scale != 1. else objective
+            grads = torch.autograd.grad(objective, parameters, retain_graph=index + 1 < len(jobs), allow_unused=True)
+            accumulated = gradients[scale][key]
             for i,g in enumerate(grads):
                 if g is not None:
-                    g = g.detach().float()
-                    if loss_scale != 1.:
-                        g = g / loss_scale
-                    gradients[key][i] = g if gradients[key][i] is None else gradients[key][i] + g
+                    unscaled = g.detach().float()
+                    if scale != 1.:
+                        unscaled = unscaled / scale
+                    accumulated[i] = unscaled if accumulated[i] is None else accumulated[i] + unscaled
     return gradients, weight_logs
 
 
-def calibrate(plan, output, analysis, top_p, batches=16, alpha=.5, ratio=3.):
+def compare_precision(model, criterion, extension, samples, parameters, temperatures, top_p):
+    from fairseq import utils
+
+    before = extension.rng_state(model)
+    gradients, weights = scaled_gradients(model, criterion, samples, parameters, temperatures, top_p, precision.SCALES)
+    after = extension.rng_state(model)
+    reference = None
+    try:
+        with precision.fp32_reference(model, criterion):
+            extension.restore_rng(model, before)
+            widened = [utils.apply_to_sample(lambda t: t.float() if t.is_floating_point() else t, s) for s in samples]
+            reference, _ = logical_gradients(model, criterion, widened, parameters, temperatures, top_p)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+    finally:
+        extension.restore_rng(model, after)
+    report = precision.compare_scales(gradients, parameters, reference)
+    report["fp32"] = "measured" if reference is not None else "cuda_out_of_memory"
+    return report, weights, gradients
+
+
+def record_gradients(gradients, values, weight_logs, seed):
+    diagnostics = {kind: gradient_diagnostics(gradients["task"], gradients[kind], values["task"], values[kind], 1.)
+                   for kind in ("kl", "mask")}
+    return dict(gradient_norms=values, worst_weights=weight_logs, gradient_diagnostics=diagnostics, virtual_seed=seed)
+
+
+def calibrate(plan, output, analysis, top_p, batches=16, alpha=.5, ratio=3., *, previous_calibration=None):
     if batches < 1 or not math.isfinite(alpha) or alpha <= 0 or not math.isfinite(ratio) or ratio <= 1:
         raise ValueError("positive calibration batches/alpha and target ratio > 1 required")
     report = read_json(analysis)
     if (report.get("artifact_hash") != digest({k:v for k,v in report.items() if k != "artifact_hash"}) or
-        report.get("binding") != binding(plan) or report.get("implementation_hash") != plan["implementation_hash"] or
-        report.get("number_of_batches") != batches or str(top_p) not in report.get("candidates",{})):
+        report.get("format") != "alignment-top-p-v2" or report.get("binding") != binding(plan) or
+        report.get("implementation_hash") not in compatible_top_p_hashes(plan) or
+        report.get("number_of_batches") != batches or str(top_p) not in report.get("candidates",{}) or
+        report.get("calibration_pair_hash") != digest(report.get("calibration_pair_ids"))):
         raise ValueError("matching top-p diagnostics and an explicit analyzed candidate are required")
+    work = Path(output).resolve().parent
+    if Path(analysis).resolve() == Path(output).resolve() or (
+            previous_calibration and Path(previous_calibration).resolve().parent == work):
+        raise ValueError("calibration output must use a separate path from existing diagnostics and calibration")
+    previous = (verified_previous(previous_calibration, plan, report, top_p, batches, alpha, ratio)
+                if previous_calibration else None)
     from fairseq import utils
     from .training import file_tensor_hash
     layer_batches = {"kl":[], "mask":[]}
     layer_counts = {"kl":[], "mask":[]}
     microbatches = []
     norms = {"kl":[], "mask":[]}
-    observations, ids = [], []
+    fp16 = plan["config"]["common"]["fp16"]
+    if fp16 and Path(output).is_file() and read_json(output).get("format") != "alignment-calibration-v3":
+        raise ValueError("preserve the existing calibration and choose a new output directory")
+    precision_batches, ids = [], []
+    observations_by_scale = {scale: [] for scale in (precision.SCALES if fp16 else (1,))}
     with native_session(plan, Path(output).parent / "calibration-session") as (trainer, model, criterion, extension):
         initial = digest({k:file_tensor_hash(v) for k,v in model.state_dict().items()})
         rng = extension.rng_state(model)
@@ -221,25 +307,58 @@ def calibrate(plan, output, analysis, top_p, batches=16, alpha=.5, ratio=3.):
         if ids != report["calibration_pair_ids"]:
             raise ValueError("diagnostic/calibration sample order differs")
         temperatures = {kind:calibrate_tau(values, ratio, valid_counts=layer_counts[kind]) for kind,values in layer_batches.items()}
+        taus = {kind: value["tau"] for kind, value in temperatures.items()}
+        if previous and initial != previous["initialization_identity"]:
+            raise ValueError("initial weights differ from previous calibration")
+        tau_matches = (all(taus[kind] == previous["tau_" + kind] for kind in taus) if previous else None)
         extension.restore_rng(model, rng)
         for index, samples in enumerate(logical_batches(trainer, batches)):
-            utils.set_torch_seed(trainer.cfg.common.seed + index)
+            seed = trainer.cfg.common.seed + index
+            utils.set_torch_seed(seed)
             if sample_ids(trainer,samples) != ids[index]:
                 raise ValueError("calibration replay changed sample order")
-            gradients, weight_logs = logical_gradients(model, criterion, samples, parameters,
-                {kind: values["tau"] for kind, values in temperatures.items()}, top_p)
-            values = {key:gradient_norm(value) for key,value in gradients.items()}
-            for kind in ("kl","mask"):
-                norms[kind].append((values["task"],values[kind]))
-            diagnostics_by_kind = {kind:gradient_diagnostics(gradients["task"], gradients[kind], values["task"],
-                                                           values[kind], 1.) for kind in ("kl", "mask")}
-            observations.append(dict(gradient_norms=values, worst_weights=weight_logs,
-                                     gradient_diagnostics=diagnostics_by_kind, virtual_seed=trainer.cfg.common.seed+index))
+            if fp16:
+                measurements, weight_logs, scaled = compare_precision(
+                    model, criterion, extension, samples, parameters, taus, top_p)
+                precision_batches.append(measurements)
+                for scale, gradients in scaled.items():
+                    values = {key: metric["l2"] for key, metric in measurements["metrics"][str(scale)].items()}
+                    if all(value is not None and math.isfinite(value) and value > 0 for value in values.values()):
+                        observations_by_scale[scale].append(record_gradients(gradients, values, weight_logs, seed))
+                del scaled, gradients
+            else:
+                gradients, weight_logs = logical_gradients(model, criterion, samples, parameters, taus, top_p)
+                values = {key: gradient_norm(value) for key, value in gradients.items()}
+                observations_by_scale[1].append(record_gradients(gradients, values, weight_logs, seed))
             progress("calibration: gradient norms (no optimizer step)", index+1,batches)
         after = digest({k:file_tensor_hash(v) for k,v in model.state_dict().items()})
         if after != initial or trainer.get_num_updates() != 0 or any(p.grad is not None for p in model.parameters()):
             raise RuntimeError("calibration changed model/update/gradient state")
         extension.restore_rng(model, rng)
+    precision_report = None
+    if fp16:
+        selected, candidates = precision.qualify(precision_batches)
+        precision_report = write_result(Path(output).with_name(Path(output).stem + "-precision.json"), dict(
+            format="alignment-gradient-precision-v1", runtime=runtime_identity(), device=torch.cuda.get_device_name(),
+            implementation_hash=plan["implementation_hash"], top_p_artifact_hash=report["artifact_hash"],
+            previous_calibration_hash=previous["artifact_hash"] if previous else None,
+            old_tau={kind: previous["tau_" + kind] for kind in taus} if previous else None,
+            tau=taus, tau_matches=tau_matches, calibration_pair_hash=digest(ids),
+            limits=precision.LIMITS, selected_loss_scale=selected, candidates=candidates, per_batch=precision_batches,
+            fp32_reference="exact widened weights/inputs, reset RNG, TF32 disabled; dropout masks may differ by dtype"))
+        if selected is None:
+            raise ValueError("no FP16 loss scale qualified on every batch; inspect the precision report")
+    else:
+        selected = 1
+    if tau_matches is False:
+        raise ValueError("tau changed from the previous calibration; inspect the forward replay before continuing")
+    observations = observations_by_scale[selected]
+    if len(observations) != batches:
+        raise ValueError("the selected precision is missing finite, nonzero gradients")
+    for row in observations:
+        values = row["gradient_norms"]
+        for kind in norms:
+            norms[kind].append((values["task"], values[kind]))
     coefficients = {kind:calibrate_lambda(norms[kind], alpha) for kind in ("kl", "mask")}
     summary = {}
     for kind, coefficient in coefficients.items():
@@ -259,6 +378,15 @@ def calibrate(plan, output, analysis, top_p, batches=16, alpha=.5, ratio=3.):
         tau_kl=temperatures["kl"]["tau"],tau_mask=temperatures["mask"]["tau"], tau_estimates=temperatures,
         per_layer_losses=layer_batches,per_layer_valid_rows=layer_counts,per_batch=observations,top_p_diagnostics=report,
         selected_top_p=top_p, optimizer_updates=0, normalization="token-weighted microbatch LogSumExp; native logical accumulation")
+    if precision_report:
+        result.update(format="alignment-calibration-v3", gradient_precision=dict(
+            loss_scale=selected, gradient_dtype="float32", qualified_batches=batches,
+            precision_artifact_hash=precision_report["artifact_hash"]))
+    if previous:
+        result["previous_calibration"] = dict(
+            artifact_hash=previous["artifact_hash"], implementation_hash=previous["implementation_hash"],
+            coefficients={key: previous[key] for key in ("lambda_kl", "lambda_mask", "tau_kl", "tau_mask")},
+            diagnostic_summary=previous["diagnostic_summary"], tau_matches=tau_matches)
     return write_result(output,result)
 
 
@@ -269,6 +397,7 @@ def main(argv=None):
         parser.add_argument("--"+key,required=True)
     parser.add_argument("--batches",type=int,default=16)
     parser.add_argument("--diagnostics")
+    parser.add_argument("--previous-calibration")
     parser.add_argument("--mask-top-p",type=float)
     parser.add_argument("--alpha",type=float,default=.5)
     parser.add_argument("--target-ratio",type=float,default=3.)
@@ -281,7 +410,8 @@ def main(argv=None):
     if args.action=="top-p":result=diagnostics(plan,args.output,args.batches)
     else:
         if not args.diagnostics or args.mask_top_p is None:parser.error("calibrate requires --diagnostics and explicit --mask-top-p")
-        result=calibrate(plan,args.output,args.diagnostics,args.mask_top_p,args.batches,args.alpha,args.target_ratio)
+        result=calibrate(plan,args.output,args.diagnostics,args.mask_top_p,args.batches,args.alpha,args.target_ratio,
+                         previous_calibration=args.previous_calibration)
     print(json.dumps(result,ensure_ascii=False,allow_nan=False))
 
 
