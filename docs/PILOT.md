@@ -14,7 +14,7 @@ Open [training.ipynb](../notebooks/colab/training.ipynb) in a GPU runtime. Keep 
 
 ### Reuse reports from the calibration padding audit
 
-Notebook release `2026.11.16` pins source commit `920514de`. The audit notebook pinned `c2ba6c8`; the source package and experiment configs are identical at these commits. A completed audit Top-p report can be restored with the same experiment and transfer IDs, local paths, batch count, seed, Baseline registration, Manifest, Units, and Teacher hashes. Verify the same implementation hash and calibration binding on restore. Keep the original Top-p report and select the same `MASK_TOP_P` when reusing an existing calibration.
+Both primary notebooks pin source commit `920514de`. The audit notebook pinned `c2ba6c8`; the source package and experiment configs are identical at these commits. A completed audit Top-p report can be restored with the same experiment and transfer IDs, local paths, batch count, seed, Baseline registration, Manifest, Units, and Teacher hashes. Verify the same implementation hash and calibration binding on restore. Keep the original Top-p report and select the same `MASK_TOP_P` when reusing an existing calibration.
 
 Keep `RUN_BASELINE=False` and `PREPARE_AUDIO_PACKS=False` on the GPU. Restore the completed Baseline, Teacher, and Top-p stages using the original experiment settings. Use **Top-p diagnostics and calibration** with `RUN_ALIGNMENT_CALIBRATION=True` if calibration is pending. If all three conditions are still off, the notebook stops short of starting transfer training. After reviewing λ, τ and the gradients, follow the recovery and Pilot steps below. Continue the same Pilot with `TRANSFER_RUN_MODE='full'` and its original settings and snapshot location.
 

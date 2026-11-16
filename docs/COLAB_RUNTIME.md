@@ -30,13 +30,13 @@ Set `MPLBACKEND=Agg` in the notebook settings so CLI subprocesses can write figu
 
 `ROOT` is `/content/alignment-transfer-work/<EXPERIMENT_ID>`. `PERSISTENT` is the dedicated Drive directory. Checkpoints, logs, NPZ files, and audio writes go to `ROOT`. Verified ZIPs go to `PERSISTENT/stages/<stage name>/`. Preserve old runs that wrote directly to Drive, and use a separate destination for a new experiment.
 
-## Notebook and source versions
+## Notebook update time and source revisions
 
-The two primary notebooks share [release.json](../notebooks/colab/release.json). `NOTEBOOK_VERSION` identifies the manually released notebook form and bootstrap. `REPO_REVISION` and `BENCHMARK_RUNTIME_REVISION` identify the exact source commits used by the experiment. The source commit may precede the notebook release commit. This allows both notebooks to pin an already tested source tree.
+The two primary notebooks share [release.json](../notebooks/colab/release.json). `NOTEBOOK_UPDATED_AT` records the published notebook update time in `YYYY-MM-DDTHH:MM+09:00` format. The notebooks display it under their titles at minute precision in Japan Standard Time. `REPO_REVISION` and `BENCHMARK_RUNTIME_REVISION` identify the exact source commits used by the experiment. The source commit may precede the notebook release commit. This allows both notebooks to pin an already tested source tree.
 
-Before installing dependencies, **Check and record notebook and Git versions** checks each detached HEAD against its pin and lists tracked and untracked worktree changes. A checkout error, mismatched HEAD, or dirty worktree stops setup. The check uses the recorded pins, including when a historical release is behind the current main branch. For review, each execution writes its version receipt under `ROOT/execution/` and `PERSISTENT/execution-provenance/`. Subsequent notebook command receipts carry the same version information and run ID.
+Before installing dependencies, **Verify Git revisions and record the notebook update time** checks each detached HEAD against its pin and lists tracked and untracked worktree changes. A checkout error, mismatched HEAD, or dirty worktree stops setup. The check uses the recorded pins, including when a historical release is behind the current main branch. Each execution writes its receipt under `ROOT/execution/` and `PERSISTENT/execution-provenance/`. Subsequent notebook command receipts carry the same update time, revisions, and run ID.
 
-To publish a notebook release, update the manifest and run `python tools/colab_release.py`. Run `python tools/colab_release.py --check` to verify both embedded copies. Use a saved notebook release and its original pins to reproduce or resume a previous experiment.
+To publish a notebook update, set `NOTEBOOK_UPDATED_AT` in the manifest and run `python tools/colab_release.py`. Run `python tools/colab_release.py --check` to verify the embedded copies and displayed timestamps. Use a saved notebook and its original pins to reproduce or resume a previous experiment.
 
 ## Resuming a run
 

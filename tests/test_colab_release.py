@@ -19,19 +19,32 @@ PINS = ("a" * 40, "b" * 40)
 
 def test_release_manifest_and_notebook_forms():
     RELEASE["sync_colab_release"](ROOT, check=True)
+    release = json.loads((ROOT / "notebooks/colab/release.json").read_text(encoding="utf-8"))
+    label = "**Last updated** " + RELEASE["notebook_update_label"](release["NOTEBOOK_UPDATED_AT"])
     settings = cells("training")["settings"]
     headings = [line.split("### ", 1)[1] for line in settings.splitlines() if line.startswith("#@markdown ### ")]
-    assert headings == ["Experiment and version", "Data and audio preparation", "T2TT teacher model",
+    assert headings == ["Experiment", "Data and audio preparation", "T2TT teacher model",
                         "S2UT Baseline", "Teacher artifacts", "Top-p diagnostics and calibration",
                         "Transfer training conditions", "Pilot and checkpoint recovery", "Evaluation and diagnostics"]
     for name in ("training", "evaluate"):
         notebook = json.loads((ROOT / f"notebooks/colab/{name}.ipynb").read_text(encoding="utf-8"))
         assert notebook["nbformat"] == 4
+        assert notebook["cells"][0]["source"][2].strip() == label
+        assert cells(name)["settings"].splitlines()[2] == "#@markdown " + label
         for identity, code in cells(name).items():
             compile(code, f"{name}:{identity}", "exec")
         order = list(cells(name))
         assert order.index("paths") < order.index("release-check")
         assert next(i for i, code in enumerate(cells(name).values()) if "name='install-uv'" in code) > order.index("release-check")
+
+
+def test_notebook_update_labels_distinguish_two_updates_on_the_same_day():
+    label = RELEASE["notebook_update_label"]
+    assert label("2026-11-16T09:01+09:00") == "2026-11-16 09:01 JST"
+    assert label("2026-11-16T09:02+09:00") == "2026-11-16 09:02 JST"
+    for value in ("2026-11-16", "2026-11-16T09:01", "2026-11-16T09:01:00+09:00"):
+        with pytest.raises(ValueError, match="NOTEBOOK_UPDATED_AT"):
+            label(value)
 
 
 @pytest.mark.parametrize("issue", [None, "alignment-head", "benchmark-head", "dirty", "checkout", "short-pin"])
@@ -59,12 +72,13 @@ def test_bootstrap_records_the_observed_state_and_fails_before_install(tmp_path,
     events = []
     logs, drive = tmp_path / "logs", tmp_path / "drive"
     call = lambda: RELEASE["prepare_colab_release"](
-        execute, lambda *event: events.append(event), notebook="training", notebook_version="fixture",
+        execute, lambda *event: events.append(event), notebook="training",
+        notebook_updated_at="2026-11-16T09:02+09:00",
         experiment_id="experiment-001", transfer_id="", logs=logs, persistent=drive,
         alignment=(tmp_path / "repo", "https://example.com/repo.git", expected[0]),
         benchmark=(tmp_path / "benchmark", "https://example.com/benchmark.git", expected[1]))
     if issue:
-        with pytest.raises(RuntimeError, match="version check failed"):
+        with pytest.raises(RuntimeError, match="revision check failed"):
             call()
     else:
         assert call()["status"] == "PASS"
@@ -73,7 +87,8 @@ def test_bootstrap_records_the_observed_state_and_fails_before_install(tmp_path,
     assert saved == record.read_bytes()
     payload = json.loads(saved)
     assert events[0][1] == payload["status"] == ("FAIL" if issue else "PASS")
-    assert payload["notebook_version"] == "fixture"
+    assert payload["schema"] == "colab-release-v2"
+    assert payload["notebook_updated_at"] == "2026-11-16T09:02+09:00"
     for index, key in enumerate(("alignment", "benchmark_runtime")):
         assert payload["repositories"][key] == {"pinned_revision": expected[index], **observed[index]}
     for _, command in calls:
@@ -104,7 +119,7 @@ def test_embedded_command_guard_and_release_receipt(tmp_path):
     ns = {}
     exec(cells("training")["process-logging"], ns)
     ns.update(LOGS=tmp_path, RELEASE_REQUIRED=True, RELEASE_RECORD=None)
-    with pytest.raises(RuntimeError, match="version check before"):
+    with pytest.raises(RuntimeError, match="revision check before"):
         ns["execute"](sys.executable, "-c", "raise SystemExit(99)")
     release = {"status": "PASS", "run_id": "fixture"}
     ns["RELEASE_RECORD"] = release
