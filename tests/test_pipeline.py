@@ -122,5 +122,10 @@ def test_reference_imports_are_limited_to_runtime_adapters():
                 assert all(isinstance(node, ast.ImportFrom) and node.module == "direct_s2st.io" for node in references)
                 assert {name.name for node in references for name in node.names} == {
                     "atomic_write_jsonl", "atomic_write_json"}
+            elif path.name == "transfer_pilot.py":
+                # The Baseline readiness gate uses the pinned paper recipe's budget.
+                assert all(isinstance(node, ast.ImportFrom) for node in references)
+                assert [(node.module, [name.name for name in node.names]) for node in references] == [
+                    ("direct_s2st.s2ut.paper_recipe", ["MAX_UPDATES"])]
             else:
                 assert path.name in {"colab_runtime.py", "io.py", "kokoro_runtime.py", "corpus_runtime.py"}
