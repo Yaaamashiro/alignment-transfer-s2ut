@@ -12,6 +12,14 @@ Open [training.ipynb](../notebooks/colab/training.ipynb) in a GPU runtime. Keep 
 2. Enable `RUN_ALIGNMENT_CALIBRATION`. The calibration uses 16 logical train batches, fixed initial gradient ratio 0.5, and a worst-to-median layer weight target of 3. Review the calibrated λ and τ, batch gradient ratios and cosines, and layer weight statistics.
 3. Enable `RUN_DISTILLATION`, `RUN_ANNEALED_DISTILLATION`, and/or `RUN_MASK_DISTILLATION`. Each condition starts from the registered fresh seed and uses a separate run directory.
 
+### Reuse reports from the calibration padding audit
+
+Notebook release `2026.11.16` pins source commit `920514de`. The audit notebook pinned `c2ba6c8`; the source package and experiment configs are identical at these commits. A completed audit Top-p report can be restored with the same experiment and transfer IDs, local paths, batch count, seed, Baseline registration, Manifest, Units, and Teacher hashes. Verify the same implementation hash and calibration binding on restore. Keep the original Top-p report and select the same `MASK_TOP_P` when reusing an existing calibration.
+
+Keep `RUN_BASELINE=False` and `PREPARE_AUDIO_PACKS=False` on the GPU. Restore the completed Baseline, Teacher, and Top-p stages using the original experiment settings. Use **Top-p diagnostics and calibration** with `RUN_ALIGNMENT_CALIBRATION=True` if calibration is pending. If all three conditions are still off, the notebook stops short of starting transfer training. After reviewing λ, τ and the gradients, follow the recovery and Pilot steps below. Continue the same Pilot with `TRANSFER_RUN_MODE='full'` and its original settings and snapshot location.
+
+For a Top-p report or calibration produced by a pre-audit implementation, run the new diagnostics and calibration. Continue pre-audit transfer checkpoints with their own original release. A post-audit run with a different binding or numerical runtime requires a matching calibration before training.
+
 ## Pause and review
 
 Set `TRANSFER_RUN_MODE='pilot'`. The defaults are `TRANSFER_PILOT_UPDATES=20000` and `TRANSFER_DIAGNOSTIC_STEPS=[1000, 5000, 10000, 20000]`. The 20k probe observes training after the registered 10k warmup. For a 10k smoke run, set both variables to end at 10k. The notebook also probes the final Pilot step if it is absent from the list and warns when every probe is within warmup. The scientific run remains 400,000 updates. Annealed KL follows the full cosine schedule through 320,000 updates.
