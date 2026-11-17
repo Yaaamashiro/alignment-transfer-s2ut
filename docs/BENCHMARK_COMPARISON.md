@@ -24,7 +24,7 @@ Resume saved runs with the original experiment ID and input and output settings.
 6. Inspect the top-p diagnostics, set `MASK_TOP_P` explicitly, and calibrate λ and τ.
 7. Use `RUN_DISTILLATION`, `RUN_ANNEALED_DISTILLATION`, and `RUN_MASK_DISTILLATION` to select transfer conditions. Run the Pilot, review the diagnostics, then switch `TRANSFER_RUN_MODE` to `full` to continue. Set `RUN_ALIGNMENT_DIAGNOSTICS=True` for completed-model layer diagnostics and visualizations. [Native transfer pilot](PILOT.md)
 
-The notebook's `TRANSFER_KL_LAMBDA=1.0` defines the fixed KL condition. Use a fresh transfer ID and select the original calibration with `CALIBRATION_EXPERIMENT_ID`. The existing Baseline and Teacher are shared. The full-run settings and artifact compatibility rules are documented in [Fixed KL workflow](FIXED_KL.md).
+The notebook uses `TRANSFER_KL_LAMBDA=1.0` and `TRANSFER_MASK_LAMBDA=10.0` for the explicit-coefficient conditions. Use a fresh transfer ID and select the original calibration with `CALIBRATION_EXPERIMENT_ID`. The existing Baseline and Teacher are shared. The full-run settings and artifact compatibility rules are documented in [Fixed coefficient workflow](FIXED_KL.md).
 
 To reuse trained T2TT, specify its `T2TT_RUN_ID` and original text manifest. The Baseline and transfer conditions share the 400,000-update budget, initialization policy, and native fairseq recipe. Each model uses its own verified snapshots.
 

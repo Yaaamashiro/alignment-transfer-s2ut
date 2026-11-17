@@ -384,7 +384,7 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                 if extra.get("alignment_contract_hash") != contract_hash:
                     raise ValueError("native resume contract mismatch")
                 policy = getattr(self.task, "transfer_policy", None)
-                if policy is not None and policy.get("kl_lambda") is not None:
+                if policy is not None and any(policy.get(key) is not None for key in ("kl_lambda", "mask_lambda")):
                     saved_policy = extra.get("alignment_coefficient_policy", {})
                     settings = coefficient_policy(policy, self.task.training_budget)
                     if any(saved_policy.get(key) != value for key, value in settings.items()):

@@ -74,6 +74,7 @@ def test_fixed_kl_run_reuses_original_calibration_paths(tmp_path):
     assert {key: ns[key] for key in old} == old
     assert ns["RESEARCH_ROOT"] != old_root and ns["REUSE_CALIBRATION"]
     assert ns["TRANSFER_KL_LAMBDA"] == 1.
+    assert ns["TRANSFER_MASK_LAMBDA"] == 10.
 
 
 @pytest.mark.parametrize("phase,target", [("save", 2), ("resume", 4)])
@@ -271,8 +272,11 @@ def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(
     for command in training:
         method = command[command.index("--method") + 1]
         assert ("--kl-lambda" in command) == (method != "mask_distillation")
+        assert ("--mask-lambda" in command) == (method == "mask_distillation")
         if method != "mask_distillation":
             assert command[command.index("--kl-lambda") + 1] == "1.0"
+        else:
+            assert command[command.index("--mask-lambda") + 1] == "10.0"
     exec(source["register-transfers"], ns)
     assert len(ns["conditions"]) == (1 if mode == "pilot" else 4)
     attention = next(c for c in calls if c[2] == "alignment_transfer_s2ut.extract_t2tt_attention")

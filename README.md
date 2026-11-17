@@ -17,7 +17,7 @@ $$
 
 All three transfer conditions aggregate per-layer losses using calibrated worst-layer LogSumExp. Each T2TT decoder layer supervises the corresponding S2UT decoder layer. Attention is averaged across heads and projected into S2UT coordinates through source and target mappings. Validation and inference are teacher-free.
 
-The notebook defaults to an explicit KL coefficient of 1.0. Mask λ and both temperatures use the verified calibration. Start fixed-coefficient runs under a new transfer ID. [Fixed KL workflow](docs/FIXED_KL.md)
+The notebook defaults to explicit coefficients of 1.0 for KL and 10.0 for Mask. Both temperatures use the verified calibration. Start fixed-coefficient runs under a new transfer ID. [Fixed coefficient workflow](docs/FIXED_KL.md)
 
 ## Getting started with Colab
 

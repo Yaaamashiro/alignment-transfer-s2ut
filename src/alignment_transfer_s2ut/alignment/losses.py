@@ -111,11 +111,12 @@ def coefficient_policy(policy, budget):
     kind = "mask" if method == "mask_distillation" else "kl"
     calibrated = policy["calibrated"]
     original = calibrated["lambda_" + kind]
-    explicit = policy.get("kl_lambda") if kind == "kl" and method != "baseline" else None
+    option = kind + "_lambda"
+    explicit = policy.get(option) if method != "baseline" else None
     if explicit is not None and (
             isinstance(explicit, bool) or not isinstance(explicit, (int, float))
             or not math.isfinite(explicit) or explicit < 0):
-        raise ValueError("kl_lambda must be a finite nonnegative number")
+        raise ValueError(option + " must be a finite nonnegative number")
     return dict(initial_lambda=original if explicit is None else float(explicit),
                 lambda_source="calibration" if explicit is None else "explicit_fixed",
                 calibration_lambda=original, tau=calibrated["tau_" + kind],

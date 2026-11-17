@@ -1,11 +1,11 @@
 {
   "current": {
     "alignment/calibration.py": "cd2b45ddd411e261a5276ada7e74fe60dd6b0172e4035bfdc72c90a7329d9df0",
-    "alignment/losses.py": "9897d5ad7d21e20586e10e9dffe9dc2399599baa1352465dd0547f30a8730c7e",
+    "alignment/losses.py": "60568901aa7abd02720845252d9b6d2549f9afad93984aceace5b5c1195a370f",
     "alignment_calibration.py": "f3b968e444249f88345e2d12126899c53aebabfbe84c5c3b35ab019422a075ad",
-    "benchmark.py": "a96e06dc02d041d0e940e68cc8ff458636fa32bbbb25f1eb6329bf4be0cacc4e",
-    "cli.py": "63f1e24b91e71e48a4ef028c25d7715f305930c13c2b9bb6633ef3aca57dca5d",
-    "s2ut/benchmark_extension.py": "849d2d438f6ca138d7ef9679edcb03e0bb9233237ed1c0a4a72e76c2278aeb95",
+    "benchmark.py": "879fddbfbc9c21850ed4bd56f245bf54d1375cea0f5f6e688b2ef75f93a028b9",
+    "cli.py": "f5e1730db935cce2d4aaa56befa2432de5f80322ae38b637e49e201746ea3e8c",
+    "s2ut/benchmark_extension.py": "07553402dd64ef16bb77f4e0a22a67260b2941f560ae2373b5cd66b7f6ae7a2d",
     "transfer_pilot.py": "739b537c670fca577ade3a7ccd72e3fce8f0c6914d1cda61fe6968daa1930e53"
   },
   "previous": {

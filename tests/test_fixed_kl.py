@@ -62,6 +62,49 @@ def test_mask_and_unspecified_kl_preserve_calibrated_loss():
             torch.testing.assert_close(loss, after * original["calibrated"]["lambda_kl"])
 
 
+def test_explicit_mask_ten_loss_backward_and_tau():
+    settings = policy("mask_distillation")
+    settings["mask_lambda"] = 10.
+    prior = torch.tensor([[[[.8, .2]], [[.2, .8]]]])
+    for step in (0, 20000, 320000, 400000):
+        logits = torch.tensor([[[[.2, -.2]], [[.6, -.6]]]], requires_grad=True)
+        student = logits.softmax(-1)
+        actual, logs = loss_and_logs(prior, student, settings, step, 400000)
+        stats = layer_statistics(prior, student, "mask", .8)
+        base, _ = worst_layer(stats["losses"], .04495423606858799, stats["counts"])
+        torch.testing.assert_close(actual, 10. * base)
+        torch.testing.assert_close(torch.autograd.grad(actual, logits, retain_graph=True)[0],
+                                   torch.autograd.grad(10. * base, logits)[0])
+        assert logs["alignment/lambda"] == 10.
+        assert logs["alignment/tau"] == .04495423606858799
+    resolved = coefficient_policy(settings, 400000)
+    assert resolved["lambda_source"] == "explicit_fixed"
+    assert resolved["calibration_lambda"] == 145.51251933764968
+    assert resolved["anneal_end_update"] is None
+
+
+@pytest.mark.parametrize("method", ["distillation", "annealed_distillation", "mask_distillation"])
+def test_coefficients_apply_only_to_their_own_method(method):
+    selected = policy(method)
+    selected["mask_lambda"] = 10.
+    before = coefficient_policy(selected, 400000)
+    other = "kl_lambda" if method == "mask_distillation" else "mask_lambda"
+    selected[other] = 123.
+    assert coefficient_policy(selected, 400000) == before
+    selected["kl_lambda"] = selected["mask_lambda"] = None
+    result = coefficient_policy(selected, 400000)
+    assert result["lambda_source"] == "calibration"
+    assert result["initial_lambda"] == selected["calibrated"]["lambda_" + ("mask" if method == "mask_distillation" else "kl")]
+
+
+@pytest.mark.parametrize("value", [True, -1., float("nan"), float("inf")])
+def test_invalid_explicit_mask_is_rejected(value):
+    settings = policy("mask_distillation")
+    settings["mask_lambda"] = value
+    with pytest.raises(ValueError, match="mask_lambda"):
+        coefficient_policy(settings, 400000)
+
+
 @pytest.mark.parametrize("value", [True, -1., float("nan"), float("inf")])
 def test_invalid_explicit_coefficient_is_rejected(value):
     settings = policy("distillation")

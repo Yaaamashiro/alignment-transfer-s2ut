@@ -324,20 +324,20 @@ def read_record(path, verify_data=True):
 
 def make_plan(baseline, output, method="distillation", prior_type="t2tt", manifest=None,
               units=None, teacher=None, anneal_steps=None, beta=None, lambda_align=None, smoothing=0., all_layers=True,
-              *, calibration=None, mask_top_p=None, for_calibration=False, kl_lambda=None):
+              *, calibration=None, mask_top_p=None, for_calibration=False, kl_lambda=None, mask_lambda=None):
     record = read_record(baseline)
     if any(Path(output).resolve().is_relative_to(root) for root in
            (Path(record["data"]).resolve(), Path(record["checkpoint"]).resolve().parent)):
         raise ValueError("training output must be outside registered benchmark inputs")
     if method not in {"baseline", "distillation", "annealed_distillation", "mask_distillation"} or prior_type != "t2tt":
         raise ValueError("unknown alignment condition")
-    if kl_lambda is not None:
-        import math
-
-        if isinstance(kl_lambda, bool) or not isinstance(kl_lambda, (int, float)) or not math.isfinite(kl_lambda) or kl_lambda < 0:
-            raise ValueError("kl_lambda must be a finite nonnegative number")
-        if for_calibration or method == "baseline":
-            raise ValueError("kl_lambda is a transfer training condition")
+    import math
+    for name, coefficient in (("kl_lambda", kl_lambda), ("mask_lambda", mask_lambda)):
+        if coefficient is not None:
+            if isinstance(coefficient, bool) or not isinstance(coefficient, (int, float)) or not math.isfinite(coefficient) or coefficient < 0:
+                raise ValueError(name + " must be a finite nonnegative number")
+            if for_calibration or method == "baseline":
+                raise ValueError(name + " is a transfer training condition")
     budget = record["training_budget"]
     if any(v is not None for v in (anneal_steps, beta, lambda_align)) or smoothing != 0:
         raise ValueError("native research uses calibrated loss coefficients; guidance overrides were removed")
@@ -393,6 +393,8 @@ def make_plan(baseline, output, method="distillation", prior_type="t2tt", manife
                         mask_top_p=value["selected_top_p"])
         if method != "mask_distillation" and kl_lambda is not None:
             transfer["kl_lambda"] = float(kl_lambda)
+        if method == "mask_distillation" and mask_lambda is not None:
+            transfer["mask_lambda"] = float(mask_lambda)
         from .alignment.losses import coefficient_policy
 
         transfer["coefficient_policy"] = coefficient_policy(transfer, budget)
@@ -496,7 +498,7 @@ def compare_records(paths, evaluations=None, allow_scope_ablation=False):
     if scope_varies and not allow_scope_ablation:
         differences["transfer/all_layers"] = [t.get("all_layers",False) for t in transfers]
     if scope_varies and allow_scope_ablation:
-        for key in ("method","prior_type","calibrated","calibration_hash","mask_top_p","artifacts","kl_lambda"):
+        for key in ("method","prior_type","calibrated","calibration_hash","mask_top_p","artifacts","kl_lambda","mask_lambda"):
             if any(t.get(key) != transfers[0].get(key) for t in transfers[1:]):
                 differences["ablation/"+key]=[t.get(key) for t in transfers]
     for key in ("calibration_hash", "calibrated", "mask_top_p", "aggregation", "conditions_hash", "anneal_fraction", "anneal_schedule"):
@@ -505,6 +507,9 @@ def compare_records(paths, evaluations=None, allow_scope_ablation=False):
     kl_conditions = [t for t in transfers if t.get("method") in {"distillation", "annealed_distillation"}]
     if kl_conditions and any(t.get("kl_lambda") != kl_conditions[0].get("kl_lambda") for t in kl_conditions[1:]):
         differences["transfer/kl_lambda"] = [t.get("kl_lambda") for t in kl_conditions]
+    mask_conditions = [t for t in transfers if t.get("method") == "mask_distillation"]
+    if mask_conditions and any(t.get("mask_lambda") != mask_conditions[0].get("mask_lambda") for t in mask_conditions[1:]):
+        differences["transfer/mask_lambda"] = [t.get("mask_lambda") for t in mask_conditions]
     signatures = [t.get("artifacts",{}).get("teacher_signature") for t in transfers if t.get("prior_type","t2tt")=="t2tt"]
     if signatures and any(s != signatures[0] for s in signatures[1:]):
         differences["transfer/teacher_signature"] = signatures
@@ -551,7 +556,8 @@ def main(argv=None):
             child.add_argument("--" + field)
         child.add_argument("--calibration")
         child.add_argument("--mask-top-p", type=float)
-        child.add_argument("--kl-lambda", type=float, help="explicit KL coefficient; Mask retains its calibrated coefficient")
+        child.add_argument("--kl-lambda", type=float, help="explicit KL coefficient; applies only to KL methods")
+        child.add_argument("--mask-lambda", type=float, help="explicit Mask coefficient; applies only to Mask Distillation")
         child.add_argument("--resume", action="store_true")
         child.add_argument("--all-layers", action="store_true", default=True)
         if action == "train":
@@ -604,7 +610,7 @@ def main(argv=None):
     else:
         result = make_plan(args.baseline, args.output, args.method, args.prior_type, args.manifest,
                            args.units, args.teacher, all_layers=args.all_layers, calibration=args.calibration,
-                           mask_top_p=args.mask_top_p, kl_lambda=args.kl_lambda)
+                           mask_top_p=args.mask_top_p, kl_lambda=args.kl_lambda, mask_lambda=args.mask_lambda)
         if args.action == "train":
             result = train_native(result, args.output, args.resume, stop_after_update=args.stop_after_update)
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))

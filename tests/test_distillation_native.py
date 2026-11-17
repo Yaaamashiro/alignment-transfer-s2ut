@@ -131,6 +131,85 @@ def test_fixed_kl_native_loss_checkpoint_and_contract(calibrated, native_data, c
     assert cli_plan["transfer"]["coefficient_policy"]["initial_lambda"] == 1.
 
 
+@pytest.mark.parametrize("native_data", [2], indirect=True)
+@pytest.mark.parametrize("method, flag, expected", [
+    ("mask_distillation", "mask_lambda", 10.), ("annealed_distillation", "kl_lambda", 1.)])
+def test_explicit_condition_native_state_and_checkpoint(calibrated, native_data, capsys, monkeypatch, method, flag, expected):
+    from fairseq import tasks, utils
+    from fairseq_cli import train
+    from alignment_transfer_s2ut.alignment.losses import layer_statistics, worst_layer
+    from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
+
+    root, result = calibrated
+    source = root / "analysis/alignment-calibration.json"
+    checksum = file_hash(source)
+    shared = dict(method=method, manifest=root / "manifest.jsonl", units=root / "units",
+                  teacher=root / "teacher", calibration=source)
+    original = b.make_plan(root / "baseline.json", root / "old-mask", **shared)
+    run = root / "fixed"
+    plan = b.make_plan(root / "baseline.json", run, **shared, **{flag: expected})
+    assert plan["contract_hash"] != original["contract_hash"]
+    assert plan["scientific_config"] == native_data.record["scientific_config"]
+    write_json(run / "native-run.json", plan)
+    cfg = b.native_config(plan["config"])
+    utils.set_torch_seed(cfg.common.seed)
+    task = tasks.setup_task(cfg.task)
+    model, criterion = task.build_model(cfg.model), task.build_criterion(cfg.criterion)
+    assert all(torch.equal(value, model.state_dict()[name]) for name, value in native_data.initial.items())
+    for name, auxiliary in task.multitask_tasks.items():
+        criterion.set_multitask_loss_weight(name, auxiliary.args.get_loss_weight(0))
+    task.load_dataset("train")
+    ds = task.dataset("train")
+    sample = ds.collater([ds[0]])
+    main, size, _, raw = criterion.components(model, sample)
+    kind = "mask" if method == "mask_distillation" else "kl"
+    stats = layer_statistics(sample["alignment_prior"], raw, kind, .8)
+    base = worst_layer(stats["losses"], result["tau_" + kind], stats["counts"])[0]
+    actual, _, _ = criterion(model, sample)
+    torch.testing.assert_close(actual, main + size * expected * base)
+    with trainer_hooks(plan["contract_hash"]):
+        trainer = train.Trainer(cfg, task, model, criterion)
+        trainer.train_step([sample])
+        checkpoint = run / "checkpoints/checkpoint_last.pt"
+        trainer.consolidate_optimizer()
+        trainer.save_checkpoint(str(checkpoint), {})
+        saved = b.load_native(checkpoint)
+        policy = saved["extra_state"]["alignment_coefficient_policy"]
+        assert policy["initial_lambda"] == expected and policy["lambda_source"] == "explicit_fixed"
+        assert policy["calibration_lambda"] == result["lambda_" + kind]
+        assert read_jsonl(run / "alignment-train.jsonl")[-1]["alignment/lambda"] == expected
+    restored = root / "copied-pilot"
+    new = b.make_plan(root / "baseline.json", restored, **shared, **{flag: expected})
+    write_json(restored / "native-run.json", new)
+    (restored / "checkpoints").mkdir()
+    saved["extra_state"]["alignment_contract_hash"] = original["contract_hash"]
+    torch.save(saved, restored / "checkpoints/checkpoint_last.pt")
+    with pytest.raises(ValueError, match="different training contract"):
+        b.train_native(new, restored, resume=True)
+    if method == "mask_distillation":
+        wrong = b.make_plan(root / "baseline.json", run, **shared, mask_lambda=10., kl_lambda=2.)
+        assert wrong == plan
+    else:
+        wrong = b.make_plan(root / "baseline.json", run, **shared, kl_lambda=1., mask_lambda=20.)
+        assert wrong == plan
+    capsys.readouterr()
+    option = "--" + flag.replace("_", "-")
+    b.main(["plan", "--baseline", str(root / "baseline.json"), "--output", str(root / "cli-explicit"),
+            "--manifest", str(root / "manifest.jsonl"), "--units", str(root / "units"),
+            "--teacher", str(root / "teacher"), "--calibration", str(source), "--method", method,
+            option, str(expected)])
+    assert json.loads(capsys.readouterr().out)["transfer"]["coefficient_policy"]["initial_lambda"] == expected
+    from alignment_transfer_s2ut import cli
+    parsed = cli.parser_for("train_s2ut").parse_args([
+        "--baseline-record", str(root / "baseline.json"), "--output", str(root / "generic-cli"),
+        "--manifest", str(root / "manifest.jsonl"), "--units", str(root / "units"),
+        "--teacher", str(root / "teacher"), "--calibration", str(source), "--method", method,
+        "--kl-lambda", "1.", "--mask-lambda", "10."])
+    monkeypatch.setattr(b, "train_native", lambda plan, *args: plan)
+    assert cli.run("train_s2ut", parsed)["transfer"]["coefficient_policy"]["initial_lambda"] == expected
+    assert file_hash(source) == checksum
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize("native_data", [(2, "cuda", 2, None)], indirect=True)
 def test_fp16_precision_receipt_and_legacy_migration(calibrated):
