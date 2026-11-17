@@ -1,5 +1,11 @@
 # Validation record
 
+## Explicit Mask coefficient, 2026-11-18
+
+CPU regression passed 115 tests with six GPU cases deselected. A further 34 checks passed after the notebook pins were updated. They covered independent CLI dispatch, omitted-coefficient fallback, Mask loss and backward at λ = 10 and the original τ, unchanged KL/cosine behavior, identical initial model weights across all three methods, checkpoint/log provenance, and rejection of old Pilot checkpoints. Additional same-output-directory contract checks passed for Mask and Annealed KL.
+
+Wheel building succeeded, and the wheel's source and compatibility manifests reconstructed the original production v3 calibration fingerprint. Read-only Drive discovery found the old Mask's completed update-6,000 receipt and an incomplete payload under update 6,400. The experiment's stage folder had no published `transfer-lambda1-v1` or `transfer-fixed-v1` run. Live Colab execution was not inspected. GPU training with the new coefficients remains unmeasured. [Explicit coefficient workflow](FIXED_KL.md)
+
 ## Fixed KL coefficient, 2026-11-18
 
 The final CPU regression selection passed 105 tests, with six GPU cases deselected. It covered the real native criterion with λ = 1, the full 400k cosine schedule, unchanged Mask loss, fresh initialization, checkpoint coefficient provenance, rejection of copied or mismatched Pilot checkpoints, CLI parsing, calibration integrity, and native save/restore. The final notebook release selection passed 32 tests after both source pins were updated. A wheel build succeeded and contained the reviewed compatibility manifests. Reconstructed Colab source fingerprints matched the existing v3 calibration (`8f49ebdf...`) and earlier Top-p report (`1a8063f4...`), including the historical Baseline storage adapter identity. The Drive collision search found no name containing `transfer-lambda1-v1`.

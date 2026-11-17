@@ -146,6 +146,11 @@ def test_explicit_condition_native_state_and_checkpoint(calibrated, native_data,
     shared = dict(method=method, manifest=root / "manifest.jsonl", units=root / "units",
                   teacher=root / "teacher", calibration=source)
     original = b.make_plan(root / "baseline.json", root / "old-mask", **shared)
+    write_json(root / "old-mask/native-run.json", original)
+    changed = b.make_plan(root / "baseline.json", root / "old-mask", **shared, **{flag: expected})
+    assert changed["contract_hash"] != original["contract_hash"]
+    with pytest.raises(ValueError, match="output/contract exists"):
+        b.train_native(changed, root / "old-mask", resume=True)
     run = root / "fixed"
     plan = b.make_plan(root / "baseline.json", run, **shared, **{flag: expected})
     assert plan["contract_hash"] != original["contract_hash"]
