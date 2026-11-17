@@ -1,5 +1,6 @@
 """Exercise the primary notebooks' release bootstrap without Colab or Drive."""
 
+import ast
 import json
 from pathlib import Path
 import runpy
@@ -25,11 +26,14 @@ def test_release_manifest_and_notebook_forms():
     headings = [line.split("### ", 1)[1] for line in settings.splitlines() if line.startswith("#@markdown ### ")]
     assert headings == ["Experiment", "Data and audio preparation", "T2TT teacher model",
                         "S2UT Baseline", "Teacher artifacts", "Top-p diagnostics and calibration",
-                        "Transfer training conditions", "Pilot and checkpoint recovery", "Evaluation and diagnostics"]
+                        "Transfer training conditions", "Pilot and checkpoint recovery", "Evaluation and diagnostics",
+                        "Weights & Biases (optional)"]
     for name in ("training", "evaluate"):
         notebook = json.loads((ROOT / f"notebooks/colab/{name}.ipynb").read_text(encoding="utf-8"))
         assert notebook["nbformat"] == 4
         assert notebook["cells"][0]["source"][2].strip() == label
+        form = next(cell for cell in notebook["cells"] if cell["id"] == "settings")
+        assert form["metadata"]["cellView"] == "form"
         assert "Last updated" not in cells(name)["settings"]
         assert "NOTEBOOK_UPDATED_AT" not in cells(name)["settings"]
         assert f"NOTEBOOK_UPDATED_AT = {release['NOTEBOOK_UPDATED_AT']!r}" in cells(name)["paths"]
@@ -38,6 +42,20 @@ def test_release_manifest_and_notebook_forms():
         order = list(cells(name))
         assert order.index("paths") < order.index("release-check")
         assert next(i for i, code in enumerate(cells(name).values()) if "name='install-uv'" in code) > order.index("release-check")
+
+
+@pytest.mark.parametrize("literal", ["None", "0.8", "0.9", "0.95"])
+def test_top_p_form_keeps_the_python_value(literal):
+    settings = cells("training")["settings"]
+    line, = (line for line in settings.splitlines() if line.startswith("MASK_TOP_P = "))
+    assignment, declaration = line.split(" #@param ")
+    options, field = declaration.split(" {", 1)
+    assert json.loads(options) == ["None", "0.8", "0.9", "0.95"]
+    assert field == 'type:"raw"}'
+    assert assignment == "MASK_TOP_P = None"
+    ns = {}
+    exec(settings.replace(assignment, f"MASK_TOP_P = {literal}", 1), ns)
+    assert ns["MASK_TOP_P"] == ast.literal_eval(literal)
 
 
 def test_notebook_update_labels_distinguish_two_updates_on_the_same_day():

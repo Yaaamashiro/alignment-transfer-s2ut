@@ -8,6 +8,8 @@ Mask Distillation uses an independent fixed λ = 10. The existing precision-qual
 
 Open the main training notebook on L4. Use the saved corpus and T2TT settings. Set the following in **Experiment and training stages**.
 
+Choose **0.8** in the **Top-p diagnostics and calibration** dropdown to match the saved calibration for this run.
+
 ```python
 EXPERIMENT_ID = 'experiment-001'
 TRANSFER_EXPERIMENT_ID = 'transfer-fixed-v1'

@@ -73,7 +73,7 @@ def test_attention_requires_review_and_completed_matching_evaluations(tmp_path):
         exec(cell("benchmark_comparison-24"), values)
     assert not calls
     values["RUN_TEACHER_ARTIFACTS"] = True
-    with pytest.raises(RuntimeError, match="評価を完了"):
+    with pytest.raises(RuntimeError, match="Complete dev evaluation"):
         exec(cell("benchmark_comparison-24"), values)
     for output in (values["T2TT_DEV_OUTPUT"], values["T2TT_EXTERNAL_OUTPUT"]):
         write_json(output, dict(checkpoint_hash="a" * 64))
