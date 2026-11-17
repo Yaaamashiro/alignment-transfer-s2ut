@@ -1,5 +1,11 @@
 # Validation record
 
+## Fixed KL coefficient, 2026-11-18
+
+The final CPU regression selection passed 105 tests, with six GPU cases deselected. It covered the real native criterion with λ = 1, the full 400k cosine schedule, unchanged Mask loss, fresh initialization, checkpoint coefficient provenance, rejection of copied or mismatched Pilot checkpoints, CLI parsing, calibration integrity, and native save/restore. The final notebook release selection passed 32 tests after both source pins were updated. A wheel build succeeded and contained the reviewed compatibility manifests. Reconstructed Colab source fingerprints matched the existing v3 calibration (`8f49ebdf...`) and earlier Top-p report (`1a8063f4...`), including the historical Baseline storage adapter identity. The Drive collision search found no name containing `transfer-lambda1-v1`.
+
+The fixed-coefficient production runs and Colab L4 execution remain unmeasured. The existing calibration is reused as an immutable input. [Fixed KL workflow](FIXED_KL.md)
+
 ## 2026-11-14 — Calibration padding and teacher projection audit
 
 - Compared identical teacher/student inputs with and without a source-padding mask before changing production code. With zero padding, KL, top-p region and mass, gradient norms and cosine, and λ and τ matched. Coverage by layer changed from `[.2500, .6250]` to `[.2917, .7083]`.
