@@ -105,12 +105,31 @@ def annealing_policy(policy):
     return fraction
 
 
+def coefficient_policy(policy, budget):
+    """Resolve the condition's coefficient while retaining calibration provenance."""
+    method = policy["method"]
+    kind = "mask" if method == "mask_distillation" else "kl"
+    calibrated = policy["calibrated"]
+    original = calibrated["lambda_" + kind]
+    explicit = policy.get("kl_lambda") if kind == "kl" and method != "baseline" else None
+    if explicit is not None and (
+            isinstance(explicit, bool) or not isinstance(explicit, (int, float))
+            or not math.isfinite(explicit) or explicit < 0):
+        raise ValueError("kl_lambda must be a finite nonnegative number")
+    return dict(initial_lambda=original if explicit is None else float(explicit),
+                lambda_source="calibration" if explicit is None else "explicit_fixed",
+                calibration_lambda=original, tau=calibrated["tau_" + kind],
+                anneal_schedule=policy["anneal_schedule"] if method == "annealed_distillation" else None,
+                anneal_end_update=math.ceil(annealing_policy(policy) * budget) if method == "annealed_distillation" else None,
+                max_updates=budget)
+
+
 def loss_and_logs(teacher, student, policy, step, budget, source_padding=None):
     kind = "mask" if policy["method"] == "mask_distillation" else "kl"
-    parameters = policy["calibrated"]
-    tau = parameters["tau_" + kind]
+    settings = coefficient_policy(policy, budget)
+    tau = settings["tau"]
     fraction = annealing_policy(policy)
-    coefficient = lambda_at(step, policy["method"], parameters["lambda_" + kind], budget, fraction)
+    coefficient = lambda_at(step, policy["method"], settings["initial_lambda"], budget, fraction)
     stats = layer_statistics(teacher, student, kind, policy.get("mask_top_p"), source_padding)
     loss, weights = worst_layer(stats["losses"], tau, stats["counts"])
     valid_layers = stats["counts"] > 0

@@ -63,6 +63,19 @@ def test_transfer_id_isolates_transfer_paths_and_reuses_original_inputs(tmp_path
     assert changed[0] == changed[1]
 
 
+def test_fixed_kl_run_reuses_original_calibration_paths(tmp_path):
+    source, ns = namespace(tmp_path, "training")
+    ns["TRANSFER_EXPERIMENT_ID"] = "transfer-main-v1"
+    exec(source["paths"], ns)
+    old = {key: ns[key] for key in ("CALIBRATION", "TOPP_REPORT", "BASELINE", "PREPARED", "MANIFEST")}
+    old_root = ns["RESEARCH_ROOT"]
+    ns.update(TRANSFER_EXPERIMENT_ID="transfer-lambda1-v1", CALIBRATION_EXPERIMENT_ID="transfer-main-v1")
+    exec(source["paths"], ns)
+    assert {key: ns[key] for key in old} == old
+    assert ns["RESEARCH_ROOT"] != old_root and ns["REUSE_CALIBRATION"]
+    assert ns["TRANSFER_KL_LAMBDA"] == 1.
+
+
 @pytest.mark.parametrize("phase,target", [("save", 2), ("resume", 4)])
 def test_training_recovery_check_routes_one_native_condition(tmp_path, phase, target):
     source, ns = namespace(tmp_path, "training")
@@ -78,7 +91,7 @@ def test_training_recovery_check_routes_one_native_condition(tmp_path, phase, ta
         calls.append(args)
         if args[1] == "-m":
             return {"training_budget": 400000, "initialization": "fresh", "selection_policy": {},
-                    "transfer": {"calibration_hash": "fixture"}}
+                    "transfer": {"calibration_hash": "fixture", "coefficient_policy": {}}}
         assert args[2] == "recovery" and args[args.index("--phase") + 1] == phase
         return {"target": target}
 
@@ -230,7 +243,7 @@ def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(
         validate_command(args[2], args[3:])
         calls.append(list(map(str, args)))
         return dict(training_budget=400000, initialization="fresh", selection_policy={}, contract_hash="native-fixture",
-                    transfer={"calibration_hash": "fixture"})
+                    transfer={"calibration_hash": "fixture", "coefficient_policy": {}})
     def run(name, module, *args, **kw):
         args = list(map(str, args))
         validate_command(module, args)
@@ -255,6 +268,11 @@ def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(
     assert all(c[c.index("--teacher") + 1] == str(ns["TEACHER_ROOT"]) for c in training)
     assert all("--max-update" not in c for c in training)
     assert all(("--stop-after-update" in c) == (mode == "pilot") for c in training)
+    for command in training:
+        method = command[command.index("--method") + 1]
+        assert ("--kl-lambda" in command) == (method != "mask_distillation")
+        if method != "mask_distillation":
+            assert command[command.index("--kl-lambda") + 1] == "1.0"
     exec(source["register-transfers"], ns)
     assert len(ns["conditions"]) == (1 if mode == "pilot" else 4)
     attention = next(c for c in calls if c[2] == "alignment_transfer_s2ut.extract_t2tt_attention")

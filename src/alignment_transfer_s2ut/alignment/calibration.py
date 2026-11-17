@@ -1,7 +1,9 @@
 """Pure calibration estimators; failures are explicit, without fallback constants."""
 import math
+from hashlib import sha256
+from pathlib import Path
 import torch
-from ..io import digest
+from ..io import digest, read_json
 
 
 def runtime_identity():
@@ -118,12 +120,27 @@ def binding(plan):
         "artifacts": plan["transfer"]["artifacts"], "all_layers": plan["transfer"]["all_layers"]}
 
 
+def calibration_implementation_hashes(plan):
+    """Accept only the reviewed coefficient-policy transition for existing calibration."""
+    from ..colab_runtime import s2ut_implementation_files
+
+    package = Path(__file__).resolve().parents[1]
+    compatibility = read_json(package / "coefficient-compatibility.json")
+    accepted = {plan["implementation_hash"]}
+    if all(sha256((package / name).read_text(encoding="utf-8").encode("utf-8")).hexdigest() == expected
+           for name, expected in compatibility["current"].items()):
+        sources = s2ut_implementation_files(package)
+        sources.update(compatibility["previous"])
+        accepted.add(digest({str(Path(name)): value for name, value in sources.items()}))
+    return accepted
+
+
 def validate_artifact(value, plan):
     if value.get("format") not in {"alignment-calibration-v2", "alignment-calibration-v3"} or value.get("tau_calibration_unit") != "microbatch":
         raise ValueError("microbatch tau calibration v2 or v3 required; regenerate the calibration artifact")
     if value.get("artifact_hash") != digest({k:v for k,v in value.items() if k != "artifact_hash"}):
         raise ValueError("corrupt alignment calibration artifact")
-    if value.get("binding") != binding(plan) or value.get("implementation_hash") != plan["implementation_hash"]:
+    if value.get("binding") != binding(plan) or value.get("implementation_hash") not in calibration_implementation_hashes(plan):
         raise ValueError("calibration data/teacher/initialization/implementation mismatch")
     if value.get("runtime") != runtime_identity():
         raise ValueError("calibration runtime differs")

@@ -1,12 +1,13 @@
 from pathlib import Path
 from copy import deepcopy
+import json
 import shutil
 import pytest
 import torch
 from test_benchmark_native import native_data
 from test_all_layers_native import layered_teacher
 from alignment_transfer_s2ut import benchmark as b, alignment_calibration as c
-from alignment_transfer_s2ut.io import write_json, read_json, file_hash, digest, ArtifactStore
+from alignment_transfer_s2ut.io import write_json, read_json, read_jsonl, file_hash, digest, ArtifactStore
 from alignment_transfer_s2ut.alignment.calibration import calibrate_tau
 
 
@@ -58,6 +59,76 @@ def test_native_calibration_is_reproducible_and_binds_plan(calibrated):
     assert file_hash(b.read_record(root/"baseline.json")["checkpoint"]) == read_json(root/"baseline.json")["checkpoint_hash"]
     with pytest.raises(ValueError,match="requires --calibration"):
         b.make_plan(root/"baseline.json",root/"missing",manifest=root/"manifest.jsonl",units=root/"units",teacher=root/"teacher")
+
+
+@pytest.mark.parametrize("native_data", [2], indirect=True)
+def test_fixed_kl_native_loss_checkpoint_and_contract(calibrated, native_data, capsys):
+    from fairseq import tasks, utils
+    from alignment_transfer_s2ut.s2ut.benchmark_extension import trainer_hooks
+    from alignment_transfer_s2ut.alignment.losses import layer_statistics, worst_layer
+
+    root, result = calibrated
+    calibration = root / "analysis/alignment-calibration.json"
+    before = file_hash(calibration)
+    kwargs = dict(manifest=root / "manifest.jsonl", units=root / "units", teacher=root / "teacher",
+                  calibration=calibration)
+    old = b.make_plan(root / "baseline.json", root / "old-pilot", **kwargs)
+    new = b.make_plan(root / "baseline.json", root / "lambda1", kl_lambda=1., **kwargs)
+    write_json(root / "old-pilot/native-run.json", old)
+    mixed = b.make_plan(root / "baseline.json", root / "old-pilot", kl_lambda=1., **kwargs)
+    assert mixed["contract_hash"] != old["contract_hash"]
+    with pytest.raises(ValueError, match="output/contract exists"):
+        b.train_native(mixed, root / "old-pilot", resume=True)
+    assert new["scientific_config"] == old["scientific_config"]
+    assert new["transfer"]["calibrated"] == old["transfer"]["calibrated"]
+    write_json(root / "lambda1/native-run.json", new)
+    cfg = b.native_config(new["config"])
+    utils.set_torch_seed(cfg.common.seed)
+    task = tasks.setup_task(cfg.task)
+    model, criterion = task.build_model(cfg.model), task.build_criterion(cfg.criterion)
+    assert all(torch.equal(value, model.state_dict()[name]) for name, value in native_data.initial.items())
+    for name, auxiliary in task.multitask_tasks.items():
+        criterion.set_multitask_loss_weight(name, auxiliary.args.get_loss_weight(0))
+    task.load_dataset("train")
+    ds = task.dataset("train")
+    sample = ds.collater([ds[0]])
+    main, size, _, raw = criterion.components(model, sample)
+    unweighted = worst_layer(layer_statistics(sample["alignment_prior"], raw)["losses"], result["tau_kl"])[0]
+    total, _, logs = criterion(model, sample)
+    torch.testing.assert_close(total, main + size * unweighted)
+    assert logs["alignment/lambda"] == 1.
+    from fairseq_cli import train
+    with trainer_hooks(new["contract_hash"]):
+        trainer = train.Trainer(cfg, task, model, criterion)
+        trainer.train_step([sample])
+        checkpoint = root / "lambda1/checkpoints/checkpoint_last.pt"
+        trainer.consolidate_optimizer()
+        trainer.save_checkpoint(str(checkpoint), {})
+        saved = b.load_native(checkpoint)
+        assert saved["extra_state"]["alignment_coefficient_policy"]["lambda_source"] == "explicit_fixed"
+        assert saved["extra_state"]["alignment_coefficient_policy"]["initial_lambda"] == 1.
+        assert saved["extra_state"]["alignment_coefficient_policy"]["calibration_lambda"] == result["lambda_kl"]
+        row = read_jsonl(root / "lambda1/alignment-train.jsonl")[-1]
+        assert row["alignment/lambda"] == 1. and row["coefficient_policy"]["lambda_source"] == "explicit_fixed"
+    moved = root / "copied-old-pilot"
+    copied = b.make_plan(root / "baseline.json", moved, kl_lambda=1., **kwargs)
+    write_json(moved / "native-run.json", copied)
+    saved["extra_state"]["alignment_contract_hash"] = old["contract_hash"]
+    (moved / "checkpoints").mkdir()
+    torch.save(saved, moved / "checkpoints/checkpoint_last.pt")
+    with pytest.raises(ValueError, match="different training contract"):
+        b.train_native(copied, moved, resume=True)
+    assert file_hash(calibration) == before
+    mask_before = b.make_plan(root / "baseline.json", root / "mask", method="mask_distillation", **kwargs)
+    mask_after = b.make_plan(root / "baseline.json", root / "mask", method="mask_distillation", kl_lambda=1., **kwargs)
+    assert mask_before == mask_after
+    capsys.readouterr()
+    b.main(["plan", "--baseline", str(root / "baseline.json"), "--output", str(root / "cli-lambda1"),
+            "--manifest", str(root / "manifest.jsonl"), "--units", str(root / "units"),
+            "--teacher", str(root / "teacher"), "--calibration", str(calibration),
+            "--method", "annealed_distillation", "--kl-lambda", "1.0"])
+    cli_plan = json.loads(capsys.readouterr().out)
+    assert cli_plan["transfer"]["coefficient_policy"]["initial_lambda"] == 1.
 
 
 @pytest.mark.gpu

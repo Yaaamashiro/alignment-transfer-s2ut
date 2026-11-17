@@ -9,7 +9,7 @@ import torch
 
 from . import benchmark
 from .alignment.calibration import gradient_diagnostics, gradient_norm
-from .alignment.losses import lambda_at
+from .alignment.losses import lambda_at, coefficient_policy
 from .alignment_calibration import logical_batches, logical_gradients, native_session, sample_ids, write_result
 from .alignment_report import _diagnose
 from .io import digest, file_hash, read_json, read_jsonl
@@ -63,7 +63,8 @@ def gradient_probe(plan, saved, updates, calibration, directory):
     method = policy["method"]
     kind = "mask" if method == "mask_distillation" else "kl"
     tau = policy["calibrated"]["tau_" + kind]
-    coefficient = lambda_at(updates, method, policy["calibrated"]["lambda_" + kind],
+    settings = coefficient_policy(policy, plan["training_budget"])
+    coefficient = lambda_at(updates, method, settings["initial_lambda"],
                             plan["training_budget"], policy["anneal_fraction"])
     scale = float(saved["last_optimizer_state"].get("loss_scale", 1.))
     if not math.isfinite(scale) or scale <= 0:
@@ -93,6 +94,7 @@ def gradient_probe(plan, saved, updates, calibration, directory):
         if trainer.get_num_updates() != 0 or any(p.grad is not None for p in model.parameters()):
             raise RuntimeError("gradient probe performed an update or populated training gradients")
         return dict(metrics, pair_ids=ids, gradient_norms=norms, lambda_t=coefficient, tau=tau,
+                    coefficient_policy=settings,
                     per_microbatch_layer_weights=weights[kind], gradient_seconds=time.perf_counter() - started,
                     peak_cuda_bytes=torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None,
                     device=str(device), loss_scale=scale,

@@ -21,7 +21,7 @@ from ..benchmark import read_record, artifact_contract
 from ..config import BackboneConfig
 from ..data.manifest import load_manifest
 from ..io import ArtifactStore, read_json, write_jsonl, read_jsonl
-from ..alignment.losses import encoder_padding_mask, loss_and_logs
+from ..alignment.losses import encoder_padding_mask, loss_and_logs, coefficient_policy, lambda_at
 from ..training import prior_builder
 
 
@@ -323,6 +323,11 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                 row.update({"train/total_loss": float(result.get("loss", 0)) * math.log(2),
                     "train/learning_rate": self.get_lr(), "train/gradient_norm": float(result.get("gnorm", 0)),
                     "train/seconds": self.cumulative_training_time()})
+                policy = getattr(self.task, "transfer_policy", None)
+                if policy is not None:
+                    row["coefficient_policy"] = coefficient_policy(policy, self.task.training_budget)
+                    row.update(method=policy["method"], alignment_contract_hash=contract_hash,
+                               experiment_run=str(path.parent))
                 if "train/main_loss" not in row:
                     row["train/main_loss"] = float(result.get("nll_loss", 0)) * math.log(2)
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -354,10 +359,18 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                 # fairseq saves rounded model weights and Adam moments. The
                 # FP32 weights that Adam updates also have to survive a pause.
                 master = [p.detach().cpu() for p in master_parameters(self.optimizer)] if self.cfg.common.fp16 else []
+                provenance = {}
+                policy = getattr(self.task, "transfer_policy", None)
+                if policy is not None:
+                    settings = coefficient_policy(policy, self.task.training_budget)
+                    provenance["alignment_coefficient_policy"] = dict(settings, method=policy["method"],
+                        lambda_at_saved_update=lambda_at(self.get_num_updates(), policy["method"],
+                            settings["initial_lambda"], self.task.training_budget, policy["anneal_fraction"]),
+                        experiment_run=str(Path(self.cfg.checkpoint.save_dir).parent))
                 result = super().save_checkpoint(temporary, {**extra_state, "alignment_contract_hash": contract_hash,
                     "alignment_selection": self.selection_state, "alignment_rng": rng_state(self.model),
                     "alignment_epoch_lr": epoch_lr, "alignment_fp16_scaler": scaler_state,
-                    "alignment_fp32_master": master})
+                    "alignment_fp32_master": master, **provenance})
                 if Path(temporary).is_file():
                     os.replace(temporary, path)
                     self.saved_update = self.get_num_updates()
@@ -370,6 +383,12 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
             if extra:
                 if extra.get("alignment_contract_hash") != contract_hash:
                     raise ValueError("native resume contract mismatch")
+                policy = getattr(self.task, "transfer_policy", None)
+                if policy is not None and policy.get("kl_lambda") is not None:
+                    saved_policy = extra.get("alignment_coefficient_policy", {})
+                    settings = coefficient_policy(policy, self.task.training_budget)
+                    if any(saved_policy.get(key) != value for key, value in settings.items()):
+                        raise ValueError("native resume coefficient policy mismatch")
                 self.selection_state = extra.get("alignment_selection")
                 restore_rng(self.model, extra["alignment_rng"])
                 if self.cfg.common.fp16 and "alignment_fp16_scaler" in extra:

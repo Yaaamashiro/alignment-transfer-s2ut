@@ -10,7 +10,7 @@ from . import benchmark as b
 from .io import digest, read_json, write_json
 from .progress import progress
 from .alignment.losses import layer_statistics, worst_layer, top_p_mask, distributions, encoder_padding_mask
-from .alignment.calibration import calibrate_tau, calibrate_lambda, gradient_norm, binding, runtime_identity
+from .alignment.calibration import calibrate_tau, calibrate_lambda, gradient_norm, binding, runtime_identity, calibration_implementation_hashes
 from .alignment.calibration import distribution_summary, gradient_diagnostics, layer_weight_summary
 from .alignment import precision
 
@@ -27,13 +27,15 @@ def compatible_top_p_hashes(plan):
     from .colab_runtime import s2ut_implementation_files
 
     package = Path(__file__).parent
-    accepted = {plan["implementation_hash"]}
+    accepted = calibration_implementation_hashes(plan)
     reviewed = read_json(package / "top-p-compatibility.json")
     # Require the reviewed new bytes as well as the old source fingerprint.
     # Future changes to diagnostics in these files must re-establish compatibility.
     if all(sha256((package / name).read_text(encoding="utf-8").encode("utf-8")).hexdigest() == expected
            for name, expected in reviewed.items()):
         sources = s2ut_implementation_files(package)
+        if len(accepted) > 1:
+            sources.update(read_json(package / "coefficient-compatibility.json")["previous"])
         del sources["alignment/precision.py"]
         sources.update(PREVIOUS_CALIBRATION_SOURCES)
         accepted.add(digest({str(Path(name)): value for name, value in sources.items()}))

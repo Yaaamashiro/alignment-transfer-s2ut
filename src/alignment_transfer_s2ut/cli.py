@@ -80,6 +80,7 @@ def parser_for(stage):
                             help="native benchmark-matched training is the research default")
         parser.add_argument("--baseline-record", help="registered separately trained native S2UT baseline")
         parser.add_argument("--calibration")
+        parser.add_argument("--kl-lambda", type=float)
         parser.add_argument("--mask-top-p", type=float)
     if stage in {"train_t2tt", "train_s2ut", "extract_t2tt_attention", "visualize_attention"}:
         parser.add_argument("--all-layers", action="store_true", help="transfer/capture corresponding decoder layers in one forward")
@@ -138,7 +139,7 @@ def run(stage, args):
                              "python -m alignment_transfer_s2ut.benchmark register. "
                              "The old standalone trainer requires explicit --trainer legacy.")
         allowed = {"--baseline-record", "--trainer", "--backend", "--manifest", "--units", "--teacher", "--output",
-                   "--method", "--prior-type", "--calibration", "--mask-top-p",
+                   "--method", "--prior-type", "--calibration", "--mask-top-p", "--kl-lambda",
                    "--resume", "--resume-if-exists", "--all-layers"}
         changed = args.explicit_options - allowed
         if changed:
@@ -146,8 +147,11 @@ def run(stage, args):
         from .benchmark import make_plan, train_native
         resume = args.resume or args.resume_if_exists and (Path(args.output) / "native-run.json").is_file()
         plan = make_plan(args.baseline_record, args.output, args.method, args.prior_type, args.manifest, args.units,
-                         args.teacher, all_layers=True, calibration=args.calibration, mask_top_p=args.mask_top_p)
+                         args.teacher, all_layers=True, calibration=args.calibration, mask_top_p=args.mask_top_p,
+                         kl_lambda=args.kl_lambda)
         return train_native(plan, args.output, resume)
+    if stage == "train_s2ut" and args.kl_lambda is not None:
+        raise ValueError("--kl-lambda requires native --trainer fairseq and --baseline-record")
     if stage == "train_s2ut" and args.method in {"annealed_distillation", "mask_distillation"}:
         raise ValueError("calibrated research methods require native --trainer fairseq and --baseline-record")
     if getattr(args, "resume_if_exists", False):

@@ -63,20 +63,23 @@ def test_legacy_top_p_compatibility_binds_unchanged_sources(monkeypatch):
     projection = "alignment/projection.py"
     files = {projection: "projection hash", "alignment_calibration.py": "new",
              "alignment/calibration.py": "new", "alignment/precision.py": "new"}
-    old = {str(Path(k)): v for k, v in (calibration.PREVIOUS_CALIBRATION_SOURCES |
-                                       {projection: files[projection]}).items()}
+    transition = json.loads((Path(calibration.__file__).parent / "coefficient-compatibility.json").read_text(encoding="utf-8"))
+    old_sources = files | transition["previous"] | calibration.PREVIOUS_CALIBRATION_SOURCES
+    old_sources.pop("alignment/precision.py")
+    old = {str(Path(k)): v for k, v in old_sources.items()}
     old_hash = digest(old)
     plan = {"implementation_hash": digest(files)}
     monkeypatch.setattr(colab_runtime, "s2ut_implementation_files", lambda _: files.copy())
-    assert calibration.compatible_top_p_hashes(plan) == {old_hash, plan["implementation_hash"]}
+    assert {old_hash, plan["implementation_hash"]} <= calibration.compatible_top_p_hashes(plan)
     files[projection] = "changed projection"
     assert old_hash not in calibration.compatible_top_p_hashes(plan)
     files[projection] = "projection hash"
     monkeypatch.setattr(calibration, "read_json", lambda _: {"alignment_calibration.py": "different code hash"})
-    assert calibration.compatible_top_p_hashes(plan) == {plan["implementation_hash"]}
+    assert old_hash not in calibration.compatible_top_p_hashes(plan)
 
 
-def test_colab_restores_previous_calibration_and_publishes_separately(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reuse", [False, True])
+def test_colab_restores_previous_calibration_and_publishes_separately(tmp_path, monkeypatch, reuse):
     notebook = Path(__file__).resolve().parents[1] / "notebooks/colab/training.ipynb"
     cells = {cell["id"]: "".join(cell["source"]) for cell in json.loads(notebook.read_text(encoding="utf-8"))["cells"]}
     output = tmp_path / "new/alignment-calibration.json"
@@ -98,14 +101,19 @@ def test_colab_restores_previous_calibration_and_publishes_separately(tmp_path, 
                                    "identity": {"command": ["python", "-m", module, *map(str, old_args)]}}))
     calls = []
     context = dict(Path=Path, json=json, ROOT=root, PERSISTENT=persistent, SCOPE_SUFFIX=suffix,
+                   CALIBRATION_SCOPE_SUFFIX=suffix, REUSE_CALIBRATION=reuse,
                    PREPARE_AUDIO_PACKS=False, NEED_TEACHER=True, BASELINE=baseline, MANIFEST=manifest,
                    TEACHER_ROOT=teacher, CALIBRATION_BATCHES=16, RUN_MASK_TOPP_DIAGNOSTICS=False,
-                   RUN_ALIGNMENT_CALIBRATION=True, TOPP_REPORT=top_p, TOPP_ROOT=top_p.parent, PYTHON="python",
+                   RUN_ALIGNMENT_CALIBRATION=not reuse, TOPP_REPORT=top_p, TOPP_ROOT=top_p.parent, PYTHON="python",
                    PREVIOUS_CALIBRATION=previous, CALIBRATION=output, MASK_TOP_P=.8, LOGS=tmp_path,
                    run=lambda *args, **kw: calls.append((args, kw)), log_event=lambda *args: None)
     exec(cells["calibration"], context)
+    if reuse:
+        assert calls[0][0][0] == "research-v5-top-p" + suffix
+        assert calls[0][1]["restore_only"]
+        calls.pop(0)
     assert calls[0][0][0] == "research-v5-calibration" + suffix
     assert calls[0][1] == {"restore_only": True}
     assert calls[1][0][0] == "research-v6-calibration-fp16" + suffix
     assert calls[1][0][-4:] == ("--previous-calibration", previous, "--output", output)
-    assert calls[1][1] == {"gpu": True}
+    assert calls[1][1] == {"gpu": True, "restore_only": reuse}

@@ -12,10 +12,12 @@ $$
 |---|---|---|
 | Baseline | S2UT task loss | Raw student attention |
 | KL-based Attention Distillation | Per-layer KL divergence | Raw student attention |
-| Annealed KL-based Attention Distillation | Per-layer KL divergence with calibrated λ decaying to zero over 80% of training using a cosine schedule | Raw student attention |
+| Annealed KL-based Attention Distillation | Per-layer KL divergence with λ decaying to zero over 80% of training using a cosine schedule | Raw student attention |
 | Attention-level Knowledge Distillation | Student attention mass within explicitly selected teacher top-p regions | Raw student attention |
 
 All three transfer conditions aggregate per-layer losses using calibrated worst-layer LogSumExp. Each T2TT decoder layer supervises the corresponding S2UT decoder layer. Attention is averaged across heads and projected into S2UT coordinates through source and target mappings. Validation and inference are teacher-free.
+
+The notebook defaults to an explicit KL coefficient of 1.0. Mask λ and both temperatures use the verified calibration. Start fixed-coefficient runs under a new transfer ID. [Fixed KL workflow](docs/FIXED_KL.md)
 
 ## Getting started with Colab
 

@@ -75,6 +75,8 @@ Use `autograd.grad` to measure the native logical task gradient and the aggregat
 
 Accumulate microbatch gradients sequentially and release each graph. Zero or nonfinite norms stop calibration. KL and Mask use separate λ values. The two KL conditions share λKL and τKL.
 
+For the fixed KL condition, training explicitly selects λKL = 1.0 for both KL methods. Annealing follows the full registered budget, ending at 320,000 of 400,000 updates. The calibration continues to supply both τ values and Mask λ and records its original KL λ. The plan, loss, logs, and checkpoint share the resolved coefficient policy. [Fixed KL workflow](FIXED_KL.md)
+
 The calibration report includes the measured task/alignment gradient cosine and the norm ratio after applying the final λ to each logical batch. It summarizes microbatch layer weights, worst-layer frequency, entropy, effective layer count, and the maximum-to-median weight ratio. The Pilot repeats the gradient observation on saved checkpoints in a separate process. [Native transfer pilot](PILOT.md)
 
 ## Top-p selection and the training contract
