@@ -37,6 +37,12 @@ Run **Train the transfer conditions** to start the selected runs. Its plan log s
 
 The old 20k KL Pilot and calibrated Mask Pilot have different coefficients and contracts. Reproduce or continue existing runs with their original pinned source, IDs, and settings. The new conditions start from the Baseline's registered fresh initialization. A copied old checkpoint is rejected by the contract check.
 
+## Weights & Biases charts
+
+Add a `WANDB_API_KEY` secret in Colab and grant the notebook access. In **Experiment and training stages**, enable `ENABLE_WANDB` and set `WANDB_PROJECT`. Leave `WANDB_ENTITY` blank for your default entity, or enter your team's entity. The **Train the transfer conditions** cell logs a W&B link after the first Drive snapshot is published.
+
+Each transfer condition gets its own run under the same experiment group. The charts use optimizer updates on the x-axis and show task and total losses, learning rate, gradient norm, alignment metrics, and dev loss when available. Keep the same entity and project on resume to continue the same run. Charts refresh after a snapshot is published. W&B uses a separate environment and leaves the native optimizer, checkpoints, and local metrics in place.
+
 ## CLI and recorded policy
 
 `benchmark plan`, `benchmark train`, and native `train_s2ut` accept `--kl-lambda 1.0` and `--mask-lambda 10.0`. KL methods read only the KL option, and Mask reads only the Mask option. Omitting a method's coefficient preserves calibrated behavior. The calibration remains mandatory and is validated before the explicit coefficient is applied.
