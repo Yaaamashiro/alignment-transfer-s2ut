@@ -104,13 +104,21 @@ def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch):
     publish_receipt(work, backup, 100)
     expected = native_command(work)
 
-    def make_log(name, command, lines):
+    def make_log(name, command, lines, started="2026-11-18T00:00:02+00:00"):
         path = logs / (name + ".log")
         path.write_text("".join(lines), encoding="utf-8")
         (logs / (name + ".json")).write_text(json.dumps({
-            "name": name, "started_utc": "2026-11-18T00:00:00+00:00", "command": command, "log": str(path),
+            "name": name, "started_utc": started, "command": command, "log": str(path),
         }), encoding="utf-8")
         return path
+
+    def make_plan(name, second, contract):
+        stdout = logs / (name + ".stdout.log")
+        stdout.write_text(json.dumps({"contract_hash": contract}), encoding="utf-8")
+        (logs / (name + ".json")).write_text(json.dumps({
+            "status": "succeeded", "started_utc": f"2026-11-18T00:00:0{second}+00:00",
+            "command": [*expected[:3], "plan", *expected[4:]], "stdout_log": str(stdout),
+        }), encoding="utf-8")
 
     def checkpoint(step):
         return f"[recovery] learned_at_least={step} durable_updates={step}\n"
@@ -128,6 +136,10 @@ def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch):
     values.update({"train/main_loss": "2.7", "alignment/w_0": "0.99", "alignment/lambda": "999",
                    "alignment/tau": "nan", "alignment/invalid": "inf", "loss_scale": "128", "secret": "private"})
     dev = '2026-11-18 00:00:00 | INFO | dev | {"dev_num_updates":"100","dev_loss":"3.3","dev_nll_loss":"2.9"}\n'
+    make_plan("old-contract", 0, "different-plan")
+    make_log("old-contract-train", expected, [train(100, **{"alignment/D_3": "7"}), checkpoint(100)],
+             started="2026-11-18T00:00:00.500000+00:00")
+    make_plan("matching-contract", 1, "matching-plan")
     # This is the outer notebook receipt from a run with W&B disabled.
     past = ["python", "-m", "alignment_transfer_s2ut.pilot", "--", "python", "-m",
             "alignment_transfer_s2ut.colab_runtime", "--training", "--", *expected, "--stop-after-update", "200"]
@@ -162,6 +174,7 @@ def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch):
     assert expected_metrics <= recovered.keys()
     assert recovered["train/main_loss_fairseq"] == 2.7
     assert recovered["train/loss_scale"] == 128
+    assert "alignment/D_3" not in recovered
     assert recovered["dev/loss"] == 3.3 and recovered["dev/nll_loss"] == 2.9
     assert {k for k in recovered if k in {"secret", "train/main_loss", "alignment/w_0", "alignment/lambda",
                                            "alignment/tau", "alignment/invalid", "dev/main_loss"}} == set()

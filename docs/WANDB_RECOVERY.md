@@ -12,7 +12,7 @@ The telemetry reader uses native JSONL and Fairseq process logs. Each condition 
 
 The backfill uses Fairseq's optimizer update counter. Training is sampled at update 1 and every 100 updates where a Fairseq record exists. Dev contributes its recorded validation points. The canonical dev unit loss stays in `dev/main_loss`. The native Fairseq task-loss values have separate `train/main_loss_fairseq` and `dev/main_loss_fairseq` series. Evaluation metrics such as ASR-BLEU and UER are produced by the separate evaluator.
 
-A Fairseq log can contribute only if the recorded trainer command matches the published training command, including the method, coefficient options, input paths, and output path. A Pilot stop is execution control and is ignored for matching. An update must be covered by a completed matching Drive receipt and confirmed durable in that log's own training attempt. Matching copies are combined, native metric points take precedence, and W&B run summaries supply the progress markers on reconnect. Local logs missing the relevant Fairseq or durability records leave gaps in the backfill.
+A Fairseq log can contribute when the recorded trainer command matches the published command and the preceding notebook plan records the same contract hash. A Pilot stop is execution control and is ignored for matching. An update must be covered by a completed matching Drive receipt and confirmed durable in that log's own training attempt. Matching copies are combined, native metric points take precedence, and W&B run summaries supply the progress markers on reconnect. Keep the process receipts, plan stdout files, and Fairseq logs together in `execution/` to backfill history.
 
 ## Resume in the current Colab runtime
 

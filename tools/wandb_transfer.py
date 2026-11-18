@@ -1,6 +1,7 @@
 """Send checkpointed transfer metrics to W&B while the Colab train command runs."""
 
 import argparse
+from bisect import bisect_right
 import hashlib
 import json
 import math
@@ -55,14 +56,15 @@ class MetricReader:
                 yield row
 
 
-def training_command(command):
+def training_command(command, action="train"):
     """Find and normalize the native trainer argv inside the notebook wrappers."""
     if not isinstance(command, list) or not all(isinstance(arg, str) for arg in command):
         return None
     for index in range(1, len(command) - 2):
-        if command[index:index + 3] != ["-m", "alignment_transfer_s2ut.benchmark", "train"]:
+        if command[index:index + 3] != ["-m", "alignment_transfer_s2ut.benchmark", action]:
             continue
         args = command[index - 1:]
+        args[3] = "train"
         for position, arg in enumerate(args):
             if arg.partition("=")[0] == "--stop-after-update":
                 del args[position:position + (1 if "=" in arg else 2)]
@@ -132,25 +134,38 @@ class FairseqProgressReader:
         self.logs = Path(logs).resolve()
         self.offsets = {}
 
-    def sources(self, expected):
+    def sources(self, expected, contract):
+        plans = {}
         sources = {}
         for receipt in self.logs.glob("*.json"):
             try:
                 record = json.loads(receipt.read_text(encoding="utf-8"))
-                if training_command(record.get("command")) != expected:
+                started = record["started_utc"]
+                if type(started) is not str:
+                    continue
+                command = record.get("command")
+                if training_command(command, "plan") == expected:
+                    plans[started] = None
+                    if record.get("status") == "succeeded":
+                        output = Path(record["stdout_log"]).resolve()
+                        if output.is_relative_to(self.logs):
+                            plans[started] = json.loads(output.read_text(encoding="utf-8")).get("contract_hash")
+                if training_command(command) != expected:
                     continue
                 path = Path(record["log"]).resolve()
-                started = record["started_utc"]
-                if (type(started) is str and path.suffix == ".log"
-                        and path.is_relative_to(self.logs) and path.is_file()):
+                if path.suffix == ".log" and path.is_relative_to(self.logs) and path.is_file():
                     sources[path] = started
-            except (OSError, ValueError, KeyError, TypeError):
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 continue
-        return sorted(sources, key=lambda path: (sources[path], path.name))
+        timeline = sorted(plans)
+        for path in sorted(sources, key=lambda path: (sources[path], path.name)):
+            position = bisect_right(timeline, sources[path]) - 1
+            if position >= 0 and plans[timeline[position]] == contract:
+                yield path
 
-    def rows(self, expected, maximum_update):
+    def rows(self, expected, contract, maximum_update):
         points = {}
-        for path in self.sources(expected):
+        for path in self.sources(expected, contract):
             with path.open("rb") as stream:
                 stat = os.fstat(stream.fileno())
                 identity = (stat.st_dev, stat.st_ino)
@@ -243,7 +258,8 @@ def report(args, stop):
                             log_event("wandb", "connected", args.logs, run.url or "Offline run")
                     if run is not None:
                         sync_rows(run, train, dev, published, watermarks, native_alignment)
-                        sync_logged_layers(run, layers, published_command, published, watermarks, native_alignment)
+                        sync_logged_layers(run, layers, published_command, args.contract, published,
+                                           watermarks, native_alignment)
             if finishing:
                 break
             stop.wait(15)
@@ -274,14 +290,14 @@ def sync_rows(run, train, dev, published, watermarks, native_alignment):
                 sent = watermarks[progress] = update
 
 
-def sync_logged_layers(run, reader, command, published, watermarks, native_alignment):
+def sync_logged_layers(run, reader, command, contract, published, watermarks, native_alignment):
     """Backfill Fairseq diagnostics at their original optimizer updates."""
     progress = "wandb_layer_update"
     sent = watermarks.get(progress)
     if sent is None:
         sent = run.summary.get(progress) or 0
         watermarks[progress] = sent
-    for update, values in reader.rows(command, published):
+    for update, values in reader.rows(command, contract, published):
         if update <= sent:
             continue
         native = native_alignment.get(update, ())
