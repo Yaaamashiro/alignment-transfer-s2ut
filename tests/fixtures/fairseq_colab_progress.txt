@@ -1,0 +1,2 @@
+INFO:train_inner:{"epoch": 1, "update": 0.243, "num_updates": "7800", "alignment/D_0": "0.125", "alignment/lambda": "10"}
+INFO:dev:{"epoch": 1, "dev_num_updates": "7000", "dev_loss": "3.5", "dev_train/main_loss": "2.75"}
