@@ -37,6 +37,8 @@ Run setup and input restoration through **Top-p diagnostics and calibration**. T
 
 Run **Train the transfer conditions** to start the selected runs. Its plan log shows method, experiment IDs, initial λ, coefficient source, calibrated λ, τ, annealing end, full budget, fresh initialization, and checkpoint directory. With the settings above, each condition begins at update 0 in its own new directory. The notebook trains selected methods sequentially. A disconnect resumes the matching new run's own checkpoint.
 
+The training notebook allows up to 3,072 GiB of Drive backups per stage, including a separate budget for each transfer condition. Check the available space in Google Drive for the combined runs.
+
 The old 20k KL Pilot and calibrated Mask Pilot have different coefficients and contracts. Reproduce or continue existing runs with their original pinned source, IDs, and settings. The new conditions start from the Baseline's registered fresh initialization. A copied old checkpoint is rejected by the contract check.
 
 ## Weights & Biases charts
