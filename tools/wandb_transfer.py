@@ -83,7 +83,10 @@ def number(value):
         return None
 
 
-PROGRESS = re.compile(rb"(?:^| \| )(train_inner|dev) \| (\{.*\})\s*$")
+PROGRESS = re.compile(
+    rb"(?:^INFO:(?P<colab>train_inner|dev):\s*|(?:^| \| )(?P<pipe>train_inner|dev) \| )"
+    rb"(?P<record>\{.*\})\s*$"
+)
 DURABLE = re.compile(rb"^\[recovery\] learned_at_least=\d+ durable_updates=(\d+)\b")
 TRAIN_FIELDS = {
     "loss": "train/loss_fairseq", "nll_loss": "train/nll_loss", "ppl": "train/perplexity",
@@ -97,10 +100,10 @@ def fairseq_row(line):
     if not match:
         return None
     try:
-        record = json.loads(match[2])
+        record = json.loads(match["record"])
     except (ValueError, UnicodeError):
         return None
-    is_dev = match[1] == b"dev"
+    is_dev = (match["colab"] or match["pipe"]) == b"dev"
     # Fairseq's "update" is a fractional epoch. Its optimizer counter is num_updates.
     step = number(record.get("dev_num_updates" if is_dev else "num_updates"))
     if step is None or step <= 0 or step != int(step):
