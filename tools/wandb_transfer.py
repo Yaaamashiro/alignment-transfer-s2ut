@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sys
 from threading import Event, Thread
 
@@ -39,108 +40,143 @@ class MetricReader:
                 if not line.strip():
                     self.offset += len(line)
                     continue
-                row = json.loads(line)
-                if row["step"] > maximum_update:
+                try:
+                    row = json.loads(line)
+                    step = row["step"]
+                except (ValueError, KeyError, TypeError):
+                    self.offset += len(line)
+                    continue
+                if type(step) is not int or step < 1:
+                    self.offset += len(line)
+                    continue
+                if step > maximum_update:
                     break
                 self.offset += len(line)
                 yield row
 
 
+def training_command(command):
+    """Find and normalize the native trainer argv inside the notebook wrappers."""
+    if not isinstance(command, list) or not all(isinstance(arg, str) for arg in command):
+        return None
+    for index in range(1, len(command) - 2):
+        if command[index:index + 3] != ["-m", "alignment_transfer_s2ut.benchmark", "train"]:
+            continue
+        args = command[index - 1:]
+        for position, arg in enumerate(args):
+            if arg.partition("=")[0] == "--stop-after-update":
+                del args[position:position + (1 if "=" in arg else 2)]
+                break
+        return args
+    return None
+
+
+def number(value):
+    if type(value) not in (int, float, str):
+        return None
+    try:
+        value = float(value) if isinstance(value, str) else value
+        return value if math.isfinite(value) else None
+    except (ValueError, OverflowError):
+        return None
+
+
+PROGRESS = re.compile(rb"(?:^| \| )(train_inner|dev) \| (\{.*\})\s*$")
+DURABLE = re.compile(rb"^\[recovery\] learned_at_least=\d+ durable_updates=(\d+)\b")
+TRAIN_FIELDS = {
+    "loss": "train/loss_fairseq", "nll_loss": "train/nll_loss", "ppl": "train/perplexity",
+    "loss_scale": "train/loss_scale", "clip": "train/clip_fraction", "oom": "train/oom",
+    "train/main_loss": "train/main_loss_fairseq",
+}
+
+
+def fairseq_row(line):
+    match = PROGRESS.search(line)
+    if not match:
+        return None
+    try:
+        record = json.loads(match[2])
+    except (ValueError, UnicodeError):
+        return None
+    is_dev = match[1] == b"dev"
+    # Fairseq's "update" is a fractional epoch. Its optimizer counter is num_updates.
+    step = number(record.get("dev_num_updates" if is_dev else "num_updates"))
+    if step is None or step <= 0 or step != int(step):
+        return None
+    if not is_dev and step != 1 and step % 100:
+        return None
+    values = {}
+    for key, raw in record.items():
+        if is_dev:
+            name = key.removeprefix("dev_")
+            if name == "train/main_loss":
+                target = "dev/main_loss_fairseq"
+            elif name in {"loss", "nll_loss", "ppl"} or name.startswith("multitask_"):
+                target = "dev/" + name
+            else:
+                continue
+        else:
+            target = key if key.startswith("alignment/") else TRAIN_FIELDS.get(key)
+            if key.startswith("multitask_"):
+                target = "train/" + key
+        value = number(raw)
+        if target and value is not None:
+            values[target] = value
+    return (int(step), values) if values else None
+
+
 class FairseqProgressReader:
-    """Recover per-layer metrics omitted from the native numeric-only JSONL export.
+    """Recover diagnostics only from checkpointed portions of matching process logs."""
 
-    Only read stdout logs from this exact training condition. A Colab run may have
-    several nested log wrappers and multiple resumed sessions in one logs folder.
-    """
-
-    # The native JSONL omits some Fairseq tensor-valued metrics. Recover all
-    # alignment diagnostics from Fairseq stdout, not just KL and layer weights:
-    # Mask region mass/coverage, valid row counts, entropies and anneal flags
-    # are all useful for a scientific comparison. Do not override the already
-    # exported scalar controls and worst-layer fractions.
-    EXCLUDED = (
-        "alignment/lambda", "alignment/tau", "alignment/top_p",
-        "alignment/worst_layer",
-    )
-
-    def __init__(self, logs, work, method):
+    def __init__(self, logs):
         self.logs = Path(logs).resolve()
-        self.work = str(Path(work).resolve())
-        self.method = method
         self.offsets = {}
 
-    def sources(self):
-        if not self.logs.is_dir():
-            return
+    def sources(self, expected):
+        sources = {}
         for receipt in self.logs.glob("*.json"):
             try:
                 record = json.loads(receipt.read_text(encoding="utf-8"))
-                command = record["command"]
-                if record.get("name") != "wandb-training-child" or not isinstance(command, list):
-                    continue
-                if command[command.index("--output") + 1] != self.work:
-                    continue
-                if command[command.index("--method") + 1] != self.method:
+                if training_command(record.get("command")) != expected:
                     continue
                 path = Path(record["log"]).resolve()
-                if path.is_file() and path.is_relative_to(self.logs):
-                    yield path
-            except (OSError, ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
+                started = record["started_utc"]
+                if (type(started) is str and path.suffix == ".log"
+                        and path.is_relative_to(self.logs) and path.is_file()):
+                    sources[path] = started
+            except (OSError, ValueError, KeyError, TypeError):
                 continue
+        return sorted(sources, key=lambda path: (sources[path], path.name))
 
-    def rows(self, maximum_update):
-        decoded = json.JSONDecoder()
+    def rows(self, expected, maximum_update):
         points = {}
-        for path in self.sources():
+        for path in self.sources(expected):
             with path.open("rb") as stream:
                 stat = os.fstat(stream.fileno())
                 identity = (stat.st_dev, stat.st_ino)
-                old_identity, offset = self.offsets.get(path, (identity, 0))
+                old_identity, offset, pending, durable = self.offsets.get(path, (identity, 0, {}, 0))
                 if old_identity != identity or offset > stat.st_size:
-                    offset = 0
+                    offset, pending, durable = 0, {}, 0
                 stream.seek(offset)
                 for line in stream:
                     if not line.endswith(b"\n"):
                         break
-                    position = line.find(b"{")
-                    if position < 0:
-                        offset += len(line)
-                        continue
-                    try:
-                        record, _ = decoded.raw_decode(line[position:].decode("utf-8", errors="replace"))
-                    except (json.JSONDecodeError, ValueError):
-                        offset += len(line)
-                        continue
-                    if not isinstance(record, dict) or "update" not in record:
-                        offset += len(line)
-                        continue
-                    update = record["update"]
-                    if type(update) not in (int, float) or not math.isfinite(update) or update != int(update):
-                        offset += len(line)
-                        continue
-                    update = int(update)
-                    if update > maximum_update:
-                        break  # Replay this complete line after its Drive snapshot is published.
-                    if update > 0:
-                        values = {key: value for key, value in record.items()
-                                  if key.startswith("alignment/")
-                                  and key not in self.EXCLUDED
-                                  and not key.startswith("alignment/worst_layer_fraction_")
-                                  and type(value) in (int, float) and math.isfinite(value)}
-                        # The old native JSONL may fall back to NLL for its
-                        # "train/main_loss" field. Preserve the native Fairseq
-                        # task loss separately without overwriting history.
-                        native_main = record.get("train/main_loss")
-                        if type(native_main) in (int, float) and math.isfinite(native_main):
-                            values["train/main_loss_fairseq"] = native_main
-                        if values:
-                            points[update] = values
+                    if match := DURABLE.match(line):
+                        durable = max(durable, int(match[1]))
+                    elif row := fairseq_row(line):
+                        step, values = row
+                        pending.setdefault(step, {}).update(values)
                     offset += len(line)
-                self.offsets[path] = (identity, offset)
-        for update in sorted(points):
-            yield update, points[update]
+                limit = min(durable, maximum_update)
+                for step in sorted(pending):
+                    if step > limit:
+                        break
+                    points.setdefault(step, {}).update(pending.pop(step))
+                self.offsets[path] = (identity, offset, pending, durable)
+        yield from sorted(points.items())
 
-def published_update(work, backup, plan_sha, minimum):
+
+def published_snapshot(work, backup, plan_sha, minimum, method):
     """Read publication receipts without opening checkpoint archives."""
     for folder in sorted(backup.iterdir(), reverse=True) if backup.is_dir() else ():
         prefix = folder.name.split("-", 1)[0]
@@ -152,12 +188,20 @@ def published_update(work, backup, plan_sha, minimum):
         marker = folder / "snapshot.json"
         if not marker.is_file() or not (folder / "snapshot.zip").is_file():
             continue
-        state = json.loads(marker.read_bytes())
-        if (state["updates"] == update and state.get("storage") == "zip-v1"
-                and state["identity"]["work"] == str(work)
-                and state["files"].get("native-run.json") == plan_sha):
-            return update
-    return minimum
+        try:
+            state = json.loads(marker.read_bytes())
+            identity, files = state["identity"], state["files"]
+            command = training_command(identity["command"])
+            if (state["updates"] == update and state.get("storage") == "zip-v1"
+                    and identity["work"] == str(work) and command is not None
+                    and command[command.index("--output") + 1] == str(work)
+                    and command[command.index("--method") + 1] == method
+                    and "checkpoints/checkpoint_last.pt" in files
+                    and files.get("native-run.json") == plan_sha):
+                return update, command
+        except (OSError, ValueError, IndexError, KeyError, TypeError):
+            continue
+    return None
 
 
 def report(args, stop):
@@ -166,9 +210,10 @@ def report(args, stop):
     work = args.work.resolve()
     train = MetricReader(work / "alignment-train.jsonl")
     dev = MetricReader(work / "native-dev.jsonl")
-    layers = FairseqProgressReader(args.logs, work, args.method)
+    layers = FairseqProgressReader(args.logs)
     published = 0
-    watermarks = {}
+    watermarks, native_alignment = {}, {}
+    published_command = None
     run = None
     try:
         while True:
@@ -178,8 +223,10 @@ def report(args, stop):
                 plan_bytes = plan_path.read_bytes()
                 plan = json.loads(plan_bytes)
                 if plan.get("contract_hash") == args.contract:
-                    newest = published_update(work, args.backup, hashlib.sha256(plan_bytes).hexdigest(), published)
-                    if newest > published:
+                    snapshot = published_snapshot(work, args.backup, hashlib.sha256(plan_bytes).hexdigest(),
+                                                  published, args.method)
+                    if snapshot is not None:
+                        published, published_command = snapshot
                         if run is None:
                             run_id = hashlib.sha256(args.contract.encode()).hexdigest()[:24]
                             run = wandb.init(project=args.project, entity=args.entity or None,
@@ -194,10 +241,9 @@ def report(args, stop):
                             for prefix in ("train", "alignment", "dev"):
                                 run.define_metric(prefix + "/*", step_metric="update")
                             log_event("wandb", "connected", args.logs, run.url or "Offline run")
-                        published = newest
                     if run is not None:
-                        sync_rows(run, train, dev, published, watermarks)
-                        sync_logged_layers(run, layers, published, watermarks)
+                        sync_rows(run, train, dev, published, watermarks, native_alignment)
+                        sync_logged_layers(run, layers, published_command, published, watermarks, native_alignment)
             if finishing:
                 break
             stop.wait(15)
@@ -208,7 +254,7 @@ def report(args, stop):
             log_event("wandb", "skipped", args.logs, "No published updates for this contract")
 
 
-def sync_rows(run, train, dev, published, watermarks):
+def sync_rows(run, train, dev, published, watermarks, native_alignment):
     for reader, prefixes, progress in ((train, ("train/", "alignment/"), "wandb_train_update"),
                                        (dev, ("dev/",), "wandb_dev_update")):
         sent = watermarks.get(progress)
@@ -217,28 +263,32 @@ def sync_rows(run, train, dev, published, watermarks):
             watermarks[progress] = sent
         for row in reader.rows(published):
             update = row["step"]
-            if update <= sent or (reader is train and update != 1 and update % 100 and update != published):
+            if reader is train and update != 1 and update % 100 and update != published:
                 continue
             values = {key: value for key, value in row.items()
                       if key.startswith(prefixes) and type(value) in (int, float) and math.isfinite(value)}
-            if values:
+            if reader is train:
+                native_alignment[update] = {key for key in values if key.startswith("alignment/")}
+            if values and update > sent:
                 run.log({**values, "update": update, progress: update})
                 sent = watermarks[progress] = update
 
 
-
-def sync_logged_layers(run, reader, published, watermarks):
-    """Backfill missing layer diagnostics at their original update coordinates."""
+def sync_logged_layers(run, reader, command, published, watermarks, native_alignment):
+    """Backfill Fairseq diagnostics at their original optimizer updates."""
     progress = "wandb_layer_update"
     sent = watermarks.get(progress)
     if sent is None:
         sent = run.summary.get(progress) or 0
         watermarks[progress] = sent
-    for update, values in reader.rows(published):
+    for update, values in reader.rows(command, published):
         if update <= sent:
             continue
-        run.log({**values, "update": update, progress: update})
-        sent = watermarks[progress] = update
+        native = native_alignment.get(update, ())
+        values = {key: value for key, value in values.items() if key not in native}
+        if values:
+            run.log({**values, "update": update, progress: update})
+            sent = watermarks[progress] = update
 
 
 def supervise(args):

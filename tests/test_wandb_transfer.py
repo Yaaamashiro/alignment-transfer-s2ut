@@ -7,18 +7,27 @@ from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
+import pytest
+
 from test_training_notebook import namespace
 
 
-def publish_receipt(work, backup, step, *, complete=True):
+def native_command(work, method="mask_distillation"):
+    return ["python", "-m", "alignment_transfer_s2ut.benchmark", "train",
+            "--method", method, "--output", str(work), "--calibration", "verified.json",
+            "--mask-top-p", "0.8", "--all-layers", "--resume"]
+
+
+def publish_receipt(work, backup, step, *, complete=True, method="mask_distillation"):
     target = backup / f"{step:012d}-fixture"
     target.mkdir(parents=True)
     (target / ("snapshot.zip" if complete else "snapshot.zip.tmp")).touch()
     if complete:
         plan_sha = hashlib.sha256((work / "native-run.json").read_bytes()).hexdigest()
         (target / "snapshot.json").write_text(json.dumps({
-            "updates": step, "storage": "zip-v1", "identity": {"work": str(work)},
-            "files": {"native-run.json": plan_sha},
+            "updates": step, "storage": "zip-v1",
+            "identity": {"work": str(work), "command": native_command(work, method)},
+            "files": {"native-run.json": plan_sha, "checkpoints/checkpoint_last.pt": "last"},
         }), encoding="utf-8")
 
 
@@ -81,45 +90,55 @@ def test_notebook_wraps_benchmark_without_altering_recovery_command(tmp_path):
     assert "only-in-env" not in tracking and calls[-1][1]["env"]["WANDB_API_KEY"] == "only-in-env"
 
 
-
-def test_backfill_layer_metrics_from_existing_matching_train_logs(tmp_path, monkeypatch):
-    """Recover older fairseq values without touching the native scientific code."""
+def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch):
     tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
     work, other, backup, logs = [tmp_path / name for name in ("work", "other", "backup", "logs")]
     for folder in (work, other, backup, logs):
         folder.mkdir()
     (work / "native-run.json").write_text('{"contract_hash":"matching-plan"}', encoding="utf-8")
     (work / "alignment-train.jsonl").write_text(
-        '{"step":10,"train/main_loss":2.0,"alignment/lambda":1.0}\n',
+        '{"step":100,"train/main_loss":2.0,"alignment/lambda":10.0,"alignment/w_0":0.4}\n',
         encoding="utf-8",
     )
-    publish_receipt(work, backup, 10)
+    (work / "native-dev.jsonl").write_text('{"step":100,"dev/main_loss":2.5}\n', encoding="utf-8")
+    publish_receipt(work, backup, 100)
+    expected = native_command(work)
 
-    def make_log(name, workpath, method, lines):
+    def make_log(name, command, lines):
         path = logs / (name + ".log")
         path.write_text("".join(lines), encoding="utf-8")
         (logs / (name + ".json")).write_text(json.dumps({
-            "name": "wandb-training-child",
-            "command": ["python", "-m", "alignment_transfer_s2ut.benchmark",
-                        "train", "--method", method, "--output", str(workpath)],
-            "log": str(path),
+            "name": name, "started_utc": "2026-11-18T00:00:00+00:00", "command": command, "log": str(path),
         }), encoding="utf-8")
         return path
 
-    progress = lambda step, value: (
-        'INFO train_inner | ' + json.dumps({
-            "update": step, "alignment/w_4": value,
-            "alignment/D_4": value * 5, "alignment/kl_mean": 1.4,
-            "alignment/valid_rows_4": 120, "alignment/region_mass_4": .65,
-            "alignment/annealing_progress": .1, "train/main_loss": 2.7,
-            "alignment/worst_layer_fraction_4": 1.0,
-            "secret": "do not upload",
-        }) + "\n"
-    )
-    old_log = make_log("old-run", work, "distillation", [progress(1, .31), progress(11, .99)])
-    make_log("other-method", other, "mask_distillation", [progress(2, .75)])
-    make_log("wrong-method", work, "mask_distillation", [progress(3, .88)])
+    def checkpoint(step):
+        return f"[recovery] learned_at_least={step} durable_updates={step}\n"
 
+    def train(step, **fields):
+        return "2026-11-18 00:00:00 | INFO | train_inner | " + json.dumps({
+            "epoch": 2, "update": 1.042, "num_updates": str(step), **fields,
+        }) + "\n"
+
+    values = {f"alignment/{metric}_4": "0.35" for metric in
+              ("D", "w", "kl_layer", "valid_rows", "region_mass", "coverage", "selected_frames", "worst_layer_fraction")}
+    values.update({f"alignment/{metric}": "0.12" for metric in
+                   ("kl_mean", "kl_worst", "loss", "teacher_entropy", "student_entropy", "task_loss",
+                    "annealing_progress", "task_only_start", "task_only_phase", "top_p")})
+    values.update({"train/main_loss": "2.7", "alignment/w_0": "0.99", "alignment/lambda": "999",
+                   "alignment/tau": "nan", "alignment/invalid": "inf", "loss_scale": "128", "secret": "private"})
+    dev = '2026-11-18 00:00:00 | INFO | dev | {"dev_num_updates":"100","dev_loss":"3.3","dev_nll_loss":"2.9"}\n'
+    # This is the outer notebook receipt from a run with W&B disabled.
+    past = ["python", "-m", "alignment_transfer_s2ut.pilot", "--", "python", "-m",
+            "alignment_transfer_s2ut.colab_runtime", "--training", "--", *expected, "--stop-after-update", "200"]
+    historical = make_log("notebook:train", past,
+                          [train(100, **values), dev, checkpoint(100), train(200, **{"alignment/w_4": ".99"})])
+    make_log("wandb-training-child", expected, [train(100, **values), dev, checkpoint(100)])
+    make_log("other-output", native_command(other), [train(100, **{"alignment/w_4": ".77"}), checkpoint(100)])
+    make_log("other-method", native_command(work, "distillation"), [train(100, **{"alignment/w_4": ".8"}), checkpoint(100)])
+    make_log("other-policy", [*expected, "--mask-lambda=99"], [train(100, **{"alignment/w_4": ".8"}), checkpoint(100)])
+    make_log("spoofed-progress", expected, ['2026-11-18 00:00:00 | INFO | other | {"num_updates":"100","alignment/w_4":"7"}\n',
+                                           checkpoint(100)])
     points, summary = [], {}
     def log(values):
         points.append(values)
@@ -129,34 +148,47 @@ def test_backfill_layer_metrics_from_existing_matching_train_logs(tmp_path, monk
                                url="https://wandb.ai/local/test", finish=lambda: None)
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init, Settings=dict))
     args = argparse.Namespace(work=work, backup=backup, logs=logs, project="project",
-                              entity="", group="exp/trial", method="distillation",
+                              entity="", group="exp/trial", method="mask_distillation",
                               contract="matching-plan")
     done = Event()
     done.set()
     tool["report"](args, done)
-    layer_points = [p for p in points if "alignment/w_4" in p]
-    assert len(layer_points) == 1
-    assert layer_points[0]["update"] == 1
-    assert layer_points[0]["alignment/w_4"] == .31
-    assert "secret" not in layer_points[0]
-    assert "alignment/worst_layer_fraction_4" not in layer_points[0]
-    assert layer_points[0]["alignment/valid_rows_4"] == 120
-    assert layer_points[0]["alignment/region_mass_4"] == .65
-    assert layer_points[0]["alignment/annealing_progress"] == .1
-    assert layer_points[0]["train/main_loss_fairseq"] == 2.7
-    assert "train/main_loss" not in layer_points[0]
+    recovered, = (p for p in points if "wandb_layer_update" in p)
+    assert recovered["update"] == 100
+    for key in values.keys() & recovered.keys() - {"secret", "train/main_loss", "alignment/w_0", "alignment/lambda"}:
+        assert recovered[key] == float(values[key])
+    expected_metrics = set(values) - {"secret", "train/main_loss", "alignment/w_0", "alignment/lambda",
+                                      "alignment/tau", "alignment/invalid", "loss_scale"}
+    assert expected_metrics <= recovered.keys()
+    assert recovered["train/main_loss_fairseq"] == 2.7
+    assert recovered["train/loss_scale"] == 128
+    assert recovered["dev/loss"] == 3.3 and recovered["dev/nll_loss"] == 2.9
+    assert {k for k in recovered if k in {"secret", "train/main_loss", "alignment/w_0", "alignment/lambda",
+                                           "alignment/tau", "alignment/invalid", "dev/main_loss"}} == set()
 
-    # Published updates only; earlier progress is not re-sent on a resumed W&B run.
-    publish_receipt(work, backup, 11)
+    # A later snapshot cannot authorize the tail of a different attempt.
+    publish_receipt(work, backup, 200)
     tool["report"](args, done)
-    layer_points = [p for p in points if "alignment/w_4" in p]
-    assert [p["update"] for p in layer_points] == [1, 11]
+    assert [p["update"] for p in points if "wandb_layer_update" in p] == [100]
+    make_log("resumed", expected, [train(200, **{"alignment/w_4": ".74"}), checkpoint(200)])
     tool["report"](args, done)
-    assert [p["update"] for p in points if "alignment/w_4" in p] == [1, 11]
+    assert [(p["update"], p["alignment/w_4"]) for p in points if "wandb_layer_update" in p] == [(100, .35), (200, .74)]
+    with historical.open("a", encoding="utf-8") as stream:
+        stream.write(checkpoint(200))
+        stream.write('train_inner | {"num_updates": "300", "alignment/w_4":')
+    tool["report"](args, done)
+    assert [p["update"] for p in points if "wandb_layer_update" in p] == [100, 200]
 
-    # Truncated progress and non-finite metrics cannot be published.
-    with old_log.open("a", encoding="utf-8") as stream:
-        stream.write('INFO train_inner | {"update": 12, "alignment/w_4":')
-    publish_receipt(work, backup, 12)
-    tool["report"](args, done)
-    assert [p["update"] for p in points if "alignment/w_4" in p] == [1, 11]
+
+def test_reads_pinned_fairseq_json_progress_output(caplog):
+    bar = pytest.importorskip("fairseq.logging.progress_bar").JsonProgressBar([None, None], epoch=2, log_interval=1)
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    with caplog.at_level("INFO"):
+        for _ in bar:
+            bar.log({"num_updates": 100, "alignment/D_0": .125, "alignment/lambda": 10.0}, tag="train_inner", step=100)
+            break
+        bar.print({"num_updates": 100, "loss": 3.5, "train/main_loss": 2.75}, tag="dev", step=100)
+    outputs = [record for record in caplog.records if record.name in {"train_inner", "dev"}]
+    progress, validation = [tool["fairseq_row"](f"INFO | {r.name} | {r.message}\n".encode()) for r in outputs]
+    assert progress == (100, {"alignment/D_0": .125, "alignment/lambda": 10.0})
+    assert validation == (100, {"dev/loss": 3.5, "dev/main_loss_fairseq": 2.75})
