@@ -109,7 +109,7 @@ def test_backfill_layer_metrics_from_existing_matching_train_logs(tmp_path, monk
     progress = lambda step, value: (
         'INFO train_inner | ' + json.dumps({
             "update": step, "alignment/w_4": value,
-            "alignment/D_4": value * 5, "alignment/kl_mean": 1.4,
+            "alignment/D_4": value * 5, "alignment/kl_mean": 1.4,\n            "alignment/valid_rows_4": 120, "alignment/region_mass_4": .65,\n            "alignment/annealing_progress": .1, "train/main_loss": 2.7,
             "alignment/worst_layer_fraction_4": 1.0,
             "secret": "do not upload",
         }) + "\n"
@@ -137,7 +137,7 @@ def test_backfill_layer_metrics_from_existing_matching_train_logs(tmp_path, monk
     assert layer_points[0]["update"] == 1
     assert layer_points[0]["alignment/w_4"] == .31
     assert "secret" not in layer_points[0]
-    assert "alignment/worst_layer_fraction_4" not in layer_points[0]
+    assert "alignment/worst_layer_fraction_4" not in layer_points[0]\n    assert layer_points[0]["alignment/valid_rows_4"] == 120\n    assert layer_points[0]["alignment/region_mass_4"] == .65\n    assert layer_points[0]["alignment/annealing_progress"] == .1\n    assert layer_points[0]["train/main_loss_fairseq"] == 2.7\n    assert "train/main_loss" not in layer_points[0]
 
     # Published updates only; earlier progress is not re-sent on a resumed W&B run.
     publish_receipt(work, backup, 11)
