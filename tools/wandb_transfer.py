@@ -46,8 +46,6 @@ class MetricReader:
                 yield row
 
 
-
-
 class FairseqProgressReader:
     """Recover per-layer metrics omitted from the native numeric-only JSONL export.
 
@@ -55,10 +53,14 @@ class FairseqProgressReader:
     several nested log wrappers and multiple resumed sessions in one logs folder.
     """
 
-    FIELDS = (
-        "alignment/w_", "alignment/D_", "alignment/kl_",
-        "alignment/loss", "alignment/task_loss",
-        "alignment/teacher_entropy", "alignment/student_entropy",
+    # The native JSONL omits some Fairseq tensor-valued metrics. Recover all
+    # alignment diagnostics from Fairseq stdout, not just KL and layer weights:
+    # Mask region mass/coverage, valid row counts, entropies and anneal flags
+    # are all useful for a scientific comparison. Do not override the already
+    # exported scalar controls and worst-layer fractions.
+    EXCLUDED = (
+        "alignment/lambda", "alignment/tau", "alignment/top_p",
+        "alignment/worst_layer",
     )
 
     def __init__(self, logs, work, method):
@@ -121,8 +123,16 @@ class FairseqProgressReader:
                         break  # Replay this complete line after its Drive snapshot is published.
                     if update > 0:
                         values = {key: value for key, value in record.items()
-                                  if key.startswith(self.FIELDS)
+                                  if key.startswith("alignment/")
+                                  and key not in self.EXCLUDED
+                                  and not key.startswith("alignment/worst_layer_fraction_")
                                   and type(value) in (int, float) and math.isfinite(value)}
+                        # The old native JSONL may fall back to NLL for its
+                        # "train/main_loss" field. Preserve the native Fairseq
+                        # task loss separately without overwriting history.
+                        native_main = record.get("train/main_loss")
+                        if type(native_main) in (int, float) and math.isfinite(native_main):
+                            values["train/main_loss_fairseq"] = native_main
                         if values:
                             points[update] = values
                     offset += len(line)
