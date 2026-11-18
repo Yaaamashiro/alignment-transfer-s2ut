@@ -79,3 +79,77 @@ def test_notebook_wraps_benchmark_without_altering_recovery_command(tmp_path):
     original, tracking = [args[args.index("--") + 1:] for args, _ in calls]
     assert tracking[tracking.index("--") + 1:] == original
     assert "only-in-env" not in tracking and calls[-1][1]["env"]["WANDB_API_KEY"] == "only-in-env"
+
+
+
+def test_backfill_layer_metrics_from_existing_matching_train_logs(tmp_path, monkeypatch):
+    """Recover older fairseq values without touching the native scientific code."""
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    work, other, backup, logs = [tmp_path / name for name in ("work", "other", "backup", "logs")]
+    for folder in (work, other, backup, logs):
+        folder.mkdir()
+    (work / "native-run.json").write_text('{"contract_hash":"matching-plan"}', encoding="utf-8")
+    (work / "alignment-train.jsonl").write_text(
+        '{"step":10,"train/main_loss":2.0,"alignment/lambda":1.0}\n',
+        encoding="utf-8",
+    )
+    publish_receipt(work, backup, 10)
+
+    def make_log(name, workpath, method, lines):
+        path = logs / (name + ".log")
+        path.write_text("".join(lines), encoding="utf-8")
+        (logs / (name + ".json")).write_text(json.dumps({
+            "name": "wandb-training-child",
+            "command": ["python", "-m", "alignment_transfer_s2ut.benchmark",
+                        "train", "--method", method, "--output", str(workpath)],
+            "log": str(path),
+        }), encoding="utf-8")
+        return path
+
+    progress = lambda step, value: (
+        'INFO train_inner | ' + json.dumps({
+            "update": step, "alignment/w_4": value,
+            "alignment/D_4": value * 5, "alignment/kl_mean": 1.4,
+            "alignment/worst_layer_fraction_4": 1.0,
+            "secret": "do not upload",
+        }) + "\n"
+    )
+    old_log = make_log("old-run", work, "distillation", [progress(1, .31), progress(11, .99)])
+    make_log("other-method", other, "mask_distillation", [progress(2, .75)])
+    make_log("wrong-method", work, "mask_distillation", [progress(3, .88)])
+
+    points, summary = [], {}
+    def log(values):
+        points.append(values)
+        summary.update(values)
+    def init(**kwargs):
+        return SimpleNamespace(summary=summary, log=log, define_metric=lambda *a, **kw: None,
+                               url="https://wandb.ai/local/test", finish=lambda: None)
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init, Settings=dict))
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, project="project",
+                              entity="", group="exp/trial", method="distillation",
+                              contract="matching-plan")
+    done = Event()
+    done.set()
+    tool["report"](args, done)
+    layer_points = [p for p in points if "alignment/w_4" in p]
+    assert len(layer_points) == 1
+    assert layer_points[0]["update"] == 1
+    assert layer_points[0]["alignment/w_4"] == .31
+    assert "secret" not in layer_points[0]
+    assert "alignment/worst_layer_fraction_4" not in layer_points[0]
+
+    # Published updates only; earlier progress is not re-sent on a resumed W&B run.
+    publish_receipt(work, backup, 11)
+    tool["report"](args, done)
+    layer_points = [p for p in points if "alignment/w_4" in p]
+    assert [p["update"] for p in layer_points] == [1, 11]
+    tool["report"](args, done)
+    assert [p["update"] for p in points if "alignment/w_4" in p] == [1, 11]
+
+    # Truncated progress and non-finite metrics cannot be published.
+    with old_log.open("a", encoding="utf-8") as stream:
+        stream.write('INFO train_inner | {"update": 12, "alignment/w_4":')
+    publish_receipt(work, backup, 12)
+    tool["report"](args, done)
+    assert [p["update"] for p in points if "alignment/w_4" in p] == [1, 11]
