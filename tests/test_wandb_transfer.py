@@ -109,7 +109,9 @@ def test_backfill_layer_metrics_from_existing_matching_train_logs(tmp_path, monk
     progress = lambda step, value: (
         'INFO train_inner | ' + json.dumps({
             "update": step, "alignment/w_4": value,
-            "alignment/D_4": value * 5, "alignment/kl_mean": 1.4,\n            "alignment/valid_rows_4": 120, "alignment/region_mass_4": .65,\n            "alignment/annealing_progress": .1, "train/main_loss": 2.7,
+            "alignment/D_4": value * 5, "alignment/kl_mean": 1.4,
+            "alignment/valid_rows_4": 120, "alignment/region_mass_4": .65,
+            "alignment/annealing_progress": .1, "train/main_loss": 2.7,
             "alignment/worst_layer_fraction_4": 1.0,
             "secret": "do not upload",
         }) + "\n"
