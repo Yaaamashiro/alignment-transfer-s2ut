@@ -10,7 +10,7 @@ Full transfer training can pause at 1k, 5k, 10k, 25k, 50k, 100k, 200k, and 400k 
 
 The first evaluation fetches or uses cached copies of the pinned reference vocoder and Whisper model. GPU OOM and incomplete evaluations stop at the durable checkpoint. Review the command log, then rerun the training cell. The evaluator reuses successful predictions from its local journal while the runtime survives. If CUDA remains unhealthy, restart the runtime and restore the same run. An isolated decoding failure contributes an empty hypothesis and is counted in the report. Failed evaluation attempts have their own JSON records and are eligible for retry.
 
-Online evaluation expects the run to have a published snapshot. To initialize a new run, use the existing Pilot or full workflow with online BLEU disabled until the first snapshot has been published.
+For a new full run, keep `TRANSFER_ONLINE_BLEU=True`. Empty training and backup locations allow the existing trainer to initialize at update 0, with the first evaluation at 1k. If training files exist without a usable published snapshot, the notebook stops and preserves them for recovery.
 
 ## Backfill earlier checkpoints
 
@@ -21,4 +21,4 @@ In `notebooks/colab/evaluate.ipynb`, use the same experiment and corpus settings
 - **Aux-BLEU** uses the encoder-attached target-letter decoder and a fixed seed-1 hash sample of 500 Dev pairs.
 - **ASR-BLEU** uses beam-10 unit generation, the benchmark's official unit vocoder and pinned English Whisper ASR. It scores the first 100 pairs from the same fixed sample. Both metrics use the benchmark's English normalization and SacreBLEU 13a tokenizer.
 - Drive stores an immutable `result.json` and `result.csv` for each completed evaluation under `transfer-bleu/<transfer-experiment>/<method>/<evaluation-scope>/<update>/`. Each result binds the exact checkpoint SHA256, scientific contract, Dev reference SHA256, selected pair IDs, evaluation policy and evaluator revision.
-- W&B uses separate `<method>-bleu-online` and `<method>-bleu-backfill` runs in the experiment group. Plot `eval/aux_bleu` or `eval/asr_bleu` with `eval/checkpoint_update` as the x-axis. `eval/aux_failures` and `eval/asr_failures` report failed samples. Saved scores can be synced later by rerunning the corresponding evaluation or using `tools/transfer_bleu.py wandb` with the original output, method, mode, group and project.
+- W&B uses one `<method>-bleu` run per training contract. Either notebook syncs all published scores for that contract, including immutable results written by earlier notebook versions. Plot `eval/aux_bleu` or `eval/asr_bleu` with `eval/checkpoint_update` as the x-axis. `eval/aux_failures` and `eval/asr_failures` report failed samples. Saved scores can be synced later using either notebook or `tools/transfer_bleu.py wandb` with the original output, method, group and project.

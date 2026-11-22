@@ -31,7 +31,7 @@ def result_hash(result):
                              separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
-def snapshots(backup, work, method, plan_sha=None):
+def snapshots(backup, work, method, plan_sha=None, *, allow_new=False):
     """Discover candidates from receipts; the payload is verified before evaluation."""
     from alignment_transfer_s2ut.colab_runtime import BENCHMARK_REVISION
 
@@ -64,12 +64,16 @@ def snapshots(backup, work, method, plan_sha=None):
     if len(identities) > 1:
         raise ValueError("The training stage contains multiple contracts")
     if not found:
-        raise FileNotFoundError(f"No published transfer snapshots at {backup}")
+        if not allow_new:
+            raise FileNotFoundError(f"No published transfer snapshots at {backup}")
+        if (any(path.exists() and any(path.iterdir()) for path in (work, backup))
+                or any(work.parent.glob(work.name + ".interrupted-*"))):
+            raise ValueError("No published snapshot and training files already exist; refusing to start from update 0")
     return found
 
 
 def inventory(found, milestones):
-    latest = max(found)
+    latest = max(found, default=0)
     return {"latest": latest, "available": [step for step in milestones if step in found],
             "missing_past": [step for step in milestones if step <= latest and step not in found],
             "online": [step for step in milestones if step >= latest]}
@@ -239,7 +243,7 @@ def evaluate(args, snapshot, policy):
             command = ["git", "-C", repo, "show", "-s", '--format="%H"', "HEAD"]
             revision = json.loads(run_process(command, args.logs, name="bleu-source-revision",
                                               capture_json=True).stdout)
-            result.update(method=args.method, mode=args.mode, checkpoint_sha256=files[CHECKPOINT],
+            result.update(method=args.method, checkpoint_sha256=files[CHECKPOINT],
                           contract_hash=plan["contract_hash"], aux_pair_ids=ids, asr_pair_ids=ids[:policy["asr_samples"]],
                           dev_sha256=args.dev_sha, policy=policy, revision=revision,
                           benchmark_revision=snapshot[1]["identity"]["benchmark_revision"], evaluation=evaluation)
@@ -258,8 +262,9 @@ def sync_wandb(args):
     import wandb
 
     rows = [json.loads(path.read_bytes()) for path in args.output.glob(f"{args.method}/*/*/result.json")]
-    rows = [r for r in rows if (not args.contract or r["contract_hash"] == args.contract)
-            and r["mode"] == args.mode and r["status"] in {"completed", "completed_with_failures"}]
+    rows = [r for r in rows if r["method"] == args.method
+            and (not args.contract or r["contract_hash"] == args.contract)
+            and r["status"] in {"completed", "completed_with_failures"}]
     if not rows:
         return
     contracts = {r["contract_hash"] for r in rows}
@@ -273,9 +278,9 @@ def sync_wandb(args):
         if step in points and points[step] != row:
             raise ValueError(f"Multiple BLEU results for update {step}")
         points[step] = row
-    identifier = sha256(f"transfer-bleu:{contracts.pop()}:{args.mode}".encode()).hexdigest()[:24]
+    identifier = sha256(f"transfer-bleu:{contracts.pop()}".encode()).hexdigest()[:24]
     with wandb.init(project=args.project, entity=args.entity or None, group=args.group, id=identifier,
-                    name=f"{args.method}-bleu-{args.mode}", dir=str(args.logs), resume="allow",
+                    name=f"{args.method}-bleu", dir=str(args.logs), resume="allow",
                     settings=wandb.Settings(console="off", disable_git=True, disable_code=True,
                                             x_disable_meta=True, x_disable_stats=True,
                                             init_timeout=20, finish_timeout=20)) as run:
@@ -301,10 +306,14 @@ def main():
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--plan-sha")
     parser.add_argument("--update", type=int)
-    parser.add_argument("--mode", choices=("online", "backfill"), default="online")
+    parser.add_argument("--allow-new", action="store_true")
     for name in ("project", "entity", "group", "contract"):
         parser.add_argument("--" + name)
     args = parser.parse_args()
+    if args.plan_sha and not SHA256.fullmatch(args.plan_sha):
+        parser.error("--plan-sha must be a SHA256")
+    if args.allow_new and (args.action != "inventory" or not args.plan_sha):
+        parser.error("--allow-new requires inventory with the current --plan-sha")
     if args.action == "wandb":
         if not all((args.output, args.logs, args.project)):
             parser.error("wandb requires output, logs and project")
@@ -318,7 +327,8 @@ def main():
 
     if not args.work or not args.backup:
         parser.error("work and backup are required")
-    found = snapshots(args.backup.resolve(), args.work.resolve(), args.method, args.plan_sha)
+    found = snapshots(args.backup.resolve(), args.work.resolve(), args.method, args.plan_sha,
+                      allow_new=args.allow_new)
     listing = inventory(found, MILESTONES)
     if args.action == "inventory":
         print(json.dumps(listing))
@@ -335,7 +345,7 @@ def main():
     if args.update is not None and args.update not in listing["available"]:
         parser.error(f"no published checkpoint at milestone {args.update}")
     for step in ([args.update] if args.update is not None else listing["available"]):
-        child = [sys.executable, str(Path(__file__).resolve()), "evaluate", "--mode", "backfill", "--update", str(step)]
+        child = [sys.executable, str(Path(__file__).resolve()), "evaluate", "--update", str(step)]
         for key in ("method", "work", "backup", "baseline_backup", "scratch", "output", "logs", "plan_sha"):
             if value := getattr(args, key):
                 child.extend(("--" + key.replace("_", "-"), str(value)))
