@@ -227,7 +227,8 @@ def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(
               RUN_DISTILLATION=True, RUN_ANNEALED_DISTILLATION=True, RUN_MASK_DISTILLATION=True,
               MASK_TOP_P=.8, BASELINE=tmp_path / "baseline.json", MANIFEST=tmp_path / "speech.jsonl",
               BACKBONE_CONFIG=tmp_path / "backbone.json", T2TT_SOURCE_MANIFEST_OVERRIDE="",
-              TRANSFER_RUN_MODE=mode, TRANSFER_PILOT_UPDATES=5, TRANSFER_DIAGNOSTIC_STEPS=[1, 5],
+              TRANSFER_RUN_MODE=mode, TRANSFER_ONLINE_BLEU=False,
+              TRANSFER_PILOT_UPDATES=5, TRANSFER_DIAGNOSTIC_STEPS=[1, 5],
               RESEARCH_ROOT=tmp_path / "research")
     exec(source["text-paths"], ns)
     ns["TEXT_BACKUP"] = tmp_path / "text-backup"

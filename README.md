@@ -30,6 +30,8 @@ The notebook defaults to explicit coefficients of 1.0 for KL and 10.0 for Mask. 
 2. Prepare audio ZIPs on a CPU runtime, then use a GPU runtime for training. `AUDIO_PACK_WORKERS` defaults to 2 and accepts values from 1 to 4. The Baseline trains for 400,000 updates. Review the top-p diagnostics, run calibration, and train the selected transfer conditions.
 3. Open `evaluate.ipynb`, use the same `EXPERIMENT_ID`, and select the conditions to compare.
 
+See [Transfer BLEU](docs/TRANSFER_BLEU.md) for scheduled Aux-BLEU and ASR-BLEU during training and backfill from published checkpoints.
+
 Set the corpus root and input manifest in the data configuration or notebook. See the [data configuration](configs/data/colab.yaml) and [input formats and examples](docs/BENCHMARK_COMPARISON.md).
 
 Audio ZIP preparation supports resumption and bounded parallel workers. See [audio ZIP preparation](docs/AUDIO_PACKS.md) for details and measurements.

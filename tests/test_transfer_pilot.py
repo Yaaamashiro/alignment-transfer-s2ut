@@ -129,6 +129,32 @@ def test_native_pilot_restore_and_continue_matches_resident_run(calibrated, nati
         colab_runtime.restore_native_training(split, backup, method)
 
     before = file_hash(last)
+    if method == "distillation":
+        from direct_s2st.s2ut import bleu_monitor
+        from test_transfer_bleu import bleu
+
+        # Load a real transfer checkpoint through the same read-only evaluator
+        # used between milestones, then compare resumed training with a resident run.
+        scratch = root / "bleu-scratch"
+        scratch.mkdir()
+        snapshot = bleu.snapshots(backup, split, method, file_hash(split / bleu.PLAN))[paused]
+        evaluation_plan, evaluation_state = bleu.verified_state(split, snapshot, scratch, paused)
+        assert_nested_equal(evaluation_state, checkpoint)
+        task, model = bleu.evaluation_model(evaluation_plan["config"], evaluation_state["model"], "cpu")
+        dictionary = task.multitask_tasks["target_letter"].target_dictionary
+        weights = bleu_monitor.weight_hash(model)
+
+        def stop_at_eos(module, inputs, output):
+            logits = torch.zeros_like(output[0])
+            logits[..., dictionary.eos()] = 1.
+            return logits, output[1]
+
+        handle = model.target_letter_decoder.register_forward_hook(stop_at_eos)
+        with bleu_monitor.evaluation_state(model):
+            sample = bleu_monitor.source_sample(task.dataset("dev"), 0, "cpu", torch.float32)
+            assert bleu_monitor.decode_characters(model, task, sample, 2) == ""
+        handle.remove()
+        assert bleu_monitor.weight_hash(model) == weights and file_hash(last) == before
     rng = (random.getstate(), np.random.get_state(), torch.get_rng_state())
     probe = transfer_pilot.probe(split, paused, calibration_path, root / "probe/probe.json")
     assert_nested_equal(rng, (random.getstate(), np.random.get_state(), torch.get_rng_state()))
