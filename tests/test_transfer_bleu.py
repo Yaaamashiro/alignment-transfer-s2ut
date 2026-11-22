@@ -118,7 +118,9 @@ def test_evaluation_resume_and_csv_recovery(published, tmp_path, monkeypatch):
 
         assert state["optimizer_history"][-1]["num_updates"] == 1000
         aux, asr = result(ids), result(ids[:100])
+        failures = {kind: [{"pair_id": ids[0], "error": "GenerationFailure: no EOS"}] for kind in ("aux", "asr")}
         return {"update": update, "status": "completed_with_failures", "identity": {"ids": ids},
+                "generation_failures": failures,
                 **{f"{kind}_{key}": values[key] for kind, values in (("aux", aux), ("asr", asr))
                    for key in ("bleu", "failures", "samples")}}
 
@@ -126,8 +128,13 @@ def test_evaluation_resume_and_csv_recovery(published, tmp_path, monkeypatch):
     args = SimpleNamespace(work=work, backup=backup, baseline_backup=None, scratch=tmp_path / "evaluation",
                            output=tmp_path / "drive/transfer-bleu", logs=tmp_path / "logs",
                            dev_sha="a" * 64, method="distillation")
+    legacy_scope = digest({"plan": found[1000][1]["files"][bleu.PLAN],
+                           "policy": policy, "common_dev_sha": args.dev_sha})
+    legacy = args.output / "distillation" / legacy_scope / "000001000/result.json"
+    write_json(legacy, {"status": "completed_with_failures", "aux_failures": 0, "asr_failures": 1})
+    legacy_bytes = legacy.read_bytes()
     bleu.evaluate(args, found[1000], policy)
-    target, = args.output.rglob("result.json")
+    target, = [path for path in args.output.rglob("result.json") if path != legacy]
     before = target.read_bytes()
     result = json.loads(before)
     assert result["method"] == "distillation" and result["aux_pair_ids"] == ids
@@ -143,16 +150,21 @@ def test_evaluation_resume_and_csv_recovery(published, tmp_path, monkeypatch):
     with target.with_suffix(".csv").open(newline="", encoding="utf-8") as table:
         assert next(csv.DictReader(table))["checkpoint_sha256"] == hashes[1000]
     bleu.evaluate(args, found[1000], policy)
+    assert legacy.read_bytes() == legacy_bytes and not legacy.with_suffix(".csv").exists()
 
 
 def test_wandb_sync_keeps_checkpoint_axes_and_does_not_log_twice(tmp_path, monkeypatch):
     output = tmp_path / "drive"
 
-    def saved_result(update, mode=None):
+    def saved_result(update, mode=None, *, unclassified=False):
         row = dict(method="mask_distillation", contract_hash="contract", update=update, status="completed",
-                   checkpoint_sha256=str(update), aux_bleu=22., asr_bleu=12., aux_failures=0, asr_failures=1)
+                   checkpoint_sha256=str(update), aux_bleu=22., asr_bleu=12., aux_failures=0, asr_failures=0)
         if mode:
             row["mode"] = mode  # Existing immutable results from either old entry point.
+        if mode is None:
+            row.update(failure_policy=bleu.FAILURE_POLICY, generation_failures={"aux": [], "asr": []})
+        if unclassified:
+            row.update(status="completed_with_failures", asr_bleu=0., asr_failures=1)
         row["result_hash"] = bleu.result_hash(row)
         write_json(output / f"mask_distillation/contract/{update}/result.json", row)
 
@@ -190,13 +202,133 @@ def test_wandb_sync_keeps_checkpoint_axes_and_does_not_log_twice(tmp_path, monke
     bleu.sync_wandb(args)
     saved_result(1000, "backfill")
     saved_result(5000, "online")
+    saved_result(25000, "backfill", unclassified=True)
     before = {path: file_hash(path) for path in output.rglob("result.json")}
     bleu.sync_wandb(args)
     bleu.sync_wandb(args)
     assert len(run_ids) == 3 and len(set(run_ids)) == 1
     assert [row["eval/checkpoint_update"] for row in logged] == [50000, 1000, 5000]
-    assert logged[0]["eval/aux_bleu"] == 22. and logged[0]["eval/asr_failures"] == 1
+    assert logged[0]["eval/aux_bleu"] == 22. and logged[0]["eval/asr_failures"] == 0
     assert {path: file_hash(path) for path in before} == before
+
+
+@pytest.mark.parametrize("fault", ["asr", "vocoder", "source", "unknown_decoder", "timeout", "cuda"])
+def test_benchmark_failure_classification_and_retry(published, tmp_path, monkeypatch, fault):
+    from direct_s2st.s2ut import bleu_monitor as monitor
+    from direct_s2st.s2ut.paper_recipe import bleu_policy
+    from alignment_transfer_s2ut.io import read_jsonl, write_jsonl
+
+    work, backup, _, hashes = published
+    snapshot = bleu.snapshots(backup, work, "distillation")[1000]
+    data = tmp_path / "data/s2ut/fairseq"
+    data.mkdir(parents=True)
+    reference = "this is a complete english sentence"
+    rows = [{"pair_id": str(i), "split": "dev", "en_text": reference} for i in range(3)]
+    write_jsonl(data.parents[1] / "common/dev.jsonl", rows)
+    (data / "dev.tsv").write_text("id\tsrc_audio\tsrc_n_frames\ttgt_audio\ttgt_n_frames\n" +
+                                 "".join(f"{i}\tx.wav\t3\t0 1\t2\n" for i in range(3)), encoding="utf-8")
+    ids = [row["pair_id"] for row in monitor.selected_rows(rows, 3)]
+    first, retry, bad = map(int, ids)
+    seen = []
+    fail = True
+
+    def fail_at(stage, index):
+        if stage == "asr":
+            seen.append(index)
+        if fail and index == retry:
+            if stage == "aux" and fault == "cuda":
+                raise torch.cuda.OutOfMemoryError("temporary CUDA fault")
+            if stage == "aux" and fault == "unknown_decoder":
+                raise ValueError("unexpected decoder configuration error")
+            if stage == fault:
+                raise OSError(f"temporary {stage} fault")
+
+    class Dataset:
+        def __len__(self):
+            return len(rows)
+
+        def __getitem__(self, index):
+            fail_at("source", index)
+            return index
+
+        def collater(self, items):
+            return dict(id=torch.tensor(items), net_input=dict(
+                src_tokens=torch.full((1, 3, 80), float(items[0])), src_lengths=torch.tensor([3])))
+
+    def sample_index(sample):
+        return int(sample["net_input"]["src_tokens"][0, 0, 0])
+
+    def aux(model, task, sample, maximum):
+        index = sample_index(sample)
+        fail_at("aux", index)
+        if index == bad:
+            raise ValueError("auxiliary decoding reached max_aux_tokens without EOS")
+        return reference
+
+    class Vocoder:
+        def dict(self, code):
+            return code
+
+        def dur_predictor(self, code):
+            fail_at("vocoder", int(code[0, 0]))
+            return torch.zeros_like(code, dtype=torch.float32)
+
+        def __call__(self, **kwargs):
+            return torch.full((1, 1, 12), 0.1)
+
+    def asr(path):
+        fail_at("asr", int(path.stem))
+        return reference
+
+    def generate(models, sample):
+        index = sample_index(sample)
+        return [[{"tokens": torch.tensor([index] if index == bad else [index, 100])}]]
+
+    model = torch.nn.Linear(1, 1)
+    dictionary = type("Dictionary", (), {"eos": lambda self: 100, "__getitem__": lambda self, key: str(key)})()
+    task = SimpleNamespace(args=SimpleNamespace(data=str(data)), dataset=lambda split: Dataset(),
+                           target_dictionary=dictionary, build_generator=lambda *args: SimpleNamespace(generate=generate))
+    policy = dict(bleu_policy(), aux_samples=3, asr_samples=3, asr_updates=[1000])
+    monkeypatch.setenv("S2ST_S2UT_BLEU_POLICY", json.dumps(policy))
+    monkeypatch.setattr(monitor, "decode_characters", aux)
+    monkeypatch.setattr(monitor, "load_audio_models", lambda *args: (Vocoder(), asr))
+    if fault == "timeout":
+        ticks = iter((0., 0., 0.))
+        monkeypatch.setattr(monitor, "time", SimpleNamespace(monotonic=lambda: next(ticks, 2000.)))
+    def score(plan, state, scratch, step, policy, checksum):
+        return bleu.benchmark_scores(monitor, model, task, scratch, step)
+
+    monkeypatch.setitem(bleu.evaluate.__globals__, "score_checkpoint", score)
+
+    args = SimpleNamespace(work=work, backup=backup, baseline_backup=None, scratch=tmp_path / "eval",
+                           output=tmp_path / "drive/transfer-bleu", logs=tmp_path / "logs",
+                           dev_sha="a" * 64, method="distillation")
+    with pytest.raises((OSError, ValueError, torch.cuda.OutOfMemoryError), match="temporary|unexpected|time budget"):
+        bleu.evaluate(args, snapshot, policy)
+    assert not list(args.output.rglob("result.*"))
+    assert not list(args.scratch.rglob("result.json"))
+    attempt, = args.output.rglob("failed-*.json")
+    assert json.loads(attempt.read_bytes())["checkpoint_sha256"] == hashes[1000]
+    journal, = args.scratch.rglob("asr.jsonl")
+    assert [row["pair_id"] for row in read_jsonl(journal)] == [str(first)]
+    fail = False
+    if fault == "timeout":
+        monkeypatch.setattr(monitor, "time", SimpleNamespace(monotonic=lambda: 0.))
+    bleu.evaluate(args, snapshot, policy)
+    target, = args.output.rglob("result.json")
+    before = {path: path.read_bytes() for path in (target, target.with_suffix(".csv"))}
+    result = json.loads(before[target])
+    expected = monitor.score({i: {"status": "failed" if i == str(bad) else "success", "hypothesis": reference}
+                              for i in ids}, dict.fromkeys(ids, reference))
+    assert result["status"] == "completed_with_failures"
+    for kind in ("aux", "asr"):
+        assert result[f"{kind}_samples"] == 3 and result[f"{kind}_failures"] == 1
+        assert result[f"{kind}_bleu"] == expected["bleu"]
+        assert [row["pair_id"] for row in result["generation_failures"][kind]] == [str(bad)]
+    assert seen.count(first) == 1 and seen[-1] == retry
+    bleu.evaluate(args, snapshot, policy)
+    assert {path: path.read_bytes() for path in before} == before
+    assert file_hash(work / bleu.CHECKPOINT) == hashes[36000]
 
 
 @pytest.mark.parametrize("fresh", [True, False], ids=["fresh", "resume"])

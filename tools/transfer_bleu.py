@@ -13,6 +13,7 @@ import shutil
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -23,6 +24,64 @@ PLAN = "native-run.json"
 CHECKPOINT = "checkpoints/checkpoint_last.pt"
 METHODS = ("distillation", "annealed_distillation", "mask_distillation")
 SHA256 = re.compile("[0-9a-f]{64}")
+FAILURE_POLICY = "generation-only-v1"
+
+
+class GenerationFailure(ValueError):
+    """A decoder returned an unusable hypothesis for a valid input."""
+
+
+def classify_decoder(decode, messages, prefixes=()):
+    def classify(*args, **kwargs):
+        try:
+            return decode(*args, **kwargs)
+        except ValueError as error:
+            if str(error) in messages or str(error).startswith(prefixes):
+                raise GenerationFailure(str(error)) from error
+            raise
+    return classify
+
+
+def benchmark_scores(monitor, model, task, scratch, update):
+    # The pinned evaluator's per-sample handler normally scores any exception
+    # except a fatal device error as an empty hypothesis. Only let recognized
+    # decoder failures through that handler in this isolated scoring process.
+    aux = classify_decoder(monitor.decode_characters, {
+        "nonfinite auxiliary translation logits",
+        "auxiliary decoding reached max_aux_tokens without EOS",
+    })
+    units = classify_decoder(monitor.decode_units, {
+        "Unit decoding did not terminate with EOS",
+        "unit sequence must not be empty",
+        *(f"invalid literal for int() with base 10: {token!r}" for token in ("<unk>", "<pad>", "<s>", "</s>")),
+    }, ("unit IDs are out of range [0, 100); received ",))
+    with patch.multiple(monitor, decode_characters=aux, decode_units=units,
+                        fatal_device_error=lambda error: not isinstance(error, GenerationFailure)):
+        result = monitor.evaluate(SimpleNamespace(get_model=lambda: model), task, scratch, update)
+
+    from alignment_transfer_s2ut.io import read_jsonl
+
+    failures = {}
+    for name in ("aux", "asr"):
+        journal = scratch / "training-bleu" / f"{update:09d}" / f"{name}.jsonl"
+        failed = [row for row in read_jsonl(journal) if row["status"] == "failed"]
+        if len(failed) != result[f"{name}_failures"] or any(
+                not row["error"].startswith("GenerationFailure: ") for row in failed):
+            raise RuntimeError("Evaluation contains an unclassified sample failure")
+        failures[name] = [{"pair_id": row["pair_id"], "error": row["error"]} for row in failed]
+    result["generation_failures"] = failures
+    return result
+
+
+def publishable(result):
+    names = ("aux", "asr")
+    has_failures = any(result[f"{name}_failures"] for name in names)
+    if result["status"] != ("completed_with_failures" if has_failures else "completed"):
+        return False
+    if result.get("failure_policy") == FAILURE_POLICY:
+        failures = result.get("generation_failures", {})
+        return all(name in failures and len(failures[name]) == result[f"{name}_failures"] for name in names)
+    return not has_failures and "failure_policy" not in result
 
 
 def result_hash(result):
@@ -164,7 +223,7 @@ def score_checkpoint(plan, state, scratch, update, policy, common_sha):
         before = bleu_monitor.weight_hash(model)
         os.environ["S2ST_S2UT_BLEU_POLICY"] = json.dumps(policy)
         chosen = bleu_monitor.selected_rows(read_jsonl(common), policy["aux_samples"], policy["seed"])
-        result = bleu_monitor.evaluate(SimpleNamespace(get_model=lambda: model), task, scratch, update)
+        result = benchmark_scores(bleu_monitor, model, task, scratch, update)
         if result["identity"]["ids"] != [row["pair_id"] for row in chosen]:
             raise ValueError("The evaluator returned a different fixed Dev subset")
         if bleu_monitor.weight_hash(model) != before:
@@ -200,7 +259,9 @@ def evaluate(args, snapshot, policy):
     files = snapshot[1]["files"]
     update = snapshot[1]["updates"]
     runtime()
-    scope = digest({"plan": files[PLAN], "policy": policy, "common_dev_sha": args.dev_sha})
+    scope_inputs = {"plan": files[PLAN], "policy": policy, "common_dev_sha": args.dev_sha}
+    legacy = output / args.method / digest(scope_inputs) / f"{update:09d}" / "result.json"
+    scope = digest({**scope_inputs, "failure_policy": FAILURE_POLICY})
     directory = output / args.method / scope / f"{update:09d}"
     target = directory / "result.json"
     job = scratch / args.method / scope / f"{update:09d}"
@@ -209,12 +270,17 @@ def evaluate(args, snapshot, policy):
     directory.mkdir(parents=True, exist_ok=True)
     with FileLock(str(directory / ".evaluation.lock"), timeout=0):
         recorded = target if target.is_file() else local_result
+        if not recorded.is_file() and legacy.is_file():
+            if publishable(json.loads(legacy.read_bytes())):
+                recorded = target = legacy
+            else:
+                print(f"Re-evaluating update {update}; legacy failures were unclassified: {legacy}", flush=True)
         if recorded.is_file():
             result = json.loads(recorded.read_bytes())
             if (result["checkpoint_sha256"] != files[CHECKPOINT] or result["update"] != update
                     or result["method"] != args.method or result["policy"] != policy
                     or result["dev_sha256"] != args.dev_sha
-                    or result["result_hash"] != result_hash(result)):
+                    or result["result_hash"] != result_hash(result) or not publishable(result)):
                 raise ValueError("Existing BLEU result differs from the published evaluation identity")
             publish_result(target, result)
             print(f"Reused BLEU at update {update}: {target}", flush=True)
@@ -228,12 +294,6 @@ def evaluate(args, snapshot, policy):
                     or result["asr_samples"] != policy["asr_samples"]
                     or result["status"] not in {"completed", "completed_with_failures"}):
                 raise ValueError("Incomplete evaluation result")
-            for name in ("aux", "asr"):
-                if result[f"{name}_failures"] == result[f"{name}_samples"]:
-                    raise RuntimeError(f"Every {name} sample failed; inspect the local evaluation journal")
-                journal = job / "training-bleu" / f"{update:09d}" / f"{name}.jsonl"
-                if journal.is_file() and "TimeoutError:" in journal.read_text(encoding="utf-8"):
-                    raise RuntimeError("Evaluation exhausted its time budget; retry to continue from the local journal")
             evaluation = result.pop("identity")
             ids = evaluation.pop("ids")
             if len(ids) != policy["aux_samples"] or len(set(ids)) != len(ids):
@@ -246,7 +306,10 @@ def evaluate(args, snapshot, policy):
             result.update(method=args.method, checkpoint_sha256=files[CHECKPOINT],
                           contract_hash=plan["contract_hash"], aux_pair_ids=ids, asr_pair_ids=ids[:policy["asr_samples"]],
                           dev_sha256=args.dev_sha, policy=policy, revision=revision,
-                          benchmark_revision=snapshot[1]["identity"]["benchmark_revision"], evaluation=evaluation)
+                          benchmark_revision=snapshot[1]["identity"]["benchmark_revision"], evaluation=evaluation,
+                          failure_policy=FAILURE_POLICY)
+            if not publishable(result):
+                raise ValueError("BLEU result lacks a complete failure classification")
             result["result_hash"] = result_hash(result)
             atomic_write_json(local_result, result, resume=True)
             publish_result(target, result)
@@ -264,7 +327,7 @@ def sync_wandb(args):
     rows = [json.loads(path.read_bytes()) for path in args.output.glob(f"{args.method}/*/*/result.json")]
     rows = [r for r in rows if r["method"] == args.method
             and (not args.contract or r["contract_hash"] == args.contract)
-            and r["status"] in {"completed", "completed_with_failures"}]
+            and publishable(r)]
     if not rows:
         return
     contracts = {r["contract_hash"] for r in rows}
@@ -278,7 +341,7 @@ def sync_wandb(args):
         if step in points and points[step] != row:
             raise ValueError(f"Multiple BLEU results for update {step}")
         points[step] = row
-    identifier = sha256(f"transfer-bleu:{contracts.pop()}".encode()).hexdigest()[:24]
+    identifier = sha256(f"transfer-bleu:{contracts.pop()}:{FAILURE_POLICY}".encode()).hexdigest()[:24]
     with wandb.init(project=args.project, entity=args.entity or None, group=args.group, id=identifier,
                     name=f"{args.method}-bleu", dir=str(args.logs), resume="allow",
                     settings=wandb.Settings(console="off", disable_git=True, disable_code=True,
