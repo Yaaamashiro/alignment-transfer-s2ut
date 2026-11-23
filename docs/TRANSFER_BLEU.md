@@ -41,4 +41,29 @@ In `notebooks/colab/evaluate.ipynb`, use the same experiment and corpus settings
 - **Aux-BLEU** uses the encoder-attached target-letter decoder and a fixed seed-1 hash sample of 500 Dev pairs.
 - **ASR-BLEU** uses beam-10 unit generation, the benchmark's official unit vocoder and pinned English Whisper ASR. It scores the first 100 pairs from the same fixed sample. Both metrics use the benchmark's English normalization and SacreBLEU 13a tokenizer.
 - Drive stores an immutable `result.json` and `result.csv` for each completed evaluation under `transfer-bleu/<transfer-experiment>/<method>/<evaluation-scope>/<update>/`. Each result binds the exact checkpoint SHA256, scientific contract, Dev reference SHA256, selected pair IDs, evaluation policy and evaluator revision.
-- W&B uses one `<method>-bleu` run per training contract and failure policy. Either notebook syncs eligible scores for that contract. Earlier completed results with zero failures can be reused. Earlier results with unclassified failures remain on Drive and are scored again with the current policy before sync. The policy-specific W&B run keeps the new curve separate from earlier runs. Plot `eval/aux_bleu` or `eval/asr_bleu` with `eval/checkpoint_update` as the x-axis. `eval/aux_failures` and `eval/asr_failures` report failed samples.
+- W&B publishes eligible scores to the existing training run for each method. Plot `eval/aux_bleu`, `eval/asr_bleu`, `eval/aux_failures`, or `eval/asr_failures` with `update` as the x-axis. Earlier completed results with zero failures can be reused. Earlier results with unclassified failures remain on Drive and need evaluation under the current failure policy before sync.
+
+## Sync scores already on Drive
+
+During training, use `ENABLE_WANDB=True` in the updated training notebook. It picks up saved BLEU results for the same contract when a checkpoint is published and when the reporter finishes. The backfill evaluation notebook produces Drive results and leaves publishing to that reporter.
+
+After the selected training cells and their W&B reporters have stopped, you can sync saved scores in the same Colab runtime where the latest reporter finished. In the updated `evaluate.ipynb`, use the original experiment IDs, method switches, W&B project and entity. Set `SYNC_SAVED_TRANSFER_BLEU=True`, `ENABLE_WANDB=True`, `EVALUATE_S2UT=False`, `EVALUATE_T2TT_EXTERNAL=False`, and `BACKFILL_TRANSFER_BLEU=False`. Run through **Backfill Aux-BLEU and ASR-BLEU or sync saved scores**. This mode resumes an existing idle run after checking the local ownership receipt against W&B.
+
+To stay in the owning Colab runtime, you can also run this cell in the updated training notebook after the training cell has stopped:
+
+```python
+method = 'distillation'
+tracking = prepare_wandb()
+if tracking:
+    python, key = tracking
+    backup = Path(PERSISTENT) / 'stages' / ('research-v3-' + method + SCOPE_SUFFIX)
+    results = Path(PERSISTENT) / 'transfer-bleu' / (TRANSFER_EXPERIMENT_ID or 'default')
+    execute(python, REPO / 'tools/wandb_transfer.py', '--sync-bleu-only', '--method', method,
+            '--work', RESEARCH_ROOT / method, '--backup', backup, '--bleu-results', results,
+            '--logs', LOGS, '--project', WANDB_PROJECT.strip(), '--entity', WANDB_ENTITY.strip(),
+            env=dict(os.environ, WANDB_API_KEY=key), name='wandb-sync-saved-bleu-' + method)
+```
+
+Across runtimes, leave saved scores on Drive for the training reporter to pick up. Wait for sync-only to finish before starting a trainer for the same method anywhere. W&B status checks and the runtime's local file lock do not provide a distributed lock across Colab VMs. If the original runtime is gone, the next training reporter picks up the existing scores.
+
+Historical BLEU is appended to W&B history. W&B's internal step still advances, and each BLEU row uses its actual checkpoint update as the chart coordinate. The Run Summary uses `train/max_update` for the largest published training update the reporter has observed. A stored checkpoint hash prevents duplicate points on later syncs. Earlier standalone BLEU runs and their history remain available.

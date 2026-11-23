@@ -90,6 +90,13 @@ def result_hash(result):
                              separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def evaluation_scope(plan_sha, policy, dev_sha, failure_policy=None):
+    fields = {"plan": plan_sha, "policy": policy, "common_dev_sha": dev_sha}
+    if failure_policy is not None:
+        fields["failure_policy"] = failure_policy
+    return result_hash(fields)
+
+
 def snapshots(backup, work, method, plan_sha=None, *, allow_new=False):
     """Discover candidates from receipts; the payload is verified before evaluation."""
     from alignment_transfer_s2ut.colab_runtime import BENCHMARK_REVISION
@@ -246,7 +253,6 @@ def publish_result(path, result):
 def evaluate(args, snapshot, policy):
     from direct_s2st.io import atomic_write_json
     from alignment_transfer_s2ut.colab_runtime import runtime, session_paths
-    from alignment_transfer_s2ut.io import digest
     from filelock import FileLock
 
     work, backup = session_paths(args.work, args.backup)
@@ -259,9 +265,9 @@ def evaluate(args, snapshot, policy):
     files = snapshot[1]["files"]
     update = snapshot[1]["updates"]
     runtime()
-    scope_inputs = {"plan": files[PLAN], "policy": policy, "common_dev_sha": args.dev_sha}
-    legacy = output / args.method / digest(scope_inputs) / f"{update:09d}" / "result.json"
-    scope = digest({**scope_inputs, "failure_policy": FAILURE_POLICY})
+    old_scope = evaluation_scope(files[PLAN], policy, args.dev_sha)
+    legacy = output / args.method / old_scope / f"{update:09d}" / "result.json"
+    scope = evaluation_scope(files[PLAN], policy, args.dev_sha, FAILURE_POLICY)
     directory = output / args.method / scope / f"{update:09d}"
     target = directory / "result.json"
     job = scratch / args.method / scope / f"{update:09d}"
@@ -321,68 +327,20 @@ def evaluate(args, snapshot, policy):
             raise
 
 
-def sync_wandb(args):
-    import wandb
-
-    rows = [json.loads(path.read_bytes()) for path in args.output.glob(f"{args.method}/*/*/result.json")]
-    rows = [r for r in rows if r["method"] == args.method
-            and (not args.contract or r["contract_hash"] == args.contract)
-            and publishable(r)]
-    if not rows:
-        return
-    contracts = {r["contract_hash"] for r in rows}
-    if len(contracts) != 1:
-        raise ValueError("Select the contract to publish to W&B")
-    points = {}
-    for row in sorted(rows, key=lambda row: row["update"]):
-        if row["result_hash"] != result_hash(row):
-            raise ValueError("Corrupt BLEU result")
-        step = row["update"]
-        if step in points and points[step] != row:
-            raise ValueError(f"Multiple BLEU results for update {step}")
-        points[step] = row
-    identifier = sha256(f"transfer-bleu:{contracts.pop()}:{FAILURE_POLICY}".encode()).hexdigest()[:24]
-    with wandb.init(project=args.project, entity=args.entity or None, group=args.group, id=identifier,
-                    name=f"{args.method}-bleu", dir=str(args.logs), resume="allow",
-                    settings=wandb.Settings(console="off", disable_git=True, disable_code=True,
-                                            x_disable_meta=True, x_disable_stats=True,
-                                            init_timeout=20, finish_timeout=20)) as run:
-        run.define_metric("eval/checkpoint_update")
-        run.define_metric("eval/*", step_metric="eval/checkpoint_update")
-        for step, row in points.items():
-            marker = f"bleu_checkpoint_{step}"
-            previous = run.summary.get(marker)
-            if previous == row["result_hash"]:
-                continue
-            if previous is not None:
-                raise ValueError(f"W&B already has a different BLEU result for update {step}")
-            values = {f"eval/{name}": row[name] for name in ("aux_bleu", "asr_bleu", "aux_failures", "asr_failures")}
-            run.log({**values, "eval/checkpoint_update": step, marker: row["result_hash"]})
-        print(f"BLEU W&B: {run.url}", flush=True)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("inventory", "evaluate", "backfill", "wandb"))
+    parser.add_argument("action", choices=("inventory", "evaluate", "backfill"))
     parser.add_argument("--method", choices=METHODS, required=True)
     for name in ("work", "backup", "baseline-backup", "scratch", "output", "logs"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--plan-sha")
     parser.add_argument("--update", type=int)
     parser.add_argument("--allow-new", action="store_true")
-    for name in ("project", "entity", "group", "contract"):
-        parser.add_argument("--" + name)
     args = parser.parse_args()
     if args.plan_sha and not SHA256.fullmatch(args.plan_sha):
         parser.error("--plan-sha must be a SHA256")
     if args.allow_new and (args.action != "inventory" or not args.plan_sha):
         parser.error("--allow-new requires inventory with the current --plan-sha")
-    if args.action == "wandb":
-        if not all((args.output, args.logs, args.project)):
-            parser.error("wandb requires output, logs and project")
-        sync_wandb(args)
-        return
-
     from alignment_transfer_s2ut.colab_runtime import runtime
 
     runtime()

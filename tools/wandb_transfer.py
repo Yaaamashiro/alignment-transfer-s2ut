@@ -9,11 +9,17 @@ import os
 from pathlib import Path
 import re
 import sys
+from tempfile import gettempdir
 from threading import Event, Thread
+from uuid import uuid4
 
-# The tracking environment only needs the repository's standard-library logger.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+# Keep the W&B runtime independent of the scientific Python environment.
+sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parents[1] / "src")]
 from alignment_transfer_s2ut.process_logging import log_event, run_process
+from transfer_bleu import CHECKPOINT, PLAN, SHA256, evaluation_scope, publishable, result_hash
+
+
+REPORTER_SESSION = "wandb_reporter_session"
 
 
 class MetricReader:
@@ -194,15 +200,18 @@ class FairseqProgressReader:
         yield from sorted(points.items())
 
 
-def published_snapshot(work, backup, plan_sha, minimum, method):
+def published_snapshot(work, backup, plan_sha, minimum, method, *, exact=None):
     """Read publication receipts without opening checkpoint archives."""
-    for folder in sorted(backup.iterdir(), reverse=True) if backup.is_dir() else ():
+    folders = backup.glob(f"{exact:012d}-*") if exact is not None else backup.glob("*")
+    for folder in sorted(folders, reverse=True):
         prefix = folder.name.split("-", 1)[0]
         if not prefix.isascii() or not prefix.isdecimal():
             continue
         update = int(prefix)
         if update <= minimum:
             break
+        if exact is not None and update != exact:
+            continue
         marker = folder / "snapshot.json"
         if not marker.is_file() or not (folder / "snapshot.zip").is_file():
             continue
@@ -214,12 +223,138 @@ def published_snapshot(work, backup, plan_sha, minimum, method):
                     and identity["work"] == str(work) and command is not None
                     and command[command.index("--output") + 1] == str(work)
                     and command[command.index("--method") + 1] == method
-                    and "checkpoints/checkpoint_last.pt" in files
-                    and files.get("native-run.json") == plan_sha):
-                return update, command
+                    and CHECKPOINT in files and PLAN in files
+                    and (SHA256.fullmatch(files[PLAN]) if plan_sha is None else files[PLAN] == plan_sha)):
+                return update, command, files
         except (OSError, ValueError, IndexError, KeyError, TypeError):
             continue
     return None
+
+
+def saved_bleu_points(args, plan_sha, maximum, *, contract=None):
+    points = {}
+    for path in args.bleu_results.glob(f"{args.method}/*/*/result.json"):
+        row = json.loads(path.read_bytes())
+        if row["method"] != args.method or (contract and row["contract_hash"] != contract) or not publishable(row):
+            continue
+        update = row["update"]
+        if type(update) is not int or not 0 < update <= maximum:
+            continue
+        scope = evaluation_scope(plan_sha, row["policy"], row["dev_sha256"], row.get("failure_policy"))
+        if path.parent.name != f"{update:09d}" or path.parent.parent.name != scope:
+            continue
+        if row["result_hash"] != result_hash(row) or not SHA256.fullmatch(row["checkpoint_sha256"]):
+            raise ValueError(f"Corrupt saved BLEU result at update {update}")
+        exact = published_snapshot(args.work.resolve(), args.backup, plan_sha, update - 1, args.method, exact=update)
+        if exact and exact[2][CHECKPOINT] != row["checkpoint_sha256"]:
+            raise ValueError(f"Saved BLEU checkpoint differs from the receipt at update {update}")
+        if update in points and points[update] != row:
+            raise ValueError(f"Conflicting BLEU results at update {update}")
+        points[update] = row
+    return sorted(points.items())
+
+
+def sync_bleu(run, points, sent):
+    written = 0
+    for update, row in points:
+        marker = f"wandb_bleu_checkpoint_{update}"
+        checkpoint = row["checkpoint_sha256"]
+        previous = sent.get(update) or run.summary.get(marker)
+        if previous == checkpoint:
+            continue
+        if previous is not None:
+            raise ValueError(f"W&B already contains another BLEU checkpoint at update {update}")
+        values = {f"eval/{name}": row[name] for name in ("aux_bleu", "asr_bleu", "aux_failures", "asr_failures")}
+        # W&B's internal step must increase. Only the chart coordinate may go backward.
+        run.log({**values, "update": update, marker: checkpoint})
+        sent[update] = checkpoint
+        written += 1
+    return written
+
+
+def run_id(contract):
+    return hashlib.sha256(contract.encode()).hexdigest()[:24]
+
+
+def writer_path(contract, suffix):
+    return Path(gettempdir()) / "alignment-wandb-writers" / (run_id(contract) + suffix)
+
+
+def writer_lock(contract):
+    from filelock import FileLock
+
+    path = writer_path(contract, ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return FileLock(str(path), timeout=0)
+
+
+def open_run(wandb, args, contract, *, owner=None):
+    identifier = run_id(contract)
+    options = {}
+    if owner is not None:
+        entity = owner["entity"]
+        if (not entity or args.entity and args.entity != entity
+                or args.project != owner["project"] or args.method != owner["method"]):
+            raise RuntimeError("W&B destination differs from the last training reporter in this runtime")
+        target = wandb.Api(timeout=20).run(f"{entity}/{args.project}/{identifier}")
+        if target.state not in {"finished", "failed", "crashed", "killed"} or target.config.get("condition") != args.method:
+            raise RuntimeError("W&B run is active or does not match the selected training condition")
+        if target.summary.get(REPORTER_SESSION) != owner["session"]:
+            raise RuntimeError("Another training reporter owns this W&B run. Leave the scores on Drive for that reporter.")
+    else:
+        entity = args.entity or None
+        options = {"group": args.group, "name": args.method, "config": {"condition": args.method}}
+    run = wandb.init(project=args.project, entity=entity, id=identifier, resume="must" if owner else "allow",
+                     dir=str(args.logs.resolve()), save_code=False, **options,
+                     settings=wandb.Settings(console="off", disable_git=True, disable_code=True,
+                                             x_disable_meta=True, x_disable_stats=True,
+                                             x_service_wait=10, init_timeout=20, finish_timeout=20,
+                                             finish_timeout_raises=True))
+    # Historical rows still carry "update", but a late BLEU row must not
+    # replace the latest training update in the Run Summary.
+    run.define_metric("update", summary="none", overwrite=True)
+    for prefix in ("train", "alignment", "dev", "eval"):
+        run.define_metric(prefix + "/*", step_metric="update")
+    log_event("wandb", "connected", args.logs, run.url or "Offline run")
+    return run
+
+
+def set_training_progress(run, published):
+    name = "train/max_update"
+    previous = number(run.summary.get(name)) or 0
+    training = number(run.summary.get("wandb_train_update")) or 0
+    maximum = int(max(published, previous, training))
+    if maximum != previous:
+        run.summary[name] = maximum
+
+
+def sync_saved_bleu(args):
+    import wandb
+
+    snapshot = published_snapshot(args.work.resolve(), args.backup, None, 0, args.method)
+    if snapshot is None:
+        log_event("wandb-bleu", "skipped", args.logs, "No published training snapshot")
+        return
+    points = saved_bleu_points(args, snapshot[2][PLAN], snapshot[0], contract=args.contract)
+    if not points:
+        log_event("wandb-bleu", "skipped", args.logs, "No eligible saved BLEU results")
+        return
+    contracts = {row["contract_hash"] for _, row in points}
+    if len(contracts) != 1:
+        raise ValueError("Saved BLEU results must belong to a single training contract")
+    contract = contracts.pop()
+    with writer_lock(contract):
+        owner_path = writer_path(contract, ".owner.json")
+        if not owner_path.is_file():
+            raise RuntimeError("Sync-only requires this run's training reporter to have finished in the same Colab runtime. "
+                               "Leave the scores on Drive for the active training reporter.")
+        run = open_run(wandb, args, contract, owner=json.loads(owner_path.read_text(encoding="utf-8")))
+        try:
+            set_training_progress(run, snapshot[0])
+            written = sync_bleu(run, points, {})
+            log_event("wandb-bleu", "synced", args.logs, f"{written} new checkpoint results")
+        finally:
+            run.finish()
 
 
 def report(args, stop):
@@ -231,8 +366,10 @@ def report(args, stop):
     layers = FairseqProgressReader(args.logs)
     published = 0
     watermarks, native_alignment = {}, {}
+    sent_bleu = {}
     published_command = None
     run = None
+    session = uuid4().hex
     try:
         while True:
             finishing = stop.is_set()
@@ -241,28 +378,25 @@ def report(args, stop):
                 plan_bytes = plan_path.read_bytes()
                 plan = json.loads(plan_bytes)
                 if plan.get("contract_hash") == args.contract:
-                    snapshot = published_snapshot(work, args.backup, hashlib.sha256(plan_bytes).hexdigest(),
-                                                  published, args.method)
+                    plan_sha = hashlib.sha256(plan_bytes).hexdigest()
+                    snapshot = published_snapshot(work, args.backup, plan_sha, published, args.method)
                     if snapshot is not None:
-                        published, published_command = snapshot
+                        published, published_command, _ = snapshot
                         if run is None:
-                            run_id = hashlib.sha256(args.contract.encode()).hexdigest()[:24]
-                            run = wandb.init(project=args.project, entity=args.entity or None,
-                                             group=args.group, name=args.method, id=run_id,
-                                             resume="allow", dir=str(args.logs.resolve()), save_code=False,
-                                             config={"condition": args.method},
-                                             settings=wandb.Settings(console="off", disable_git=True, disable_code=True,
-                                                                     x_disable_meta=True, x_disable_stats=True,
-                                                                     x_service_wait=10, init_timeout=20, finish_timeout=20,
-                                                                     finish_timeout_raises=True))
-                            run.define_metric("update")
-                            for prefix in ("train", "alignment", "dev"):
-                                run.define_metric(prefix + "/*", step_metric="update")
-                            log_event("wandb", "connected", args.logs, run.url or "Offline run")
+                            run = open_run(wandb, args, args.contract)
+                            run.summary[REPORTER_SESSION] = session
+                        set_training_progress(run, published)
                     if run is not None:
                         sync_rows(run, train, dev, published, watermarks, native_alignment)
                         sync_logged_layers(run, layers, published_command, args.contract, published,
                                            watermarks, native_alignment)
+                        if getattr(args, "bleu_results", None) and (snapshot is not None or finishing):
+                            try:
+                                points = saved_bleu_points(args, plan_sha, published, contract=args.contract)
+                                if written := sync_bleu(run, points, sent_bleu):
+                                    log_event("wandb-bleu", "synced", args.logs, f"{written} new checkpoint results")
+                            except (OSError, ValueError, TypeError, KeyError) as error:
+                                log_event("wandb-bleu", "failed", args.logs, str(error))
             if finishing:
                 break
             stop.wait(15)
@@ -271,6 +405,8 @@ def report(args, stop):
             run.finish()
         else:
             log_event("wandb", "skipped", args.logs, "No published updates for this contract")
+    if run is not None:
+        return {"entity": run.entity, "project": args.project, "method": args.method, "session": session}
 
 
 def sync_rows(run, train, dev, published, watermarks, native_alignment):
@@ -315,7 +451,11 @@ def supervise(args):
 
     def publish():
         try:
-            report(args, stop)
+            with writer_lock(args.contract):
+                owner_path = writer_path(args.contract, ".owner.json")
+                owner_path.unlink(missing_ok=True)
+                if owner := report(args, stop):
+                    owner_path.write_text(json.dumps(owner), encoding="utf-8")
         except Exception as error:
             log_event("wandb", "failed", args.logs, type(error).__name__)
 
@@ -324,6 +464,8 @@ def supervise(args):
     try:
         env = {key: value for key, value in os.environ.items() if key != "WANDB_API_KEY"}
         run_process(args.command, args.logs, name="wandb-training-child", env=env)
+        if args.after_training:
+            run_process(args.after_training, args.logs, name="online-bleu-after-checkpoint", env=env)
     finally:
         stop.set()
         worker.join(timeout=55)
@@ -335,15 +477,28 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("work", "backup", "logs"):
         parser.add_argument("--" + option, type=Path, required=True)
-    for option in ("contract", "group", "method", "project"):
+    for option in ("method", "project"):
         parser.add_argument("--" + option, required=True)
+    parser.add_argument("--contract")
+    parser.add_argument("--group")
     parser.add_argument("--entity")
+    parser.add_argument("--bleu-results", type=Path)
+    parser.add_argument("--after-training", type=json.loads)
+    parser.add_argument("--sync-bleu-only", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command[:1] == ["--"]:
         args.command = args.command[1:]
-    if not args.command:
-        parser.error("a training command is required")
+    if args.sync_bleu_only:
+        if not args.bleu_results or args.command or args.after_training:
+            parser.error("--sync-bleu-only requires --bleu-results and no training command")
+        sync_saved_bleu(args)
+        return
+    if not all((args.command, args.contract, args.group)):
+        parser.error("a training command, contract and group are required")
+    if args.after_training is not None and (not isinstance(args.after_training, list)
+                                            or not all(isinstance(arg, str) for arg in args.after_training)):
+        parser.error("--after-training requires a JSON array of arguments")
     supervise(args)
 
 

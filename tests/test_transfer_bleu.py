@@ -153,65 +153,6 @@ def test_evaluation_resume_and_csv_recovery(published, tmp_path, monkeypatch):
     assert legacy.read_bytes() == legacy_bytes and not legacy.with_suffix(".csv").exists()
 
 
-def test_wandb_sync_keeps_checkpoint_axes_and_does_not_log_twice(tmp_path, monkeypatch):
-    output = tmp_path / "drive"
-
-    def saved_result(update, mode=None, *, unclassified=False):
-        row = dict(method="mask_distillation", contract_hash="contract", update=update, status="completed",
-                   checkpoint_sha256=str(update), aux_bleu=22., asr_bleu=12., aux_failures=0, asr_failures=0)
-        if mode:
-            row["mode"] = mode  # Existing immutable results from either old entry point.
-        if mode is None:
-            row.update(failure_policy=bleu.FAILURE_POLICY, generation_failures={"aux": [], "asr": []})
-        if unclassified:
-            row.update(status="completed_with_failures", asr_bleu=0., asr_failures=1)
-        row["result_hash"] = bleu.result_hash(row)
-        write_json(output / f"mask_distillation/contract/{update}/result.json", row)
-
-    class Run:
-        summary = {}
-        url = "fixture"
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-        def define_metric(self, *args, **kwargs):
-            if args == ("eval/*",):
-                assert kwargs == {"step_metric": "eval/checkpoint_update"}
-
-        def log(self, fields):
-            self.summary.update(fields)
-            logged.append(fields)
-
-    logged = []
-    run = Run()
-    run_ids = []
-
-    def init(**kwargs):
-        assert kwargs["name"] == "mask_distillation-bleu"
-        run_ids.append(kwargs["id"])
-        return run
-
-    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init, Settings=dict))
-    args = SimpleNamespace(output=output, logs=tmp_path, method="mask_distillation", contract="contract",
-                           project="p", entity="", group="g")
-    saved_result(50000)
-    bleu.sync_wandb(args)
-    saved_result(1000, "backfill")
-    saved_result(5000, "online")
-    saved_result(25000, "backfill", unclassified=True)
-    before = {path: file_hash(path) for path in output.rglob("result.json")}
-    bleu.sync_wandb(args)
-    bleu.sync_wandb(args)
-    assert len(run_ids) == 3 and len(set(run_ids)) == 1
-    assert [row["eval/checkpoint_update"] for row in logged] == [50000, 1000, 5000]
-    assert logged[0]["eval/aux_bleu"] == 22. and logged[0]["eval/asr_failures"] == 0
-    assert {path: file_hash(path) for path in before} == before
-
-
 @pytest.mark.parametrize("fault", ["asr", "vocoder", "source", "unknown_decoder", "timeout", "cuda"])
 def test_benchmark_failure_classification_and_retry(published, tmp_path, monkeypatch, fault):
     from direct_s2st.s2ut import bleu_monitor as monitor
@@ -332,7 +273,8 @@ def test_benchmark_failure_classification_and_retry(published, tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("fresh", [True, False], ids=["fresh", "resume"])
-def test_notebook_trains_then_evaluates_each_exact_online_milestone(tmp_path, fresh):
+@pytest.mark.parametrize("tracked", [True, False], ids=["tracked", "untracked"])
+def test_notebook_trains_then_evaluates_each_exact_online_milestone(tmp_path, fresh, tracked):
     cells, ns = namespace(tmp_path, "training")
     assert ns["TRANSFER_ONLINE_BLEU"]
     calibration = tmp_path / "calibration.json"
@@ -354,8 +296,14 @@ def test_notebook_trains_then_evaluates_each_exact_online_milestone(tmp_path, fr
         assert "--resume" in args and "--max-update" not in args
         step = args[args.index("--stop-after-update") + 1] if "--stop-after-update" in args else 400000
         calls.append(("train", step))
+        if tracked:
+            assert kwargs["wandb_tracking"][2:] == ("fixture", "distillation")
+            evaluation = kwargs["after_training"]
+            assert evaluation[2] == "evaluate" and evaluation[evaluation.index("--update") + 1] == step
+            calls.append(("eval", step))
 
     def execute(*args, name):
+        assert not tracked, "The training reporter must own the entire segment"
         assert args[2] == "evaluate"
         calls.append(("eval", args[args.index("--update") + 1]))
 
@@ -363,7 +311,8 @@ def test_notebook_trains_then_evaluates_each_exact_online_milestone(tmp_path, fr
               PREPARE_AUDIO_PACKS=False,
               CALIBRATION=calibration, MASK_TOP_P=.8, BASELINE=tmp_path / "baseline.json",
               MANIFEST=tmp_path / "manifest.jsonl", TEACHER_ROOT=tmp_path / "teacher",
-              execute_json=execute_json, execute=execute, run=train)
+              execute_json=execute_json, execute=execute, run=train, ENABLE_WANDB=tracked,
+              prepare_wandb=lambda: ("tracker-python", "fixture-key"))
     exec(cells["transfer-training"], ns)
     assert calls == [(phase, step) for step in steps for phase in ("train", "eval")]
 
@@ -379,3 +328,19 @@ def test_backfill_notebook_invokes_evaluation_only(tmp_path):
     command, = calls
     assert command[2:5] == ("backfill", "--method", "mask_distillation")
     assert command[-2:] == ("--update", 25000)
+
+
+def test_sync_only_notebook_skips_evaluation_and_cuda(tmp_path, monkeypatch):
+    cells, ns = namespace(tmp_path, "evaluate")
+    calls = []
+    colab = SimpleNamespace(userdata=SimpleNamespace(get=lambda name: "fixture-key"))
+    monkeypatch.setitem(sys.modules, "google.colab", colab)
+    ns.update(SYNC_SAVED_TRANSFER_BLEU=True, EVALUATE_S2UT=False, ENABLE_WANDB=True,
+              COMPARE_MASK_DISTILLATION=True, execute=lambda *args, **kwargs: calls.append((args, kwargs)))
+    for cell in ("preflight", "restore-inputs", "bleu-backfill"):
+        exec(cells[cell], ns)
+    cmd, options = calls[-1]
+    assert cmd[2:5] == ("--sync-bleu-only", "--method", "mask_distillation")
+    assert "--bleu-results" in cmd and "--baseline-backup" not in cmd
+    assert options["env"]["WANDB_API_KEY"] == "fixture-key"
+    assert not any("--cuda" in cmd or "backfill" in cmd for cmd, _ in calls)
