@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import runpy
+import subprocess
 import sys
 from pathlib import Path
 from threading import Event
@@ -19,7 +20,7 @@ def native_command(work, method="mask_distillation"):
             "--mask-top-p", "0.8", "--all-layers", "--resume"]
 
 
-def publish_receipt(work, backup, step, *, complete=True, method="mask_distillation"):
+def publish_receipt(work, backup, step, *, complete=True, method="mask_distillation", checkpoint="last"):
     target = backup / f"{step:012d}-fixture"
     target.mkdir(parents=True)
     (target / ("snapshot.zip" if complete else "snapshot.zip.tmp")).touch()
@@ -28,7 +29,7 @@ def publish_receipt(work, backup, step, *, complete=True, method="mask_distillat
         (target / "snapshot.json").write_text(json.dumps({
             "updates": step, "storage": "zip-v1",
             "identity": {"work": str(work), "command": native_command(work, method)},
-            "files": {"native-run.json": plan_sha, "checkpoints/checkpoint_last.pt": "last"},
+            "files": {"native-run.json": plan_sha, "checkpoints/checkpoint_last.pt": checkpoint},
         }), encoding="utf-8")
 
 
@@ -85,10 +86,170 @@ def test_notebook_wraps_benchmark_without_altering_recovery_command(tmp_path):
     arguments = ["train", "--output", tmp_path / "mask", "--method", "mask_distillation"]
     ns["run"]("mask", module, *arguments, gpu=True)
     ns["run"]("mask", module, *arguments, gpu=True,
-              wandb_tracking=(Path("/tracker/python"), "only-in-env", "contract", "mask_distillation"))
+              wandb_tracking=(Path("/tracker/python"), "only-in-env", "contract", "mask_distillation"),
+              after_training=[ns["PYTHON"], ns["REPO"] / "tools/transfer_bleu.py", "evaluate"])
     original, tracking = [args[args.index("--") + 1:] for args, _ in calls]
     assert tracking[tracking.index("--") + 1:] == original
     assert "only-in-env" not in tracking and calls[-1][1]["env"]["WANDB_API_KEY"] == "only-in-env"
+    assert json.loads(tracking[tracking.index("--after-training") + 1])[-1] == "evaluate"
+
+
+def test_reuses_training_run_for_saved_bleu_and_preserves_history(tmp_path, monkeypatch):
+    from test_transfer_bleu import bleu
+
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    work, backup, logs, output = [tmp_path / name for name in ("work", "backup", "logs", "bleu")]
+    work.mkdir()
+    contract = "a" * 64
+    plan = work / "native-run.json"
+    plan.write_text(json.dumps({"contract_hash": contract}), encoding="utf-8")
+    plan_sha = hashlib.sha256(plan.read_bytes()).hexdigest()
+    publish_receipt(work, backup, 25000, checkpoint="b" * 64)
+    publish_receipt(work, backup, 38000, checkpoint="c" * 64)
+    original = {"update": 38000, "train/main_loss": 2.2, "wandb_train_update": 38000}
+    history = [original.copy()]
+    summary = original.copy()
+    inits, metrics = [], {}
+    identifier = hashlib.sha256(contract.encode()).hexdigest()[:24]
+    remote = SimpleNamespace(state="running", config={"condition": "mask_distillation"})
+
+    def add_score(step, checkpoint, *, stale=False, wrong_plan=False):
+        values = dict(method="mask_distillation", contract_hash=contract, update=step, checkpoint_sha256=checkpoint,
+                      aux_bleu=23., asr_bleu=15., aux_failures=0, asr_failures=0, status="completed",
+                      dev_sha256="d" * 64, policy={"seed": 1})
+        if stale:
+            values.update(status="completed_with_failures", asr_failures=1)
+        values["result_hash"] = bleu.result_hash(values)
+        scope = bleu.evaluation_scope("f" * 64 if wrong_plan else plan_sha, values["policy"], values["dev_sha256"])
+        target = output / "mask_distillation" / scope / f"{step:09d}" / "result.json"
+        target.parent.mkdir(parents=True)
+        target.write_text(json.dumps(values), encoding="utf-8")
+        return target
+
+    saved = add_score(25000, "b" * 64)
+    before = saved.read_bytes()
+    add_score(1000, "e" * 64, stale=True)
+    add_score(5000, "e" * 64, wrong_plan=True)
+    add_score(50000, "e" * 64)
+
+    def log(values):
+        history.append(values)
+        summary.update(values)
+
+    def init(**kwargs):
+        inits.append(kwargs)
+        assert kwargs["id"] == identifier
+        return SimpleNamespace(summary=summary, log=log, define_metric=lambda name, **kw: metrics.update({name: kw}),
+                               url="https://wandb.ai/team/project", finish=lambda: None)
+
+    def lookup(path):
+        assert path == f"team/project/{identifier}"
+        return remote
+
+    api = SimpleNamespace(default_entity="team", run=lookup)
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init, Settings=dict, Api=lambda **kw: api))
+    monkeypatch.setitem(tool["writer_lock"].__globals__, "gettempdir", lambda: str(tmp_path))
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, project="project", entity="",
+                              group="exp/trial", method="mask_distillation", bleu_results=output, contract=None)
+    with pytest.raises(RuntimeError, match="active"):
+        tool["sync_saved_bleu"](args)
+    assert len(inits) == 0 and history == [original]
+
+    # The only active training reporter consumes the Drive queue.
+    args.contract = contract
+    done = Event()
+    done.set()
+    tool["report"](args, done)
+    add_score(10000, "e" * 64)  # This scoring receipt survived the training archive.
+    remote.state = "finished"
+    tool["sync_saved_bleu"](args)
+    tool["sync_saved_bleu"](args)
+    assert history[0] == original and [row["update"] for row in history] == [38000, 25000, 10000]
+    assert history[1]["eval/asr_bleu"] == 15. and history[1]["eval/aux_failures"] == 0
+    assert metrics["train/*"] == metrics["eval/*"] == {"step_metric": "update"}
+    assert [init["resume"] for init in inits] == ["allow", "must", "must"]
+    assert all("config" not in init and "name" not in init for init in inits[1:])
+    assert saved.read_bytes() == before
+
+    from filelock import Timeout
+    with tool["writer_lock"](contract), pytest.raises(Timeout):
+        tool["sync_saved_bleu"](args)
+    assert len(history) == 3
+    # A completed score remains usable after archive retention prunes its source snapshot.
+    (backup / "000000025000-fixture" / "snapshot.zip").unlink()
+    points = tool["saved_bleu_points"](args, plan_sha, 38000, contract=contract)
+    assert [step for step, _ in points] == [10000, 25000]
+
+
+def test_wandb_worker_stays_active_until_checkpoint_evaluation_finishes(monkeypatch, tmp_path):
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    monkeypatch.setitem(tool["writer_lock"].__globals__, "gettempdir", lambda: str(tmp_path))
+    active, calls = Event(), []
+
+    def report(args, stop):
+        active.set()
+        assert stop.wait(5)
+        calls.append("flushed")
+
+    def process(command, logs, name, env):
+        assert active.wait(5)
+        assert "WANDB_API_KEY" not in env
+        calls.append(command[0])
+
+    monkeypatch.setenv("WANDB_API_KEY", "fixture-secret")
+    monkeypatch.setitem(tool["supervise"].__globals__, "report", report)
+    monkeypatch.setitem(tool["supervise"].__globals__, "run_process", process)
+    tool["supervise"](SimpleNamespace(contract="test", logs=tmp_path, command=["train"], after_training=["evaluate"]))
+    assert calls == ["train", "evaluate", "flushed"]
+
+
+def test_wandb_sdk_persists_out_of_order_update_coordinates(tmp_path, monkeypatch):
+    pytest.importorskip("wandb")
+    from wandb.proto import wandb_internal_pb2
+    import struct
+
+    monkeypatch.setenv("WANDB_MODE", "offline")
+    monkeypatch.setenv("WANDB_SILENT", "true")
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    tools = Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"
+    script = """
+import runpy, sys
+from pathlib import Path
+from types import SimpleNamespace
+import wandb
+tool = runpy.run_path(sys.argv[1])
+args = SimpleNamespace(entity='', project='bleu-axis-offline-test', logs=Path(sys.argv[2]),
+                       group='fixture', method='distillation')
+run = tool['open_run'](wandb, args, 'fixture')
+run.log({'update': 38000, 'train/main_loss': 2.2})
+sent = {}
+for step in (25000, 1000):
+    tool['sync_bleu'](run, [(step, dict(checkpoint_sha256=str(step), aux_bleu=21.0,
+                                     asr_bleu=15.0, aux_failures=0, asr_failures=0))], sent)
+run.finish()
+"""
+    subprocess.run([sys.executable, "-c", script, str(tools), str(tmp_path)], check=True)
+    # Small offline .wandb files contain protobuf records with a 7-byte header
+    # followed by complete frames. Read the actual records emitted by the SDK.
+    data = next(tmp_path.rglob("*.wandb")).read_bytes()
+    assert data.startswith(b":W&B")
+    offset = 7
+    history, metrics = [], {}
+    while offset < len(data):
+        _, size, kind = struct.unpack_from("<IHB", data, offset)
+        assert kind == 1
+        offset += 7
+        record = wandb_internal_pb2.Record.FromString(data[offset:offset + size])
+        offset += size
+        if record.HasField("metric"):
+            metrics[record.metric.name or record.metric.glob_name] = record.metric.step_metric
+        if record.HasField("history"):
+            history.append({item.key or "/".join(item.nested_key): json.loads(item.value_json)
+                            for item in record.history.item})
+    assert metrics["eval/*"] == metrics["train/*"] == "update"
+    assert [(row["_step"], row["update"]) for row in history] == [(0, 38000), (1, 25000), (2, 1000)]
+    assert history[0]["train/main_loss"] == 2.2
+    assert [row["eval/asr_bleu"] for row in history[1:]] == [15., 15.]
 
 
 @pytest.mark.parametrize("prefix", ["INFO:{tag}:", "2026-11-18 00:00:00 | INFO | {tag} | "])
