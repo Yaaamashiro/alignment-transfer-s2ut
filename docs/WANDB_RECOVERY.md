@@ -2,6 +2,8 @@
 
 The telemetry reader uses native JSONL and Fairseq process logs. Each condition resumes its existing contract-derived W&B run.
 
+For joint Baseline and transfer reporting, use the [matched S2UT metric definitions and importer conventions](WANDB_BASELINE_COMPARISON.md).
+
 | Source | Metrics |
 | --- | --- |
 | Training JSONL | Task or historical NLL fallback, total loss, learning rate, gradient norm, elapsed time, and available finite alignment scalars such as λ, τ, and worst-layer fractions |
