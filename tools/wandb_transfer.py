@@ -11,11 +11,15 @@ import re
 import sys
 from tempfile import gettempdir
 from threading import Event, Thread
+from uuid import uuid4
 
 # Keep the W&B runtime independent of the scientific Python environment.
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parents[1] / "src")]
 from alignment_transfer_s2ut.process_logging import log_event, run_process
 from transfer_bleu import CHECKPOINT, PLAN, SHA256, evaluation_scope, publishable, result_hash
+
+
+REPORTER_SESSION = "wandb_reporter_session"
 
 
 class MetricReader:
@@ -272,37 +276,56 @@ def run_id(contract):
     return hashlib.sha256(contract.encode()).hexdigest()[:24]
 
 
+def writer_path(contract, suffix):
+    return Path(gettempdir()) / "alignment-wandb-writers" / (run_id(contract) + suffix)
+
+
 def writer_lock(contract):
     from filelock import FileLock
 
-    path = Path(gettempdir()) / "alignment-wandb-writers"
-    path.mkdir(parents=True, exist_ok=True)
-    return FileLock(str(path / (run_id(contract) + ".lock")), timeout=0)
+    path = writer_path(contract, ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return FileLock(str(path), timeout=0)
 
 
-def open_run(wandb, args, contract, *, existing=False):
+def open_run(wandb, args, contract, *, owner=None):
     identifier = run_id(contract)
     options = {}
-    if existing:
-        api = wandb.Api(timeout=20)
-        entity = args.entity or api.default_entity
-        target = api.run(f"{entity}/{args.project}/{identifier}")
+    if owner is not None:
+        entity = owner["entity"]
+        if (not entity or args.entity and args.entity != entity
+                or args.project != owner["project"] or args.method != owner["method"]):
+            raise RuntimeError("W&B destination differs from the last training reporter in this runtime")
+        target = wandb.Api(timeout=20).run(f"{entity}/{args.project}/{identifier}")
         if target.state not in {"finished", "failed", "crashed", "killed"} or target.config.get("condition") != args.method:
             raise RuntimeError("W&B run is active or does not match the selected training condition")
+        if target.summary.get(REPORTER_SESSION) != owner["session"]:
+            raise RuntimeError("Another training reporter owns this W&B run. Leave the scores on Drive for that reporter.")
     else:
         entity = args.entity or None
         options = {"group": args.group, "name": args.method, "config": {"condition": args.method}}
-    run = wandb.init(project=args.project, entity=entity, id=identifier, resume="must" if existing else "allow",
+    run = wandb.init(project=args.project, entity=entity, id=identifier, resume="must" if owner else "allow",
                      dir=str(args.logs.resolve()), save_code=False, **options,
                      settings=wandb.Settings(console="off", disable_git=True, disable_code=True,
                                              x_disable_meta=True, x_disable_stats=True,
                                              x_service_wait=10, init_timeout=20, finish_timeout=20,
                                              finish_timeout_raises=True))
-    run.define_metric("update")
+    # Historical rows still carry "update", but a late BLEU row must not
+    # replace the latest training update in the Run Summary.
+    run.define_metric("update", summary="none", overwrite=True)
     for prefix in ("train", "alignment", "dev", "eval"):
         run.define_metric(prefix + "/*", step_metric="update")
     log_event("wandb", "connected", args.logs, run.url or "Offline run")
     return run
+
+
+def set_training_progress(run, published):
+    name = "train/max_update"
+    previous = number(run.summary.get(name)) or 0
+    training = number(run.summary.get("wandb_train_update")) or 0
+    maximum = int(max(published, previous, training))
+    if maximum != previous:
+        run.summary[name] = maximum
 
 
 def sync_saved_bleu(args):
@@ -321,8 +344,13 @@ def sync_saved_bleu(args):
         raise ValueError("Saved BLEU results must belong to a single training contract")
     contract = contracts.pop()
     with writer_lock(contract):
-        run = open_run(wandb, args, contract, existing=True)
+        owner_path = writer_path(contract, ".owner.json")
+        if not owner_path.is_file():
+            raise RuntimeError("Sync-only requires this run's training reporter to have finished in the same Colab runtime. "
+                               "Leave the scores on Drive for the active training reporter.")
+        run = open_run(wandb, args, contract, owner=json.loads(owner_path.read_text(encoding="utf-8")))
         try:
+            set_training_progress(run, snapshot[0])
             written = sync_bleu(run, points, {})
             log_event("wandb-bleu", "synced", args.logs, f"{written} new checkpoint results")
         finally:
@@ -341,6 +369,7 @@ def report(args, stop):
     sent_bleu = {}
     published_command = None
     run = None
+    session = uuid4().hex
     try:
         while True:
             finishing = stop.is_set()
@@ -355,6 +384,8 @@ def report(args, stop):
                         published, published_command, _ = snapshot
                         if run is None:
                             run = open_run(wandb, args, args.contract)
+                            run.summary[REPORTER_SESSION] = session
+                        set_training_progress(run, published)
                     if run is not None:
                         sync_rows(run, train, dev, published, watermarks, native_alignment)
                         sync_logged_layers(run, layers, published_command, args.contract, published,
@@ -374,6 +405,8 @@ def report(args, stop):
             run.finish()
         else:
             log_event("wandb", "skipped", args.logs, "No published updates for this contract")
+    if run is not None:
+        return {"entity": run.entity, "project": args.project, "method": args.method, "session": session}
 
 
 def sync_rows(run, train, dev, published, watermarks, native_alignment):
@@ -419,7 +452,10 @@ def supervise(args):
     def publish():
         try:
             with writer_lock(args.contract):
-                report(args, stop)
+                owner_path = writer_path(args.contract, ".owner.json")
+                owner_path.unlink(missing_ok=True)
+                if owner := report(args, stop):
+                    owner_path.write_text(json.dumps(owner), encoding="utf-8")
         except Exception as error:
             log_event("wandb", "failed", args.logs, type(error).__name__)
 

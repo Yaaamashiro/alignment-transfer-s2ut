@@ -47,6 +47,23 @@ In `notebooks/colab/evaluate.ipynb`, use the same experiment and corpus settings
 
 During training, use `ENABLE_WANDB=True` in the updated training notebook. It picks up saved BLEU results for the same contract when a checkpoint is published and when the reporter finishes. The backfill evaluation notebook produces Drive results and leaves publishing to that reporter.
 
-After the selected training cells and their W&B reporters have stopped, you can sync without loading models or evaluating speech. In the updated `evaluate.ipynb`, use the original experiment IDs, method switches, W&B project and entity. Set `SYNC_SAVED_TRANSFER_BLEU=True`, `ENABLE_WANDB=True`, `EVALUATE_S2UT=False`, `EVALUATE_T2TT_EXTERNAL=False`, and `BACKFILL_TRANSFER_BLEU=False`. Run through **Backfill Aux-BLEU and ASR-BLEU or sync saved scores**. This mode resumes an existing training run and stops if W&B still reports it as active. Keep one reporter per method across runtimes.
+After the selected training cells and their W&B reporters have stopped, you can sync saved scores in the same Colab runtime where the latest reporter finished. In the updated `evaluate.ipynb`, use the original experiment IDs, method switches, W&B project and entity. Set `SYNC_SAVED_TRANSFER_BLEU=True`, `ENABLE_WANDB=True`, `EVALUATE_S2UT=False`, `EVALUATE_T2TT_EXTERNAL=False`, and `BACKFILL_TRANSFER_BLEU=False`. Run through **Backfill Aux-BLEU and ASR-BLEU or sync saved scores**. This mode resumes an existing idle run after checking the local ownership receipt against W&B.
 
-Historical BLEU is appended to W&B history. W&B's internal step still advances, and each BLEU row uses its actual checkpoint update as the chart coordinate. A stored checkpoint hash prevents duplicate points on later syncs. Earlier standalone BLEU runs and their history remain available.
+To stay in the owning Colab runtime, you can also run this cell in the updated training notebook after the training cell has stopped:
+
+```python
+method = 'distillation'
+tracking = prepare_wandb()
+if tracking:
+    python, key = tracking
+    backup = Path(PERSISTENT) / 'stages' / ('research-v3-' + method + SCOPE_SUFFIX)
+    results = Path(PERSISTENT) / 'transfer-bleu' / (TRANSFER_EXPERIMENT_ID or 'default')
+    execute(python, REPO / 'tools/wandb_transfer.py', '--sync-bleu-only', '--method', method,
+            '--work', RESEARCH_ROOT / method, '--backup', backup, '--bleu-results', results,
+            '--logs', LOGS, '--project', WANDB_PROJECT.strip(), '--entity', WANDB_ENTITY.strip(),
+            env=dict(os.environ, WANDB_API_KEY=key), name='wandb-sync-saved-bleu-' + method)
+```
+
+Across runtimes, leave saved scores on Drive for the training reporter to pick up. Wait for sync-only to finish before starting a trainer for the same method anywhere. W&B status checks and the runtime's local file lock do not provide a distributed lock across Colab VMs. If the original runtime is gone, the next training reporter picks up the existing scores.
+
+Historical BLEU is appended to W&B history. W&B's internal step still advances, and each BLEU row uses its actual checkpoint update as the chart coordinate. The Run Summary uses `train/max_update` for the largest published training update the reporter has observed. A stored checkpoint hash prevents duplicate points on later syncs. Earlier standalone BLEU runs and their history remain available.
