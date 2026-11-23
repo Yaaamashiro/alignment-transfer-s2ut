@@ -2,21 +2,59 @@
 
 This specification is for the Baseline importer and reporter in `ja-en-direct-s2st-benchmark`. The comparison is with `alignment-transfer-s2ut` PR #7 and the Baseline trained under the registered `paper_fisher_v1` recipe. Use the registered corpus, Fairseq revision, and scientific config when checking another Baseline. The pinned Baseline runtime is `0c0024ea888206149a3119bf096b86ba66d63b66`, with Fairseq at `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`.
 
-## Run and update conventions
+## W&B destination
 
 | Setting | Value |
 | --- | --- |
-| W&B project | `direct-s2st` |
-| W&B entity | `yaaamashiro-national-institute-of-technology-okinawa-college` |
+| Operator-configured project for `transfer-fixed-v1` | `direct-s2st` |
+| Operator-configured entity for `transfer-fixed-v1` | `yaaamashiro-national-institute-of-technology-okinawa-college` |
 | Group for this comparison | `experiment-001/transfer-fixed-v1` |
 | Run names | `baseline`, `distillation`, `annealed_distillation`, `mask_distillation` |
 
-Use `ENABLE_WANDB=True`, `WANDB_PROJECT`, `WANDB_ENTITY`, and the Colab secret `WANDB_API_KEY`. The transfer group is `<EXPERIMENT_ID>/<TRANSFER_EXPERIMENT_ID or 'default'>`. The Baseline reporter should accept that group explicitly so both sides can join the same comparison.
+Use `ENABLE_WANDB=True`, set `WANDB_PROJECT` and `WANDB_ENTITY` explicitly, and use the Colab secret `WANDB_API_KEY`. The checked-in notebook defaults are `alignment-transfer-s2ut` and an empty entity. The training notebook passes the selected values to the reporter, which logs the W&B-resolved Run URL in the `[wandb] connected` event. The transfer group is `<EXPERIMENT_ID>/<TRANSFER_EXPERIMENT_ID or 'default'>`. The Baseline reporter should accept that group explicitly. [Notebook settings](../notebooks/colab/training.ipynb) · [Reporter](../tools/wandb_transfer.py)
+
+The destination above is the operator's stated configuration. Direct W&B access was unavailable during this audit, and the saved Drive records do not establish which destination accepted the transfer Runs. The authority for each existing Run is its W&B entity, project and Run ID, or the matching `[wandb] connected` Run URL from `execution/notebook-events.log`. Check those records for the selected transfer conditions before sending the Baseline import. A project name in a Notebook or a Run display name alone cannot identify the destination.
+
+## Run ID and Baseline identity
+
+PR #7 derives each transfer Run ID as `sha256(contract_hash.encode()).hexdigest()[:24]`. Preserve those IDs. If the Baseline already has a W&B Run, use its verified W&B Run ID and `resume="must"`. The derivation below applies on first authorized publication of a Baseline without a W&B Run.
+
+| Input | Authoritative source |
+| --- | --- |
+| `baseline_run_key` | Use the original per-run snapshot publication directory in the run descriptor or launch configuration (`BACKUP` in the alignment Notebook, `--backup-root` in the benchmark launcher). Strip the exact `/content/drive/MyDrive/` prefix once. Use forward slashes with nonempty path components, preserve case and Unicode code points, and reject `.`, `..`, and leading or trailing slashes. Freeze this key when first binding the Baseline to W&B. A move, ZIP restore, or new runtime keeps the original key. For the registered Baseline here the key is `alignment-transfer-s2ut-data/experiment-001/baseline`. |
+| `training_fingerprint` | Use `research-metadata.json["training_fingerprint"]` from a verified published snapshot. Verify that it equals `s2ut-recipe-lock.json["recipe"]["training_fingerprint"]` and `checkpoint_last.pt["extra_state"]["s2st_recipe_fingerprint"]` when establishing the lineage. A verified existing registration may supply `baseline.json["baseline_fingerprint"]`, which the registration code already checked against the lock, metadata and registered checkpoint. Use the stored original lowercase 64-digit SHA256. A resumed import or reporter reads that same fingerprint even if the launcher path or its source revision changed. |
+
+The Import Notebook and live reporter use the same serialized array and hash. Store the two inputs, the derived or adopted Run ID, and its exact entity and project in the reporter's persistent W&B binding alongside the run's metadata. Reuse that binding for later imports and reporting. A missing input or a conflicting binding requires verification of the original run before publishing.
+
+```python
+import hashlib
+import json
+import re
+
+
+def baseline_wandb_run_id(baseline_run_key, training_fingerprint):
+    if "\\" in baseline_run_key or any(part in ("", ".", "..") for part in baseline_run_key.split("/")):
+        raise ValueError("expected the original nonempty MyDrive-relative publication key")
+    if not re.fullmatch(r"[0-9a-f]{64}", training_fingerprint):
+        raise ValueError("expected the saved lowercase SHA256 training fingerprint")
+    payload = json.dumps(
+        ["baseline", baseline_run_key, training_fingerprint],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:24]
+```
+
+Hash the UTF-8 bytes as emitted, with zero extra whitespace, no byte-order mark and no terminating newline. With a synthetic fingerprint of 64 zeroes, the example Run key above yields `047024bc03277652fa2aa9fe`. The key `benchmark-data/実験/baseline` yields `22eba1499911c50df601ae81` with the same synthetic fingerprint.
+
+The original publication directory and the archived 400k Baseline registration were checked read-only. The registration archive and `baseline.json` matched the published SHA256 values, and `baseline_fingerprint` matched the embedded research metadata. [Baseline registration](../src/alignment_transfer_s2ut/benchmark.py) · [Pinned recipe fingerprint binding](https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark/blob/0c0024ea888206149a3119bf096b86ba66d63b66/src/direct_s2st/s2ut/recipe_identity.py)
+
+## Update and Summary conventions
 
 - `update` is the number of completed optimizer updates. Use the monitor's `update`, the verified checkpoint's optimizer history, or Fairseq's `num_updates` and `dev_num_updates`. One update can contain four microbatches in the registered recipe. Fairseq's printable fractional epoch field and W&B's internal `_step` do not represent optimizer updates.
 - Define `update` with `summary="none"` and `overwrite=True`. Register `train/*`, `dev/*`, and `eval/*` with `step_metric="update"` and put the actual update in every history row. Let W&B append rows with its own internal step so old BLEU points can arrive late.
 - Set the Summary key `train/max_update` to the maximum of its previous value, the verified training watermark, and the latest matching published checkpoint. A BLEU backfill leaves that progress unchanged.
-- PR #7 derives each transfer Run ID as `sha256(contract_hash.encode()).hexdigest()[:24]`. Preserve those IDs. For a Baseline with an existing W&B Run, configure its exact ID and resume it with `resume="must"`. For the first authorized import of a Baseline without a Run, choose a stable namespaced ID from the original Baseline run key and training recipe fingerprint. For example, hash the UTF-8 JSON array `["baseline", baseline_run_key, training_fingerprint]` with fixed compact serialization and take the first 24 hex digits. Use that same ID for import and live reporting. The display name, group, current checkpoint hash, and reporter revision do not identify the run.
 
 ## Loss and learning-rate mapping
 
