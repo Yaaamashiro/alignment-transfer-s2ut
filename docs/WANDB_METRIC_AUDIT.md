@@ -42,7 +42,7 @@ The 73k KL snapshot receipt advertises `alignment-train.jsonl`, `native-dev.json
 
 Baseline benchmark PR #1 already imports verified per-update Unit CE in nats as `train/main_loss`. Keep that history and Run ID. The schema-v2 mapping covers Unit CE, weighted Task Loss, LR, Dev Total and the three Dev auxiliary losses. [Benchmark PR #1](https://github.com/Yaaamashiro/ja-en-direct-s2st-benchmark/pull/1) · [Baseline schema-v2 mapping and matched BLEU protocol](WANDB_BASELINE_COMPARISON.md)
 
-This change keeps the contract-derived Run IDs and uses distinct series. Explicit backfill scans uncached, unsampled W&B history and compares each `(update, metric key)`. A matching point is a no-op; a partial row gets only its missing keys. A differing value stops the operation before a writer opens. Appended rows retain the original `update` and use W&B's increasing internal step. The normal live reporter continues to use monotonic stream watermarks. Explicit backfill requires the latest W&B reporter's local ownership receipt, idle run state, matching entity/project/method and matching remote session; it uses `resume="must"`. Wait for it to finish before starting the same run in another Colab. Ownership is limited to the originating runtime, as in the existing BLEU workflow.
+This change keeps the contract-derived Run IDs and uses distinct series. Explicit backfill scans uncached, unsampled W&B history and compares each `(update, metric key)`. A matching point is a no-op; a partial row gets only its missing keys. A differing value stops the operation before a writer opens. Appended rows retain the original `update` and use W&B's increasing internal step. The normal live reporter continues to use monotonic stream watermarks. Explicit backfill with a current local ownership receipt resumes the idle Run with `resume="must"`. If that receipt is absent or the runtime has gone, recover ownership under the shared writer lock. [CPU writer recovery](WANDB_RECOVERY.md#restore-writer-ownership-on-a-cpu-runtime)
 
 ## Colab
 
@@ -65,7 +65,8 @@ tracking = prepare_wandb()
 if tracking is not None:
     python, key = tracking
     execute(python, *command, '--sync-metrics-only', name='wandb-metric-backfill-' + method,
-            env=dict(os.environ, WANDB_API_KEY=key))
+            env=dict(os.environ, WANDB_API_KEY=key, WANDB_WRITER_BUCKET=WANDB_WRITER_BUCKET.strip(),
+                     AT_LOG_WANDB_DRAIN='1'))
 ```
 
 For saved BLEU use the existing [BLEU-only sync](TRANSFER_BLEU.md#sync-scores-already-on-drive). Neither sync requires retraining or model loading. Fairseq windows require the original execution logs or a retained copy with matching command, plan and durable progress receipts. Those process logs use their existing provenance checks and are separate from the verified archived JSONL members. An independent W&B writer still needs the ownership handoff above. Native loss, optimizer, FP16 retry policy, annealing, and checkpoint selection are separate from this migration. The exact reviewed telemetry patch maps to the prior native S2UT implementation identity so old checkpoints and calibration bindings remain usable.

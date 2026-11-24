@@ -13,6 +13,35 @@ def log_event(name, state, logs, detail=""):
     print(line, end="", flush=True)
 
 
+def graceful_sigterm(function):
+    """Turn a first POSIX SIGTERM into the ordinary interruption cleanup path."""
+    from functools import wraps
+    import os
+    import signal
+    import threading
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        if (os.name != "posix" or threading.current_thread() is not threading.main_thread()
+                or signal.getsignal(signal.SIGTERM) != signal.SIG_DFL):
+            return function(*args, **kwargs)
+        interrupted = False
+
+        def interrupt(signum, frame):
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt("SIGTERM")
+
+        previous = signal.signal(signal.SIGTERM, interrupt)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+    return wrapped
+
+
+@graceful_sigterm
 def run_process(command, logs, *, name="command", capture_json=False, env=None, cwd=None,
                 heartbeat_seconds=10., extra_record=None):
     """Stream every child line; silence triggers liveness, never fake progress.
@@ -41,6 +70,7 @@ def run_process(command, logs, *, name="command", capture_json=False, env=None, 
     output, result_path, receipt = root / (key + ".log"), root / (key + ".stdout.log"), root / (key + ".json")
     launch_env = dict(os.environ if env is None else env)
     launch_env["PYTHONUNBUFFERED"] = "1"
+    termination_timeout = 75 if launch_env.get("AT_LOG_WANDB_DRAIN") == "1" else 5
     owns_group = os.name == "posix" and launch_env.get("AT_LOG_MANAGED_GROUP") != "1"
     if owns_group:
         launch_env["AT_LOG_MANAGED_GROUP"] = "1"
@@ -103,7 +133,7 @@ def run_process(command, logs, *, name="command", capture_json=False, env=None, 
         elif process.poll() is None:
             process.terminate()
         try:
-            process.wait(timeout=5)
+            process.wait(timeout=termination_timeout)
         except subprocess.TimeoutExpired:
             if owns_group:
                 os.killpg(process.pid, signal.SIGKILL)

@@ -61,9 +61,11 @@ if tracking:
     execute(python, REPO / 'tools/wandb_transfer.py', '--sync-bleu-only', '--method', method,
             '--work', RESEARCH_ROOT / method, '--backup', backup, '--bleu-results', results,
             '--logs', LOGS, '--project', WANDB_PROJECT.strip(), '--entity', WANDB_ENTITY.strip(),
-            env=dict(os.environ, WANDB_API_KEY=key), name='wandb-sync-saved-bleu-' + method)
+            env=dict(os.environ, WANDB_API_KEY=key, WANDB_WRITER_BUCKET=WANDB_WRITER_BUCKET.strip(),
+                     AT_LOG_WANDB_DRAIN='1'),
+            name='wandb-sync-saved-bleu-' + method)
 ```
 
-Across runtimes, leave saved scores on Drive for the training reporter to pick up. Wait for sync-only to finish before starting a trainer for the same method anywhere. W&B status checks and the runtime's local file lock do not provide a distributed lock across Colab VMs. If the original runtime is gone, the next training reporter picks up the existing scores.
+For runs enrolled in shared writer locking, saved BLEU sync and training must use the same `WANDB_WRITER_BUCKET`. Wait for sync-only to finish before starting a trainer for the same method anywhere. If the original runtime is gone, recover the local receipt with metric sync if there are metrics to append, or leave saved scores for the next training reporter. [Writer coordination and CPU metric recovery](WANDB_RECOVERY.md#restore-writer-ownership-on-a-cpu-runtime)
 
 Historical BLEU is appended to W&B history. W&B's internal step still advances, and each BLEU row uses its actual checkpoint update as the chart coordinate. The Run Summary uses `train/max_update` for the largest published training update the reporter has observed. A stored checkpoint hash prevents duplicate points on later syncs. Earlier standalone BLEU runs and their history remain available.
