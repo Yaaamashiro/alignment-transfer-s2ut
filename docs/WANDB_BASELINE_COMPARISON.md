@@ -1,5 +1,7 @@
 # W&B metrics for the matched S2UT comparison
 
+Use the schema-v2 mapping below for corrected transfer comparisons. Baseline PR #1 has verified Unit CE in `train/main_loss`. The legacy transfer key can contain NLL. Keep previous history and append the verified Baseline values to the matching schema-v2 series. [Metric audit](WANDB_METRIC_AUDIT.md)
+
 This specification is for the Baseline importer and reporter in `ja-en-direct-s2st-benchmark`. The comparison is with `alignment-transfer-s2ut` PR #7 and the Baseline trained under the registered `paper_fisher_v1` recipe. Use the registered corpus, Fairseq revision, and scientific config when checking another Baseline. The pinned Baseline runtime is `0c0024ea888206149a3119bf096b86ba66d63b66`, with Fairseq at `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`.
 
 ## W&B destination
@@ -56,23 +58,28 @@ The original publication directory and the archived 400k Baseline registration w
 - Define `update` with `summary="none"` and `overwrite=True`. Register `train/*`, `dev/*`, and `eval/*` with `step_metric="update"` and put the actual update in every history row. Let W&B append rows with its own internal step so old BLEU points can arrive late.
 - Set the Summary key `train/max_update` to the maximum of its previous value, the verified training watermark, and the latest matching published checkpoint. A BLEU backfill leaves that progress unchanged.
 
-## Loss and learning-rate mapping
+## Metric schema v2 for the Baseline importer and reporter
 
 The registered recipe uses the same native S2UT Unit and three auxiliary losses in all four conditions. Unit loss is label-smoothed cross-entropy with smoothing 0.2. For each reported component, sum criterion numerators and sample sizes before dividing. Main Unit and total losses use Fairseq's main `ntokens` under this token-averaged recipe. Each auxiliary loss uses its own criterion `sample_size`. Baseline monitor losses are in bits. Convert bits to nats by multiplying by `ln(2)`.
 
 The raw task numerator is `Unit + 8 × source_letter + 8 × target_letter + 1.6 × decoder_target_ctc`. Apply these weights to raw sums before dividing by the main sample size. The three separately normalized auxiliary losses are unweighted. The transfer optimizer adds the alignment term during training. Validation evaluates the full Dev set with teacher-forced target units and uses the Unit loss for checkpoint selection.
 
-| Signal | Common metric or separate series | Baseline source and compatibility |
+| Signal | Shared schema-v2 key | Baseline source, units, and scope |
 | --- | --- | --- |
-| Train Unit loss | **`train/main_loss`** | `train.unit_loss × ln(2)` from `training-monitor.json`, or `train_unit_loss × ln(2)` from its CSV. One logical update, label-smoothed Unit loss in nats per main target token. Use only transfer rows known to contain the smoothed Unit term. |
-| Dev Unit loss | **`dev/main_loss`** | `dev.unit_loss` / `dev_unit_loss`. Full-Dev label-smoothed Unit loss in bits per main target token. |
-| Learning rate | **`train/learning_rate`** | `learning_rate` from the monitor. Both reporters read Fairseq's `get_lr()` after the completed update. The registered run uses inverse square root scheduling with 10,000 warmup updates, initial warmup rate `1e-7`, and configured rate `0.0005`. |
-| Dev weighted task loss | **`dev/loss`** | `dev.loss` / `dev_loss`. Both include the weighted S2UT auxiliaries, in bits per main target token. The transfer reporter reads Fairseq's full-Dev log and its value may be rounded. |
-| Dev auxiliary losses | **`dev/multitask_<task>_loss`** | `dev.<task>` / `dev_<task>` for the three tasks above. Both use full-Dev, unweighted bits per auxiliary sample unit. Transfer points depend on available Fairseq logs. |
-| Train weighted task loss | Proposed **`train/task_loss`** | `train.loss × ln(2)` / `train_loss × ln(2)`. Its transfer counterpart is the existing `alignment/task_loss`. A consumer can compare these two series or expose a common alias. Keep the existing transfer history keys. |
-| Train optimization loss | Keep **`train/total_loss`** and **`train/loss_fairseq`** on transfer | The transfer objective includes the weighted alignment loss. `train/total_loss` is the logical update in nats. `train/loss_fairseq` is the Fairseq logging window in bits. Import Baseline task loss under `train/task_loss`. |
-| Train auxiliary losses | **`train/aux/<task>_loss_bits`** for Baseline monitor values | The sparse monitor captures one logical update. The existing transfer `train/multitask_<task>_loss` aggregates Fairseq's logging window. A future Baseline reporter may use the latter key when it uses a matching Fairseq window. |
-| Fairseq Unit loss diagnostics and NLL | Keep existing Fairseq series distinct | `train/main_loss_fairseq` is the smoothed Unit loss in nats over the Fairseq logging window. `dev/main_loss_fairseq` is the corresponding full-Dev diagnostic in nats when recorded. Any legacy Unit NLL fallback belongs under a separate key such as `train/unit_nll_legacy_nats` in a derived export. Monitor `unit_loss` cannot reconstruct `train/nll_loss`, `dev/nll_loss`, or perplexity. |
+| Train Unit CE | `train/unit_ce_nats` | `train.unit_loss × ln(2)` from `training-monitor.json`, or `train_unit_loss × ln(2)` from its CSV. One logical update, label-smoothed Unit CE in nats per main target token. |
+| Train weighted Task Loss | `alignment/update/task_loss` | `train.loss × ln(2)` / `train_loss × ln(2)`. One logical update in nats per main target token. The Transfer key records the shared weighted S2UT task term before the alignment loss is added. |
+| Learning Rate | `train/update/learning_rate` | The monitor's `learning_rate`. Both use Fairseq's `get_lr()` after the completed optimizer update. No unit conversion. |
+| Dev Unit CE | `dev/main_loss` | `dev.unit_loss` / `dev_unit_loss`. Already shared. Full-Dev label-smoothed Unit CE in bits per main target token. |
+| Dev Total Loss | `dev/full/loss` | `dev.loss` / `dev_loss`. Full-Dev weighted S2UT task loss in bits per main target token. Preserve the available precision of each reporter. |
+| Dev Source Letter Loss | `dev/full/multitask_source_letter_loss` | `dev.source_letter` / `dev_source_letter`. Full-Dev unweighted bits per Source Letter criterion sample unit. |
+| Dev Target Letter Loss | `dev/full/multitask_target_letter_loss` | `dev.target_letter` / `dev_target_letter`. Full-Dev unweighted bits per Target Letter criterion sample unit. |
+| Dev decoder-target CTC Loss | `dev/full/multitask_decoder_target_ctc_loss` | `dev.decoder_target_ctc` / `dev_decoder_target_ctc`. Full-Dev unweighted bits per decoder-target CTC criterion sample unit. |
+
+The Baseline importer and reporter should use the same mapping and the existing durable outbox on the existing Baseline Run ID. Keep legacy Baseline keys `train/main_loss`, `train/task_loss`, `train/learning_rate`, `dev/loss`, and `dev/multitask_*` available for existing charts. `dev/main_loss` and the qualified BLEU keys already match. For schema-v2 append, compare existing values by `(update, metric key)` so a partial record does not suppress missing keys. On disagreement, stop before publishing. Keep `update` as the metric axis and preserve the `train/max_update` watermark.
+
+- Transfer optimization loss includes the alignment term and remains in `train/update/optimization_loss_nats` and `train/window/loss_fairseq`. Baseline uses the shared Task Loss key above.
+- Baseline's logical-update auxiliary keys `train/aux/<task>_loss_bits` and Transfer's Fairseq-window keys `train/window/multitask_<task>_loss` have different scopes. A matching Baseline window can use the latter when recorded with the same aggregation.
+- Use `train/window/main_loss_fairseq` for a matching recorded CE window. NLL and perplexity require their own measurements. Omit them when the Baseline has only CE. Full-Dev NLL and perplexity require separately measured full-Dev data.
 
 The Baseline monitor samples training every 100 updates and Dev every 1,000. The transfer reporter can also log update 1 and the current published checkpoint. Blank Dev cells in the Baseline CSV mean validation was unscheduled at that update. Preserve gaps and compare like aggregation windows. Attention metrics under `alignment/*` are transfer diagnostics; the Baseline has no measurements for them.
 

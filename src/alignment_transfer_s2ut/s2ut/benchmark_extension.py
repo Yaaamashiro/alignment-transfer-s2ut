@@ -175,6 +175,7 @@ class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
         loss = task_loss + size * alignment
         logs.update(diagnostics)
         logs["alignment/task_loss"] = task_loss.detach() / size
+        logs["alignment/weighted_loss"] = alignment.detach()
         logs.update(loss=loss.detach(), alignment_metric_weight=size)
         return loss, size, logs
 
@@ -185,23 +186,56 @@ class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
         if weighted:
             total = sum(log["alignment_metric_weight"] for log in weighted)
             for key in weighted[0]:
-                if key.startswith("alignment/"):
-                    if key == "alignment/worst_layer":
-                        continue
-                    if key.startswith(("alignment/selected_frames_", "alignment/valid_rows_")):
-                        metrics.log_scalar(key, sum(log.get(key,0) for log in weighted))
-                        continue
-                    metrics.log_scalar(key, sum(log.get(key, 0) * log["alignment_metric_weight"] for log in weighted) / total, total)
-            layer_keys=sorted((k for k in weighted[0] if k.startswith("alignment/D_")),key=lambda k:int(k.rsplit("_",1)[1]))
-            values=[sum(float(log[key]) * log["alignment_metric_weight"] for log in weighted)/total for key in layer_keys]
-            metrics.log_scalar("alignment/worst_layer", max(range(len(values)),key=values.__getitem__))
-            for layer in range(len(values)):
-                fraction=sum(log["alignment_metric_weight"] for log in weighted if log["alignment/worst_layer"]==layer)/total
-                metrics.log_scalar(f"alignment/worst_layer_fraction_{layer}",fraction,total)
+                if not key.startswith("alignment/") or key == "alignment/worst_layer":
+                    continue
+                if key.startswith(("alignment/selected_frames_", "alignment/valid_rows_")):
+                    metrics.log_scalar(key, sum(log[key] for log in weighted))
+                else:
+                    metrics.log_scalar(key, sum(log[key] * log["alignment_metric_weight"] for log in weighted) / total, total)
+            losses = {}
+            for key in sorted(weighted[0]):
+                if not key.startswith("alignment/D_"):
+                    continue
+                layer = int(key.rsplit("_", 1)[1])
+                if any(log[f"alignment/valid_rows_{layer}"] > 0 for log in weighted):
+                    losses[layer] = float(sum(log[key] * log["alignment_metric_weight"] for log in weighted) / total)
+                fraction = sum(log["alignment_metric_weight"] for log in weighted if log["alignment/worst_layer"] == layer) / total
+                metrics.log_scalar(f"alignment/worst_layer_fraction_{layer}", fraction, total)
+            if losses:
+                # Latest logical update only. A log window has its own argmax over window layer losses.
+                metrics.log_scalar("alignment/worst_layer", max(sorted(losses), key=losses.__getitem__), weight=0)
         main = [log for log in logging_outputs if "native_main_loss_sum" in log]
         if main:
             count = sum(log["sample_size"] for log in main)
             metrics.log_scalar("train/main_loss", sum(log["native_main_loss_sum"] for log in main) / count, count)
+            metrics.log_scalar("train/optimization_loss_nats", sum(log["loss"] for log in main) / count, count)
+            tokens = sum(log["ntokens"] for log in main)
+            if tokens > 0 and all("nll_loss" in log for log in main):
+                metrics.log_scalar("train/unit_nll_nats", sum(log["nll_loss"] for log in main) / tokens, tokens)
+
+
+def metric_scalar(value):
+    if torch.is_tensor(value):
+        if value.ndim != 0 or value.is_complex():
+            return None
+        value = value.detach().item()
+    if type(value) in (int, float) and math.isfinite(value):
+        return value
+    return None
+
+
+def training_metric_row(result, update, learning_rate, seconds):
+    row = {"step": update, "metric_schema": 2}
+    for key, value in {**result, "train/learning_rate": learning_rate, "train/seconds": seconds}.items():
+        if not key.startswith(("alignment/", "train/")):
+            continue
+        value = metric_scalar(value)
+        if value is None or key == "alignment/task_only_start" and value < 0:
+            continue
+        if key == "alignment/worst_layer" and not (value >= 0 and value == int(value)):
+            continue
+        row["train/unit_ce_nats" if key == "train/main_loss" else key] = value
+    return row
 
 
 def rng_state(model):
@@ -249,6 +283,7 @@ def completed_step(trainer, samples, step, max_retries=32):
             old = float(scaler.loss_scale)
             result = step(samples)
             if trainer.get_num_updates() == before + 1 and result is not None:
+                result["train/overflow_retries"] = attempt
                 return result
             new = float(scaler.loss_scale)
             if entered or trainer.get_num_updates() != before or result is not None or not 0 < new < old or not math.isfinite(old):
@@ -311,25 +346,31 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                 converted["alignment_prior"] = sample["alignment_prior"]  # Never round a probability prior to FP16.
             return converted
 
+        def _reduce_and_log_stats(self, logging_outputs, sample_size, grad_norm=None):
+            result = super()._reduce_and_log_stats(logging_outputs, sample_size, grad_norm)
+            measured = metric_scalar(grad_norm)
+            if measured is not None:
+                result["train/gradient_norm"] = measured
+                if self.cfg.optimization.clip_norm > 0:
+                    result["train/clip_applied"] = int(measured > self.cfg.optimization.clip_norm)
+            return result
+
         def train_step(self, samples, *args, **kwargs):
+            before = self.get_num_updates()
             step = lambda values: super(Trainer, self).train_step(values, raise_oom=True)
             result = step(samples) if os.environ.get("S2ST_TRAIN_STAGING") else completed_step(self, samples, step)
-            if result is not None:
+            if result is not None and self.get_num_updates() == before + 1:
                 path = Path(self.cfg.checkpoint.save_dir).parent / "alignment-train.jsonl"
-                row = {"step": self.get_num_updates(), **{k: float(v) for k, v in result.items()
-                    if k.startswith(("alignment/", "train/")) and isinstance(v, (int, float))}}
-                if "alignment/worst_layer" in row:
-                    row["alignment/worst_layer"] = int(row["alignment/worst_layer"])
-                row.update({"train/total_loss": float(result.get("loss", 0)) * math.log(2),
-                    "train/learning_rate": self.get_lr(), "train/gradient_norm": float(result.get("gnorm", 0)),
-                    "train/seconds": self.cumulative_training_time()})
+                row = training_metric_row(result, self.get_num_updates(), self.get_lr(), self.cumulative_training_time())
+                scaler = getattr(self.optimizer, "scaler", None) if self.cfg.common.fp16 else None
+                scale = metric_scalar(getattr(scaler, "loss_scale", None))
+                if scale is not None:
+                    row["train/loss_scale"] = scale
                 policy = getattr(self.task, "transfer_policy", None)
                 if policy is not None:
                     row["coefficient_policy"] = coefficient_policy(policy, self.task.training_budget)
                     row.update(method=policy["method"], alignment_contract_hash=contract_hash,
                                experiment_run=str(path.parent))
-                if "train/main_loss" not in row:
-                    row["train/main_loss"] = float(result.get("nll_loss", 0)) * math.log(2)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 import json
                 with path.open("a", encoding="utf-8") as stream:

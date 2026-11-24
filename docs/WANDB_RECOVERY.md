@@ -1,5 +1,7 @@
 # W&B metric recovery
 
+Use [the metric audit and schema-v2 migration](WANDB_METRIC_AUDIT.md) for corrected series and stand-alone historical sync. The metric names below describe the legacy reporter. Its native `train/main_loss` can contain the Unit NLL fallback and should be excluded from matched Unit CE charts.
+
 The telemetry reader uses native JSONL and Fairseq process logs. Each condition resumes its existing contract-derived W&B run.
 
 For joint Baseline and transfer reporting, use the [matched S2UT metric definitions and importer conventions](WANDB_BASELINE_COMPARISON.md).
@@ -19,7 +21,7 @@ A Fairseq log can contribute when the recorded trainer command matches the publi
 ## Resume in the current Colab runtime
 
 1. In each Colab, wait for the desired `[recovery] ... durable_updates=...` line. Check that the corresponding folder under Drive's training stage has both `snapshot.json` and `snapshot.zip`. Interrupt the running cell and wait for it to exit. Keep the runtime connected and Drive mounted.
-2. In the existing notebook, edit **Storage and pinned environment**. Copy `REPO_REVISION` and `NOTEBOOK_UPDATED_AT` from [release.json](../notebooks/colab/release.json). Keep the original experiment IDs, inputs, transfer conditions, coefficients, mode, W&B project/entity, and secret. Run that cell and **Verify Git revisions and record the notebook update time**. This fetches the fixed SHA and verifies both checkouts. The already installed training package comes from byte-identical sources.
+2. In the existing notebook, edit **Storage and pinned environment**. Copy `REPO_REVISION` and `NOTEBOOK_UPDATED_AT` from [release.json](../notebooks/colab/release.json). Keep the original experiment IDs, inputs, transfer conditions, coefficients, mode, W&B project/entity, and secret. Run that cell and **Verify Git revisions and record the notebook update time**. This fetches the fixed SHA and verifies both checkouts. The notebook's editable install reads the updated checkout in the next process. An environment using a non-editable build must reinstall from the fixed revision before training.
 3. Run **Train the selected transfer conditions** in each runtime with that runtime's original method selection. It reuses `/content/alignment-transfer-work/<EXPERIMENT_ID>`, including `execution/`, and the same Drive stage. The trainer restores the latest verified checkpoint and the W&B reader backfills the saved history.
 4. Check `[wandb] connected` and the added metrics in the existing W&B run. The link also appears in `execution/notebook-events.log`. Optimizer updates after the last durable checkpoint may be replayed. A runtime reset can remove the local Fairseq history needed for backfill.
 

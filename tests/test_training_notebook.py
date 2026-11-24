@@ -48,6 +48,21 @@ def test_primary_notebooks_share_the_alignment_revision(tmp_path):
     assert len(revisions[0]) == 40 and revisions[0] == revisions[1]
 
 
+def test_pilot_display_reads_schema_v2_loss_fields(tmp_path, capsys):
+    display_cell = next(code for code in cells("training").values() if "alignment-train.jsonl" in code)
+    loop = next(node for node in ast.walk(ast.parse(display_cell)) if isinstance(node, ast.For)
+                and isinstance(node.iter, ast.Name) and node.iter.id == "folders")
+    row = {"step": 300, "train/unit_ce_nats": 1.8, "train/optimization_loss_nats": 2.7,
+           "train/total_loss": 999.0}
+    (tmp_path / "alignment-train.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    code = compile(ast.Module(body=[loop], type_ignores=[]), "pilot-display", "exec")
+    exec(code, dict(folders=[tmp_path], json=json, curves=tmp_path,
+                    Image=lambda **kwargs: None, display=lambda image: None))
+    output = capsys.readouterr().out
+    assert "'train/unit_ce_nats': 1.8" in output and "'train/optimization_loss_nats': 2.7" in output
+    assert "train/total_loss" not in output
+
+
 def test_transfer_id_isolates_transfer_paths_and_reuses_original_inputs(tmp_path):
     changed = []
     for name in ("training", "evaluate"):
