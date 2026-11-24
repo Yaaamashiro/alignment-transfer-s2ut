@@ -3,6 +3,7 @@ from native_plan_fixture import fixture_plan
 from argparse import Namespace
 from copy import deepcopy
 from pathlib import Path
+import math
 import shutil
 import numpy as np
 import pytest
@@ -495,13 +496,49 @@ def test_fp16_overflow_retry_preserves_batch_rng_and_buffers():
         optimizer.step()
         updates[0] += 1
         return {"completed": True}
-    assert completed_step(trainer, samples, step) == {"completed": True}
+    assert completed_step(trainer, samples, step) == {"completed": True, "train/overflow_retries": 1}
     assert torch.equal(*observed) and model.num_batches_tracked.item() == 1
     def ambiguous(values):
         optimizer.step()
         scaler.loss_scale /= 2
     with pytest.raises(RuntimeError, match="refusing to skip"):
         completed_step(trainer, samples, ambiguous)
+
+
+def test_native_metric_reduction_preserves_ce_and_tensor_diagnostics():
+    from fairseq.criterions.label_smoothed_cross_entropy import label_smoothed_nll_loss
+    from fairseq.logging import metrics
+    from alignment_transfer_s2ut.s2ut.benchmark_extension import AlignmentCriterion, training_metric_row
+
+    log_probs = torch.tensor([0.8, 0.15, 0.05]).log()
+    per_token = -(.8 * log_probs[0] + .1 * (log_probs[1] + log_probs[2]))
+    logs = []
+    for count, worst in ((1, 0), (3, 1)):
+        ce, nll = label_smoothed_nll_loss(log_probs.expand(count, -1), torch.zeros(count, 1, dtype=torch.long), .2)
+        logs.append({"native_main_loss_sum": ce, "loss": ce + count, "nll_loss": nll,
+                     "sample_size": count, "ntokens": count, "alignment_metric_weight": count,
+                     "alignment/D_0": torch.tensor(2.0 if worst == 0 else 0.0),
+                     "alignment/D_1": torch.tensor(1.0 if worst == 1 else 0.0),
+                     "alignment/valid_rows_0": torch.tensor(count), "alignment/valid_rows_1": torch.tensor(count),
+                     "alignment/teacher_entropy": torch.tensor(float(worst)), "alignment/worst_layer": worst})
+
+    with metrics.aggregate(new_root=True) as agg:
+        AlignmentCriterion.reduce_metrics(logs)
+        result = agg.get_smoothed_values()
+    assert torch.is_tensor(result["train/main_loss"])
+    assert not isinstance(result["train/main_loss"], (int, float))
+    assert float(result["nll_loss"]) * math.log(2) == pytest.approx(-float(log_probs[0]), abs=.001)
+    row = training_metric_row({**result, "alignment/coverage_0": torch.tensor(0.),
+                               "alignment/invalid": torch.tensor(float("nan")),
+                               "alignment/vector": torch.tensor([1.])}, 100, .001, 2.)
+    assert row["train/unit_ce_nats"] == pytest.approx(float(per_token))
+    assert row["train/unit_nll_nats"] == pytest.approx(-float(log_probs[0]))
+    assert row["train/optimization_loss_nats"] == pytest.approx(float(per_token) + 1.)
+    assert row["alignment/teacher_entropy"] == .75 and row["alignment/valid_rows_0"] == 4
+    assert row["alignment/worst_layer"] == 1 and row["alignment/worst_layer_fraction_1"] == .75
+    assert row["alignment/coverage_0"] == 0
+    assert not {"train/main_loss", "train/gradient_norm", "alignment/vector", "alignment/invalid"} & row.keys()
+    assert "train/unit_ce_nats" not in training_metric_row({"nll_loss": 1.}, 101, 0., 0.)
 
 
 def test_registration_rejects_changed_data_and_recipe(native_data):

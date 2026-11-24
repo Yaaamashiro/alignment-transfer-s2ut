@@ -20,6 +20,11 @@ from transfer_bleu import CHECKPOINT, PLAN, SHA256, evaluation_scope, publishabl
 
 
 REPORTER_SESSION = "wandb_reporter_session"
+TRAIN_UPDATE = "wandb_train_update_v2"
+TRAIN_WINDOW = "wandb_train_window_v2"
+DEV_WINDOW = "wandb_dev_full_v2"
+DEV_UPDATE = "wandb_dev_update"
+LEGACY_LOGICAL_TRAIN = {"train/learning_rate", "train/seconds"}
 
 
 class MetricReader:
@@ -97,7 +102,10 @@ DURABLE = re.compile(rb"^\[recovery\] learned_at_least=\d+ durable_updates=(\d+)
 TRAIN_FIELDS = {
     "loss": "train/loss_fairseq", "nll_loss": "train/nll_loss", "ppl": "train/perplexity",
     "loss_scale": "train/loss_scale", "clip": "train/clip_fraction", "oom": "train/oom",
+    "gnorm": "train/gradient_norm",
     "train/main_loss": "train/main_loss_fairseq",
+    "train/unit_nll_nats": "train/unit_nll_nats",
+    "train/optimization_loss_nats": "train/optimization_loss_nats",
 }
 
 
@@ -323,7 +331,7 @@ def set_training_progress(run, published):
     name = "train/max_update"
     previous = number(run.summary.get(name)) or 0
     training = number(run.summary.get("wandb_train_update")) or 0
-    maximum = int(max(published, previous, training))
+    maximum = int(max(published, previous, training, number(run.summary.get(TRAIN_UPDATE)) or 0))
     if maximum != previous:
         run.summary[name] = maximum
 
@@ -357,6 +365,76 @@ def sync_saved_bleu(args):
             run.finish()
 
 
+def metric_history(run, marker):
+    # scan_history is unsampled. Do not use the Summary watermark to hide holes.
+    updates = set()
+    for row in run.scan_history(keys=[marker]):
+        value = number(row.get(marker))
+        if value is not None and value > 0 and value == int(value):
+            updates.add(int(value))
+    return updates
+
+
+def metric_snapshot(args):
+    plan = (args.work / PLAN).read_bytes()
+    contract = json.loads(plan)["contract_hash"]
+    plan_sha = hashlib.sha256(plan).hexdigest()
+    snapshot = published_snapshot(args.work.resolve(), args.backup, plan_sha, 0, args.method)
+    if snapshot is None:
+        raise ValueError("No matching published checkpoint for metric backfill")
+    published, command, _ = snapshot
+    return contract, published, command
+
+
+def audit_saved_metrics(args):
+    contract, published, command = metric_snapshot(args)
+    legacy, logical = {}, {}
+    for row in MetricReader(args.work / "alignment-train.jsonl").rows(published):
+        if row.get("alignment_contract_hash", contract) != contract:
+            continue
+        step = row["step"]
+        logical.setdefault(step, {}).update(logical_train_metrics(row))
+        value = number(row.get("train/main_loss"))
+        if row.get("metric_schema") is None and value is not None:
+            legacy[step] = value
+    window = dict(FairseqProgressReader(args.logs).rows(command, contract, published))
+    paired = [{"update": step, "legacy_update_main_loss_nats": legacy[step],
+               "window_unit_ce_nats": row.get("train/main_loss_fairseq"),
+               "window_unit_nll_nats": row["train/nll_loss"] * math.log(2)}
+              for step, row in window.items() if step in legacy and "train/nll_loss" in row]
+    print(json.dumps({"run_id": run_id(contract), "published_update": published,
+                      "legacy_main_loss_rows": len(legacy),
+                      "legacy_main_loss_min": min(legacy.values(), default=None),
+                      "verified_update_unit_ce_rows": sum("train/unit_ce_nats" in row for row in logical.values()),
+                      "window_unit_ce_rows": sum("train/main_loss_fairseq" in row for row in window.values()),
+                      "paired_update_and_window_rows": len(paired),
+                      "examples": paired[-10:]}, allow_nan=False))
+
+
+def sync_saved_metrics(args):
+    contract, published, command = metric_snapshot(args)
+    with writer_lock(contract):
+        owner_path = writer_path(contract, ".owner.json")
+        if not owner_path.is_file():
+            raise RuntimeError("Metric backfill requires the stopped reporter's owning Colab runtime")
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        import wandb
+        # open_run checks the remote state, condition, and latest writer session; it uses resume=must.
+        run = open_run(wandb, args, contract, owner=owner)
+        try:
+            remote = wandb.Api(timeout=20).run(f"{owner['entity']}/{args.project}/{run_id(contract)}")
+            known = {name: metric_history(remote, name) for name in (TRAIN_UPDATE, TRAIN_WINDOW, DEV_WINDOW, DEV_UPDATE)}
+            counts = {name: len(steps) for name, steps in known.items()}
+            sync_rows(run, MetricReader(args.work / "alignment-train.jsonl"),
+                      MetricReader(args.work / "native-dev.jsonl"), published, {}, known, contract=contract)
+            sync_logged_layers(run, FairseqProgressReader(args.logs), command, contract, published, {}, known)
+            set_training_progress(run, published)
+            written = sum(len(known[name]) - count for name, count in counts.items())
+        finally:
+            run.finish()
+        log_event("wandb-metrics", "synced", args.logs, f"{written} historical metric rows through update {published}")
+
+
 def report(args, stop):
     import wandb
 
@@ -365,7 +443,7 @@ def report(args, stop):
     dev = MetricReader(work / "native-dev.jsonl")
     layers = FairseqProgressReader(args.logs)
     published = 0
-    watermarks, native_alignment = {}, {}
+    watermarks = {}
     sent_bleu = {}
     published_command = None
     run = None
@@ -387,9 +465,9 @@ def report(args, stop):
                             run.summary[REPORTER_SESSION] = session
                         set_training_progress(run, published)
                     if run is not None:
-                        sync_rows(run, train, dev, published, watermarks, native_alignment)
+                        sync_rows(run, train, dev, published, watermarks, contract=args.contract)
                         sync_logged_layers(run, layers, published_command, args.contract, published,
-                                           watermarks, native_alignment)
+                                           watermarks)
                         if getattr(args, "bleu_results", None) and (snapshot is not None or finishing):
                             try:
                                 points = saved_bleu_points(args, plan_sha, published, contract=args.contract)
@@ -409,41 +487,75 @@ def report(args, stop):
         return {"entity": run.entity, "project": args.project, "method": args.method, "session": session}
 
 
-def sync_rows(run, train, dev, published, watermarks, native_alignment):
-    for reader, prefixes, progress in ((train, ("train/", "alignment/"), "wandb_train_update"),
-                                       (dev, ("dev/",), "wandb_dev_update")):
-        sent = watermarks.get(progress)
-        if sent is None:
-            sent = run.summary.get(progress) or 0
-            watermarks[progress] = sent
+def publish_metrics(run, progress, update, values, watermarks, known):
+    previous = watermarks.setdefault(progress, number(run.summary.get(progress)) or 0)
+    duplicate = update <= previous if known is None else update in known[progress]
+    if not values or duplicate:
+        return
+    run.log({**values, "update": update, progress: update})
+    watermarks[progress] = max(previous, update)
+    # Preserve the high-water mark when explicitly filling an earlier gap.
+    if update < previous:
+        run.summary[progress] = previous
+    if known is not None:
+        known[progress].add(update)
+
+
+def logical_train_metrics(row):
+    modern = row.get("metric_schema") == 2
+    output = {}
+    for key, value in row.items():
+        if type(value) not in (int, float) or number(value) is None:
+            continue
+        if key.startswith("train/") and (modern or key in LEGACY_LOGICAL_TRAIN):
+            if key not in {"train/main_loss", "train/total_loss"}:
+                destination = key if key == "train/unit_ce_nats" else "train/update/" + key.removeprefix("train/")
+                output[destination] = value
+        elif key.startswith("alignment/") and (modern or key != "alignment/worst_layer"):
+            if key != "alignment/task_only_start" or value >= 0:
+                output["alignment/update/" + key.removeprefix("alignment/")] = value
+    return output
+
+
+def sync_rows(run, train, dev, published, watermarks, known=None, *, contract=None):
+    for reader, progress in ((train, TRAIN_UPDATE), (dev, DEV_UPDATE)):
         for row in reader.rows(published):
             update = row["step"]
+            if reader is train and contract is not None and row.get("alignment_contract_hash", contract) != contract:
+                continue
             if reader is train and update != 1 and update % 100 and update != published:
                 continue
-            values = {key: value for key, value in row.items()
-                      if key.startswith(prefixes) and type(value) in (int, float) and math.isfinite(value)}
-            if reader is train:
-                native_alignment[update] = {key for key in values if key.startswith("alignment/")}
-            if values and update > sent:
-                run.log({**values, "update": update, progress: update})
-                sent = watermarks[progress] = update
+            values = logical_train_metrics(row) if reader is train else {
+                key: value for key, value in row.items()
+                if key.startswith("dev/") and type(value) in (int, float) and number(value) is not None}
+            publish_metrics(run, progress, update, values, watermarks, known)
 
 
-def sync_logged_layers(run, reader, command, contract, published, watermarks, native_alignment):
-    """Backfill Fairseq diagnostics at their original optimizer updates."""
-    progress = "wandb_layer_update"
-    sent = watermarks.get(progress)
-    if sent is None:
-        sent = run.summary.get(progress) or 0
-        watermarks[progress] = sent
+def window_alignment(values):
+    output = {"alignment/window/" + key.removeprefix("alignment/"): value
+              for key, value in values.items() if key.startswith("alignment/")
+              and key not in {"alignment/worst_layer", "alignment/task_only_start"}}
+    losses = {int(key.rsplit("_", 1)[1]): value for key, value in values.items()
+              if re.fullmatch(r"alignment/D_\d+", key)}
+    present = {layer: values.get(f"alignment/valid_rows_{layer}") for layer in losses}
+    valid = sorted(layer for layer, count in present.items() if count is not None and count > 0)
+    if valid and all(count is not None for count in present.values()):
+        output["alignment/window/worst_layer"] = max(valid, key=losses.__getitem__)
+    return output
+
+
+def sync_logged_layers(run, reader, command, contract, published, watermarks, known=None):
+    """Keep train log-window metrics and full-Dev metrics separate from update rows."""
     for update, values in reader.rows(command, contract, published):
-        if update <= sent:
-            continue
-        native = native_alignment.get(update, ())
-        values = {key: value for key, value in values.items() if key not in native}
-        if values:
-            run.log({**values, "update": update, progress: update})
-            sent = watermarks[progress] = update
+        window = {"train/window/" + key.removeprefix("train/"): value for key, value in values.items()
+                  if key.startswith("train/")}
+        if "train/window/clip_fraction" in window:
+            window["train/window/clip_fraction"] /= 100
+        window.update(window_alignment(values))
+        full_dev = {"dev/full/" + key.removeprefix("dev/"): value for key, value in values.items()
+                    if key.startswith("dev/")}
+        publish_metrics(run, TRAIN_WINDOW, update, window, watermarks, known)
+        publish_metrics(run, DEV_WINDOW, update, full_dev, watermarks, known)
 
 
 def supervise(args):
@@ -484,11 +596,24 @@ def main():
     parser.add_argument("--entity")
     parser.add_argument("--bleu-results", type=Path)
     parser.add_argument("--after-training", type=json.loads)
-    parser.add_argument("--sync-bleu-only", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--sync-bleu-only", action="store_true")
+    modes.add_argument("--sync-metrics-only", action="store_true")
+    modes.add_argument("--audit-metrics-only", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command[:1] == ["--"]:
         args.command = args.command[1:]
+    if args.sync_metrics_only:
+        if args.command or args.after_training:
+            parser.error("--sync-metrics-only requires no training command")
+        sync_saved_metrics(args)
+        return
+    if args.audit_metrics_only:
+        if args.command or args.after_training:
+            parser.error("--audit-metrics-only requires no training command")
+        audit_saved_metrics(args)
+        return
     if args.sync_bleu_only:
         if not args.bleu_results or args.command or args.after_training:
             parser.error("--sync-bleu-only requires --bleu-results and no training command")

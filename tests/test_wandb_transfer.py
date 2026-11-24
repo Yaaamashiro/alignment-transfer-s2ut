@@ -39,7 +39,7 @@ def test_tracking_resumes_and_uploads_only_published_numeric_rows(tmp_path, monk
     work.mkdir()
     (work / "native-run.json").write_text('{"contract_hash":"matching-plan"}', encoding="utf-8")
     (work / "alignment-train.jsonl").write_text(
-        "".join(json.dumps({"step": step, "train/main_loss": 1.5, "alignment/lambda": 10.,
+        "".join(json.dumps({"step": step, "metric_schema": 2, "train/unit_ce_nats": 1.5, "alignment/lambda": 10.,
                             "experiment_run": "/private/path", "train/seconds": float("nan")}) + "\n"
                 for step in range(1, 102)), encoding="utf-8")
     (work / "native-dev.jsonl").write_text('{"step":100,"dev/main_loss":2.5}\n', encoding="utf-8")
@@ -63,10 +63,11 @@ def test_tracking_resumes_and_uploads_only_published_numeric_rows(tmp_path, monk
     done.set()
     tool["report"](args, done)
     assert [row["update"] for row in points] == [1, 100, 100]
-    assert all("experiment_run" not in row and "train/seconds" not in row for row in points)
+    assert all("experiment_run" not in row and "train/update/seconds" not in row for row in points)
+    assert points[0]["train/unit_ce_nats"] == 1.5
     publish_receipt(work, backup, 102)
     with (work / "alignment-train.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write('{"step":102,"train/main_loss":1.2}')
+        stream.write('{"step":102,"metric_schema":2,"train/unit_ce_nats":1.2}')
     tool["report"](args, done)
     assert len(points) == 3
     with (work / "alignment-train.jsonl").open("a", encoding="utf-8") as stream:
@@ -200,7 +201,7 @@ def test_reuses_training_run_for_saved_bleu_and_preserves_history(tmp_path, monk
     (backup / "000000025000-fixture" / "snapshot.zip").unlink()
     points = tool["saved_bleu_points"](args, plan_sha, 50000, contract=contract)
     assert [step for step, _ in points] == [1000, 25000]
-    (work / "alignment-train.jsonl").write_text('{"step":100000,"train/main_loss":1.8}\n', encoding="utf-8")
+    (work / "alignment-train.jsonl").write_text('{"step":100000,"metric_schema":2,"train/unit_ce_nats":1.8}\n', encoding="utf-8")
     publish_receipt(work, backup, 100000)
     tool["report"](args, done)
     assert [row["update"] for row in history] == [50000, 25000, 1000, 100000]
@@ -294,7 +295,7 @@ run.finish()
 
 @pytest.mark.parametrize("prefix", ["INFO:{tag}:", "2026-11-18 00:00:00 | INFO | {tag} | "])
 @pytest.mark.parametrize("method", ["distillation", "mask_distillation", "annealed_distillation"])
-def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch, prefix, method):
+def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch, capsys, prefix, method):
     tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
     work, other, backup, logs = [tmp_path / name for name in ("work", "other", "backup", "logs")]
     for folder in (work, other, backup, logs):
@@ -374,32 +375,85 @@ def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch, pre
     done = Event()
     done.set()
     tool["report"](args, done)
-    recovered, = (p for p in points if "wandb_layer_update" in p)
+    marker = tool["TRAIN_WINDOW"]
+    recovered, = (p for p in points if marker in p)
     assert recovered["update"] == 100
-    for key in values.keys() & recovered.keys() - {"secret", "train/main_loss", "alignment/w_0", "alignment/lambda"}:
-        assert recovered[key] == float(values[key])
-    expected_metrics = set(values) - {"secret", "train/main_loss", "alignment/w_0", "alignment/lambda",
-                                      "alignment/tau", "alignment/invalid", "loss_scale"}
-    assert expected_metrics <= recovered.keys()
-    assert recovered["train/main_loss_fairseq"] == 2.7
-    assert recovered["train/loss_scale"] == 128
-    assert "alignment/foreign" not in recovered
-    assert recovered["dev/loss"] == 3.3 and recovered["dev/nll_loss"] == 2.9
-    assert {k for k in recovered if k in {"secret", "train/main_loss", "alignment/w_0", "alignment/lambda",
-                                           "alignment/tau", "alignment/invalid", "dev/main_loss"}} == set()
+    omitted = {"alignment/tau", "alignment/invalid", "alignment/task_only_start"}
+    for key in (k for k in values if k.startswith("alignment/") and k not in omitted | {"alignment/worst_layer"}):
+        assert recovered[key.replace("alignment/", "alignment/window/", 1)] == float(values[key])
+    assert recovered["alignment/window/worst_layer"] == 0  # argmax, not the old averaged 0.12
+    assert recovered["train/window/main_loss_fairseq"] == 2.7
+    assert recovered["train/window/loss_scale"] == 128
+    assert not ({"alignment/window/" + key.removeprefix("alignment/") for key in omitted | {"alignment/foreign"}} & recovered.keys())
+    full_dev, = (p for p in points if tool["DEV_WINDOW"] in p)
+    assert full_dev["dev/full/loss"] == 3.3 and full_dev["dev/full/nll_loss"] == 2.9
+    logical, = (p for p in points if tool["TRAIN_UPDATE"] in p)
+    assert logical["alignment/update/w_0"] == 0.4 and logical["alignment/update/lambda"] == 10.
+    assert not {"train/main_loss", "train/unit_ce_nats"} & logical.keys()
+    capsys.readouterr()
+    tool["audit_saved_metrics"](args)
+    audit = json.loads(capsys.readouterr().out)
+    assert audit["legacy_main_loss_rows"] == audit["window_unit_ce_rows"] == 1
+    assert audit["legacy_main_loss_min"] == 2.0 and audit["verified_update_unit_ce_rows"] == 0
 
     # A later snapshot cannot authorize the tail of a different attempt.
     publish_receipt(work, backup, 200, method=method)
     tool["report"](args, done)
-    assert [p["update"] for p in points if "wandb_layer_update" in p] == [100]
+    assert [p["update"] for p in points if marker in p] == [100]
     make_log("resumed", expected, [train(200, **{"alignment/w_4": ".74"}), checkpoint(200)])
     tool["report"](args, done)
-    assert [(p["update"], p["alignment/w_4"]) for p in points if "wandb_layer_update" in p] == [(100, .35), (200, .74)]
+    assert [(p["update"], p["alignment/window/w_4"]) for p in points if marker in p] == [(100, .35), (200, .74)]
     with historical.open("a", encoding="utf-8") as stream:
         stream.write(checkpoint(200))
         stream.write(prefix.format(tag="train_inner") + '{"num_updates": "300", "alignment/w_4":')
     tool["report"](args, done)
-    assert [p["update"] for p in points if "wandb_layer_update" in p] == [100, 200]
+    assert [p["update"] for p in points if marker in p] == [100, 200]
+
+
+def test_sync_only_fills_gaps_resumes_after_connection_failure(tmp_path, monkeypatch):
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    work.mkdir()
+    logs.mkdir()
+    contract = "matching-plan"
+    (work / "native-run.json").write_text(json.dumps({"contract_hash": contract}), encoding="utf-8")
+    (work / "alignment-train.jsonl").write_text("".join(
+        json.dumps({"step": step, "metric_schema": 2, "train/unit_ce_nats": 1.8}) + "\n"
+        for step in (100, 200, 300, 400)), encoding="utf-8")
+    publish_receipt(work, backup, 300)
+    marker = tool["TRAIN_UPDATE"]
+    history = [{marker: 300, "update": 300}]
+    summary = {marker: 300, "train/max_update": 300, tool["REPORTER_SESSION"]: "session"}
+    owner = dict(entity="entity", project="project", method="mask_distillation", session="session")
+    monkeypatch.setitem(tool["writer_lock"].__globals__, "gettempdir", lambda: str(tmp_path))
+    with tool["writer_lock"](contract):
+        tool["writer_path"](contract, ".owner.json").write_text(json.dumps(owner), encoding="utf-8")
+    remote = SimpleNamespace(config={"condition": "mask_distillation"}, state="finished", summary=summary,
+        scan_history=lambda keys: (row for row in history if keys[0] in row))
+    fail = [True]
+    def log(values):
+        if values["update"] == 200 and fail[0]:
+            fail[0] = False
+            raise OSError("temporary connection")
+        history.append(values)
+        summary.update(values)
+    def init(**kw):
+        assert kw["id"] == tool["run_id"](contract) and kw["resume"] == "must"
+        return SimpleNamespace(summary=summary, log=log, define_metric=lambda *a, **kw: None,
+                               url="https://wandb.ai/entity/project", finish=lambda: None)
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init, Settings=dict,
+                        Api=lambda **kw: SimpleNamespace(run=lambda path: remote)))
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, project="project", entity="entity",
+                              method="mask_distillation")
+    with pytest.raises(OSError, match="temporary connection"):
+        tool["sync_saved_metrics"](args)
+    tool["sync_saved_metrics"](args)
+    tool["sync_saved_metrics"](args)
+    assert [row["update"] for row in history] == [300, 100, 200]
+    assert summary[marker] == summary["train/max_update"] == 300
+    remote.state = "running"
+    with pytest.raises(RuntimeError, match="active"):
+        tool["sync_saved_metrics"](args)
 
 
 def test_reads_observed_colab_log_format():

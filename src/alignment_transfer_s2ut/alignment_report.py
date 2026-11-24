@@ -2,6 +2,7 @@
 import argparse
 from pathlib import Path
 import json
+import math
 import torch
 from . import benchmark as b
 from .alignment.losses import layer_statistics, worst_layer, METHOD_LABELS
@@ -63,12 +64,13 @@ def curves(runs,output):
     for run in map(Path,runs):
         rows=read_jsonl(run/"alignment-train.jsonl")
         fig,axes=plt.subplots(5,1,figsize=(10,14),constrained_layout=True)
-        for key in ("alignment/task_loss","train/main_loss","train/total_loss","alignment/loss"):
+        for key in ("alignment/task_loss", "train/unit_ce_nats", "train/optimization_loss_nats", "alignment/loss"):
             axes[0].plot([r["step"] for r in rows if key in r],[r[key] for r in rows if key in r],label=key)
         dev = run / "native-dev.jsonl"
         if dev.is_file():
             validation = read_jsonl(dev)
-            axes[0].plot([r["step"] for r in validation], [r["dev/main_loss"] for r in validation], label="Full dev unit loss")
+            axes[0].plot([r["step"] for r in validation], [r["dev/main_loss"] * math.log(2) for r in validation],
+                         label="Full-Dev Unit CE (nats/token)")
         for key in sorted({k for r in rows for k in r if k.startswith("alignment/D_")}):
             axes[1].plot([r["step"] for r in rows if key in r],[r[key] for r in rows if key in r],label=key)
         for key in sorted({k for r in rows for k in r if k.startswith("alignment/w_")}):

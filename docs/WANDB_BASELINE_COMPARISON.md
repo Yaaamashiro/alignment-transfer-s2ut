@@ -1,5 +1,7 @@
 # W&B metrics for the matched S2UT comparison
 
+Use [`train/unit_ce_nats` from metric schema v2](WANDB_METRIC_AUDIT.md) for corrected transfer comparisons. Baseline PR #1 has verified Unit CE in `train/main_loss`; that Baseline value can be published under the corrected key by its importer. The legacy transfer key can contain NLL. This document preserves the previous naming and records how the Baseline import was defined.
+
 This specification is for the Baseline importer and reporter in `ja-en-direct-s2st-benchmark`. The comparison is with `alignment-transfer-s2ut` PR #7 and the Baseline trained under the registered `paper_fisher_v1` recipe. Use the registered corpus, Fairseq revision, and scientific config when checking another Baseline. The pinned Baseline runtime is `0c0024ea888206149a3119bf096b86ba66d63b66`, with Fairseq at `3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99`.
 
 ## W&B destination
