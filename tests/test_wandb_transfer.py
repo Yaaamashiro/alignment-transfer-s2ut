@@ -127,6 +127,40 @@ def test_notebook_wraps_benchmark_without_altering_recovery_command(tmp_path):
     assert json.loads(tracking[tracking.index("--after-training") + 1])[-1] == "evaluate"
 
 
+@pytest.mark.parametrize("bucket", ["", "shared"])
+def test_recovery_notebook_uses_only_cpu_audit_and_wandb(tmp_path, monkeypatch, bucket):
+    source, ns = namespace(tmp_path, "training")
+    recovery = source["wandb-recovery"]
+    calls, authenticated = [], []
+    monkeypatch.setitem(sys.modules, "google.colab", SimpleNamespace(
+        userdata=SimpleNamespace(get=lambda name: "only-in-env"),
+        auth=SimpleNamespace(authenticate_user=lambda: authenticated.append(True)),
+    ))
+    ns.update(execute=lambda *args, **kwargs: calls.append((args, kwargs)), log_event=lambda *args: None,
+              WANDB_PROJECT="project", WANDB_ENTITY="entity", WANDB_WRITER_BUCKET=bucket,
+              TRANSFER_EXPERIMENT_ID="fixed-trial", EXPERIMENT_ID="experiment-001")
+    exec(recovery, ns)
+    assert not calls
+    enabled = recovery.replace("RECOVER_WANDB_METRICS = False", "RECOVER_WANDB_METRICS = True")
+    with pytest.raises(ValueError, match="confirm"):
+        exec(enabled, ns)
+    assert not calls
+    exec(enabled.replace("CONFIRM_WANDB_WRITERS_STOPPED = False", "CONFIRM_WANDB_WRITERS_STOPPED = True"), ns)
+    assert len(calls) == 5
+    assert "--audit-metrics-only" in calls[0][0]
+    assert any("wandb==0.31.0" in args for args, _ in calls)
+    assert ("google-cloud-storage==3.4.1" in calls[-2][0]) == bool(bucket)
+    assert bool(authenticated) == bool(bucket)
+    command, options = calls[-1]
+    assert command[command.index("--group") + 1] == "experiment-001/fixed-trial"
+    assert command[command.index("--method") + 1] == "distillation"
+    assert {"--sync-metrics-only", "--recover-writer", "--confirm-writers-stopped"} <= set(command)
+    assert ("--writer-bucket" in command) == bool(bucket)
+    assert "only-in-env" not in command and options["env"]["WANDB_API_KEY"] == "only-in-env"
+    assert options["env"]["WANDB_WRITER_BUCKET"] == bucket
+    assert options["env"]["AT_LOG_WANDB_DRAIN"] == "1"
+
+
 def test_reuses_training_run_for_saved_bleu_and_preserves_history(tmp_path, monkeypatch):
     from test_transfer_bleu import bleu
 
@@ -581,6 +615,131 @@ def test_cold_metric_recovery_verifies_run_and_snapshot_and_blocks_other_vms(tmp
         tool["sync_saved_metrics"](args)
 
 
+@pytest.mark.parametrize("existing_session", ["old-reporter", None])
+def test_manual_recovery_restores_ownership_without_adding_history(tmp_path, monkeypatch, existing_session):
+    from filelock import Timeout
+
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    work.mkdir()
+    contract, method = "d" * 64, "mask_distillation"
+    (work / "native-run.json").write_text(json.dumps({"contract_hash": contract, "transfer": {"method": method}}),
+                                          encoding="utf-8")
+    (work / "alignment-train.jsonl").write_text(
+        '{"step":100,"metric_schema":2,"train/unit_ce_nats":2.0}\n', encoding="utf-8")
+    publish_receipt(work, backup, 100, archive=True)
+    for path in work.iterdir():
+        path.unlink()
+    work.rmdir()
+    globals_ = tool["writer_path"].__globals__
+    monkeypatch.setitem(globals_, "gettempdir", lambda: str(tmp_path / "new-cpu"))
+    session_key, run_id = tool["REPORTER_SESSION"], tool["run_id"](contract)
+    history = [{"update": 100, "train/unit_ce_nats": 2.0}]
+    opened, writes = [], []
+    remote = SimpleNamespace(id=run_id, entity="team", project="project", group="exp/trial", state="finished",
+                             config={"condition": method}, summary={session_key: existing_session})
+    owner = tool["writer_path"](contract, ".owner.json")
+    pending = tool["writer_path"](contract, ".pending.json")
+    active_during_scan = [True]
+
+    def scan_history(**options):
+        assert options == {"page_size": 1000, "use_cache": False}
+        with pytest.raises(Timeout):
+            with tool["writer_lock"](contract):
+                pass
+        yield from history
+        if active_during_scan[0]:
+            remote.state = "running"
+
+    def init(**kwargs):
+        assert kwargs["resume"] == "must" and kwargs["id"] == run_id
+        assert pending.is_file()
+        opened.append(kwargs)
+        return SimpleNamespace(url="https://wandb.ai/team/project", summary=remote.summary,
+                               define_metric=lambda *a, **kw: None, log=writes.append, finish=lambda: None)
+
+    remote.scan_history = scan_history
+    monkeypatch.setitem(sys.modules, "wandb", sdk(init, lambda path: remote))
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, project="project", entity="team", group="exp/trial",
+                              method=method, recover_writer=True, confirm_writers_stopped=False)
+    with pytest.raises(RuntimeError, match="confirm-writers-stopped"):
+        tool["sync_saved_metrics"](args)
+    args.confirm_writers_stopped = True
+    with tool["writer_lock"](contract):
+        with pytest.raises(Timeout):
+            tool["sync_saved_metrics"](args)
+        pending.write_text("{}", encoding="utf-8")
+    remote.summary[tool["WRITER_BUCKET"]] = "required"
+    with pytest.raises(RuntimeError, match="bucket already bound"):
+        tool["sync_saved_metrics"](args)
+    del remote.summary[tool["WRITER_BUCKET"]]
+    with pytest.raises(RuntimeError, match="active"):
+        tool["sync_saved_metrics"](args)
+    assert pending.exists() and not owner.exists() and not opened
+    remote.state, active_during_scan[0] = "finished", False
+    tool["sync_saved_metrics"](args)
+    tool["sync_saved_metrics"](args)
+    assert not pending.exists() and not work.exists() and not writes
+    assert len(opened) == (0 if existing_session else 1)
+    assert json.loads(owner.read_text(encoding="utf-8"))["session"] == remote.summary[session_key]
+
+    args.recover_writer = False
+    args.bleu_results = tmp_path / "saved-bleu"
+    args.contract = contract
+    monkeypatch.setitem(globals_, "saved_bleu_points", lambda *a, **kw: [(100, {
+        "contract_hash": contract, "checkpoint_sha256": "b" * 64,
+        "aux_bleu": 15, "asr_bleu": 10, "aux_failures": 0, "asr_failures": 0})])
+    tool["sync_saved_bleu"](args)
+    assert len(writes) == 1 and writes[0]["eval/asr_bleu"] == 10
+
+
+@pytest.mark.parametrize("changed", [None, "state", "session", "group"])
+def test_manual_recovery_rechecks_before_writing_missing_metrics(tmp_path, monkeypatch, changed):
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    work.mkdir()
+    contract, method = "b" * 64, "mask_distillation"
+    (work / "native-run.json").write_text(json.dumps({"contract_hash": contract, "transfer": {"method": method}}),
+                                          encoding="utf-8")
+    (work / "alignment-train.jsonl").write_text(
+        '{"step":100,"metric_schema":2,"train/unit_ce_nats":2.0}\n', encoding="utf-8")
+    publish_receipt(work, backup, 100, archive=True)
+    session_key = tool["REPORTER_SESSION"]
+    remote = SimpleNamespace(id=tool["run_id"](contract), entity="team", project="project", group="exp/trial",
+                             state="finished", config={"condition": method}, summary={session_key: "old"})
+
+    def scan_history(**options):
+        if changed == "state":
+            remote.state = "running"
+        elif changed == "session":
+            remote.summary[session_key] = "new"
+        elif changed == "group":
+            remote.group = "other"
+        return iter(())
+
+    points = []
+
+    def init(**options):
+        assert changed is None and options["resume"] == "must"
+        return SimpleNamespace(url="https://wandb.ai/team/project", summary=remote.summary,
+                               define_metric=lambda *a, **kw: None, log=points.append, finish=lambda: None)
+
+    remote.scan_history = scan_history
+    monkeypatch.setitem(tool["writer_path"].__globals__, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setitem(sys.modules, "wandb", sdk(init, lambda path: remote))
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, project="project", entity="team", group="exp/trial",
+                              method=method, recover_writer=True, confirm_writers_stopped=True)
+    owner = tool["writer_path"](contract, ".owner.json")
+    if changed is None:
+        tool["sync_saved_metrics"](args)
+        assert owner.is_file()
+        assert points == [{"update": 100, tool["TRAIN_UPDATE"]: 100, "train/unit_ce_nats": 2.0}]
+    else:
+        with pytest.raises(RuntimeError, match="active|Another W&B writer|run identity"):
+            tool["sync_saved_metrics"](args)
+        assert not owner.exists() and not points
+
+
 def test_training_reporter_uses_bound_writer_bucket_until_finish(tmp_path, monkeypatch):
     from contextlib import contextmanager
 
@@ -620,6 +779,140 @@ def test_training_reporter_uses_bound_writer_bucket_until_finish(tmp_path, monke
     args.writer_bucket = "shared"
     assert tool["report"](args, stop)["session"] == summary[tool["WRITER_TOKEN"]]
     assert observed == ["acquired", "opened", "finished", "released"]
+
+
+def test_training_reporter_retries_preflight_and_sends_saved_metrics(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from requests.exceptions import Timeout
+
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    from wandb_writer import WriterBusy, WriterLease
+
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    work.mkdir()
+    contract, method = "e" * 64, "mask_distillation"
+    (work / "native-run.json").write_text(json.dumps({"contract_hash": contract}), encoding="utf-8")
+    (work / "alignment-train.jsonl").write_text(
+        '{"step":100,"metric_schema":2,"train/unit_ce_nats":1.6}\n', encoding="utf-8")
+    publish_receipt(work, backup, 100)
+    remote = SimpleNamespace(id=tool["run_id"](contract), state="finished", entity="team", project="project",
+                             group="exp/trial", config={"condition": method}, summary={})
+    outcomes = iter(["missing", "timeout", "running", "finished", "finished", "running", "finished", "finished"])
+    waits, acquisitions, events, written = [], [], [], []
+    stop = Event()
+
+    def lookup(path):
+        state = next(outcomes)
+        if state == "missing":
+            raise CommError(RunNotFoundError(path))
+        if state == "timeout":
+            raise CommError(Timeout("read timed out"))
+        remote.state = state
+        return remote
+
+    @contextmanager
+    def cloud_lock(*args, **kwargs):
+        if not acquisitions:
+            acquisitions.append("busy")
+            raise WriterBusy("already held")
+        acquisitions.append("acquired")
+        try:
+            yield WriterLease()
+        finally:
+            acquisitions.append("released")
+
+    def init(**kwargs):
+        events.append(kwargs["resume"])
+        stop.set()
+        return SimpleNamespace(url="https://wandb.ai/team/project", entity="team", summary=remote.summary,
+                               define_metric=lambda *a, **kw: None, log=written.append,
+                               finish=lambda: events.append("finished"))
+
+    def wait(seconds):
+        waits.append(seconds)
+        assert len(waits) <= 6
+        return stop.is_set()
+
+    monkeypatch.setattr(stop, "wait", wait)
+    globals_ = tool["report"].__globals__
+    monkeypatch.setitem(globals_, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setitem(globals_, "shared_writer", cloud_lock)
+    monkeypatch.setitem(sys.modules, "wandb", sdk(init, lookup))
+    tool["store_owner"](contract, dict(entity="team", project="project", method=method, session="previous"))
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, contract=contract, method=method, entity="team",
+                              project="project", group="exp/trial", writer_bucket="shared")
+    assert tool["report"](args, stop)["session"] == remote.summary[tool["REPORTER_SESSION"]]
+    assert waits == [2, 4, 8, 16, 32, 15]
+    assert acquisitions == ["busy", "acquired", "released", "acquired", "released"]
+    assert events == ["must", "finished"]
+    assert [row["update"] for row in written] == [100]
+
+
+def test_pinned_sdk_transient_core_errors_are_distinguished_from_denials():
+    wandb = pytest.importorskip("wandb")
+    from wandb.proto.wandb_api_pb2 import ApiErrorResponse
+    from wandb.sdk.lib.service.service_connection import WandbApiFailedError
+
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    for status in (0, 429, 503, 401, 403, 404):
+        underlying = WandbApiFailedError("client failure", ApiErrorResponse(http_status=status))
+        assert tool["retryable_preflight"](wandb.errors.CommError("client failure", underlying), wandb) is (
+            status in (0, 429, 503))
+
+
+@pytest.mark.parametrize("failure", ["contract", "destination", "forbidden", "init", "finish"])
+def test_reporter_leaves_uncertain_writer_for_explicit_recovery(tmp_path, monkeypatch, failure):
+    from requests import HTTPError, Response, Timeout
+
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    work.mkdir()
+    contract, method = "e" * 64, "mask_distillation"
+    (work / "native-run.json").write_text(json.dumps({"contract_hash": contract}), encoding="utf-8")
+    publish_receipt(work, backup, 100)
+    remote = SimpleNamespace(id=tool["run_id"](contract), state="finished", entity="team", project="project",
+                             group="exp/trial", config={"condition": method}, summary={})
+    init_calls = []
+    stop = Event()
+    monkeypatch.setattr(stop, "wait", lambda seconds: pytest.fail(f"retired writer retried after {seconds}s"))
+    monkeypatch.setitem(tool["report"].__globals__, "gettempdir", lambda: str(tmp_path))
+
+    def lookup(path):
+        if failure == "forbidden":
+            response = Response()
+            response.status_code = 403
+            raise CommError(HTTPError(response=response))
+        if failure == "contract":
+            remote.config["alignment_contract_hash"] = "wrong"
+        return remote
+
+    def fail():
+        raise Timeout("connection state unknown")
+
+    def init(**kwargs):
+        init_calls.append(kwargs)
+        if failure == "init":
+            fail()
+        stop.set()
+        return SimpleNamespace(url="https://wandb.ai/team/project", entity="team", summary=remote.summary,
+                               define_metric=lambda *a, **kw: None, finish=fail)
+
+    monkeypatch.setitem(sys.modules, "wandb", sdk(init, lookup))
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, contract=contract, method=method, entity="team",
+                              project="project", group="exp/trial")
+    if failure == "destination":
+        tool["store_owner"](contract, dict(entity="team", project="other", method=method, session="previous"))
+    if failure in ("contract", "destination", "forbidden"):
+        with pytest.raises((RuntimeError, CommError)):
+            tool["report"](args, stop)
+        assert not init_calls and not tool["writer_path"](contract, ".pending.json").exists()
+    else:
+        with pytest.raises(Timeout, match="state unknown"):
+            tool["report"](args, stop)
+        assert len(init_calls) == 1 and tool["writer_path"](contract, ".pending.json").exists()
+        with pytest.raises(RuntimeError, match="unconfirmed"):
+            tool["report"](args, stop)
+        assert len(init_calls) == 1
 
 
 def test_metric_audit_reads_verified_zip_on_cold_cpu_runtime(tmp_path):

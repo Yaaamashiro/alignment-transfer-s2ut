@@ -66,6 +66,6 @@ if tracking:
             name='wandb-sync-saved-bleu-' + method)
 ```
 
-For runs enrolled in shared writer locking, saved BLEU sync and training must use the same `WANDB_WRITER_BUCKET`. Wait for sync-only to finish before starting a trainer for the same method anywhere. If the original runtime is gone, recover the local receipt with metric sync if there are metrics to append, or leave saved scores for the next training reporter. [Writer coordination and CPU metric recovery](WANDB_RECOVERY.md#restore-writer-ownership-on-a-cpu-runtime)
+For runs enrolled in shared writer locking, saved BLEU sync and training must use the same `WANDB_WRITER_BUCKET`. Wait for sync-only to finish before starting a trainer for the same method anywhere. If the local receipt is missing, use **Recover W&B writer and sync saved metrics** on the same VM before BLEU sync. The cell restores the receipt even when all training metrics are already synced. [Writer coordination and CPU metric recovery](WANDB_RECOVERY.md#restore-writer-ownership-on-a-cpu-runtime)
 
 Historical BLEU is appended to W&B history. W&B's internal step still advances, and each BLEU row uses its actual checkpoint update as the chart coordinate. The Run Summary uses `train/max_update` for the largest published training update the reporter has observed. A stored checkpoint hash prevents duplicate points on later syncs. Earlier standalone BLEU runs and their history remain available.

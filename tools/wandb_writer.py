@@ -6,6 +6,10 @@ import json
 from uuid import uuid4
 
 
+class WriterBusy(RuntimeError):
+    """A writer is active or its shared lock is already held."""
+
+
 def storage_object(bucket, identity):
     from google.api_core.exceptions import PreconditionFailed
     from google.cloud import storage
@@ -51,7 +55,7 @@ def shared_writer(bucket, identity, *, previous_token=None, recover_generation=N
         blob.upload_from_string(json.dumps(payload), content_type="application/json", timeout=10, retry=None,
                                 if_generation_match=0 if recover_generation is None else recover_generation)
     except precondition_failed as error:
-        raise RuntimeError(f"Shared W&B writer lock is occupied or changed: gs://{bucket}/{blob.name}") from error
+        raise WriterBusy(f"Shared W&B writer lock is occupied or changed: gs://{bucket}/{blob.name}") from error
     generation = blob.generation
     if type(generation) is not int or generation <= 0:
         raise RuntimeError("Cloud Storage did not return the acquired writer generation")

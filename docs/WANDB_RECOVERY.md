@@ -33,45 +33,21 @@ When updating from a release older than writer recovery, load and run the update
 
 `No local W&B ownership receipt` means the runtime lacks the record written after `wandb.finish()`. A SIGTERM, forced exit, or VM replacement can leave that record missing. The W&B-wrapped notebook command now allows up to 75 seconds for its reporter to drain. The trainer child retains its original five-second termination grace. The reporter writes its local receipt atomically after confirmed finalization. A forced kill can still skip this path.
 
-Cold recovery uses a shared Google Cloud Storage bucket as a writer lock. W&B's idle state and a local file lock cannot reserve a writer across VMs. Use one bucket for all writers that target these runs, including future training and saved BLEU sync. Credentials need object read, create and delete access in that bucket. Keep the lock prefix out of auto-deletion lifecycle rules, and use a bucket where the lock generation can be deleted after release. Cloud Storage creates the lock only if no live generation exists and deletes only the acquired generation. An unconfirmed `wandb.init()` or `wandb.finish()` leaves the lock in place. [Cloud Storage generation preconditions](https://docs.cloud.google.com/storage/docs/request-preconditions)
+1. Stop every W&B writer for the selected method, including older notebooks and manual scripts. Wait until the matching W&B Run is `finished`, `failed`, `crashed`, or `killed`. Leave all other writers for it stopped until recovery completes.
+2. Open the updated `training.ipynb` in the existing runtime or a fresh CPU Colab. Run **Process logging and progress**, **Mount Google Drive**, **Experiment and training stages**, **Storage and pinned environment**, and **Verify Git revisions and record the notebook update time**. Keep the original experiment IDs and W&B destination. The matched comparison uses project `direct-s2st` and entity `yaaamashiro-national-institute-of-technology-okinawa-college`. Supply the existing `WANDB_API_KEY` Colab secret. Leave `WANDB_WRITER_BUCKET` blank for an unbound Run, or set it to the exact bucket already bound to the Run.
+3. Open **Recover W&B writer and sync saved metrics**. Set `RECOVER_WANDB_METRICS=True`, select `RECOVERY_WANDB_METHOD`, and set `CONFIRM_WANDB_WRITERS_STOPPED=True` after confirming step 1. Run only this recovery cell. It audits the published snapshot and sets up its own W&B environment. Skip the Python/Fairseq setup, model cells, and training.
+4. Look for `[wandb-metrics] synced` and `[wandb-writer] recovered`. The local receipt is restored even when the log says zero historical rows. Once the Run shows a stopped state again, use the [BLEU-only workflow](TRANSFER_BLEU.md#sync-scores-already-on-drive) on this same VM. Keep one writer for the Run until it finishes.
 
-1. Stop every previous W&B writer for the selected method, including older notebook revisions or manual write scripts. Wait until the target Run is `finished`, `failed`, `crashed`, or `killed`. This is required before first adopting the shared bucket, because older clients do not participate in its lock.
-2. Open the updated `training.ipynb` on a CPU Colab. Run **Process logging and progress**, **Mount Google Drive**, **Experiment and training stages**, **Storage and pinned environment**, and **Verify Git revisions and record the notebook update time**, in notebook order. Keep the original experiment IDs and use the existing project and entity. The comparison in this repository uses `direct-s2st` under `yaaamashiro-national-institute-of-technology-okinawa-college`. Fill `WANDB_WRITER_BUCKET` with the shared bucket's name. The Python/Fairseq setup and training cells can be skipped.
-3. Add and run this cell. It checks the selected archive in read-only audit mode before opening the existing W&B Run. Keep `method`, the experiment IDs, and destination set to the original values. If ADC does not supply a project, set `os.environ['GOOGLE_CLOUD_PROJECT']` to the bucket's Google Cloud project ID before running the cell.
+To keep the original runtime and its local Fairseq logs, follow the pinned revision update above and copy the recovery cell from the updated notebook into the existing one. Run it in the existing runtime after revision verification.
 
-```python
-import os
-import sys
-from pathlib import Path
-from google.colab import auth, userdata
+Manual recovery holds the local FileLock and checks the existing Run's contract-derived ID, entity, project, method, group, bucket and stopped state. It reads uncached history and checks the Run again immediately before opening the Writer or restoring the receipt. The local lock coordinates processes on this VM. A Writer on another VM can still race the W&B status checks. Use manual recovery only with one Writer across all VMs. A Run already bound to GCS requires its matching bucket.
 
-method = 'distillation'
-project = WANDB_PROJECT.strip()
-entity = WANDB_ENTITY.strip()
-bucket = WANDB_WRITER_BUCKET.strip()
-if not all((project, entity, bucket)):
-    raise ValueError('Set the existing W&B project, entity and shared writer bucket.')
+The CPU command verifies only the archived plan and declared metric JSONL against the SHA-256 in the published receipt. It does not load a checkpoint. Fairseq window metrics require the separately retained execution logs and receipts. Matching history is kept, missing keys are appended by `(update, metric key)`, and a conflicting value aborts before writes. If the existing W&B reporter session is available and no history rows are needed, the operation writes only the local receipt. A legacy Run without a session opens and finishes a metadata-only W&B session. [Metric definitions and audit](WANDB_METRIC_AUDIT.md#colab)
 
-backup = Path(PERSISTENT) / 'stages' / ('research-v3-' + method + SCOPE_SUFFIX)
-command = [REPO / 'tools/wandb_transfer.py', '--work', RESEARCH_ROOT / method,
-           '--backup', backup, '--logs', LOGS, '--method', method, '--project', project,
-           '--entity', entity, '--group', f'{EXPERIMENT_ID}/{TRANSFER_EXPERIMENT_ID or "default"}']
-execute(sys.executable, *command, '--audit-metrics-only', name='wandb-audit-' + method)
+### Optional shared lock
 
-auth.authenticate_user()
-sdk = Path('/content/alignment-wandb-recovery-venv')
-python = sdk / 'bin/python'
-execute(sys.executable, '-m', 'pip', 'install', 'uv', name='install-sync-uv')
-execute('uv', 'venv', '--python', sys.executable, '--allow-existing', sdk, name='sync-environment')
-execute('uv', 'pip', 'install', '--python', python, 'wandb==0.31.0', 'filelock==4.1.0',
-        'google-cloud-storage==3.4.1', name='sync-dependencies')
-execute(python, *command, '--sync-metrics-only', '--recover-writer', '--writer-bucket', bucket,
-        env=dict(os.environ, WANDB_API_KEY=userdata.get('WANDB_API_KEY'), AT_LOG_WANDB_DRAIN='1'),
-        name='wandb-cold-sync-' + method)
-```
+Use one GCS bucket for all participating writers to a Run, including training and saved BLEU sync. Stop older writers before first binding the Run. Credentials need object read, create, and delete access. Keep the lock prefix outside auto-deletion lifecycle rules. With a bucket set, the recovery cell prompts for Google authentication. If Application Default Credentials have no project, set `GOOGLE_CLOUD_PROJECT` to the bucket's project ID. The shared lock uses a conditional create and releases the exact generation only after confirmed finish or an unused claim. [Cloud Storage generation preconditions](https://docs.cloud.google.com/storage/docs/request-preconditions)
 
-The recovery command derives the same Run ID from the verified archived contract and checks W&B entity, project, Run ID, method, group, terminal state, and any previously recorded contract and lock bucket. It holds the lock throughout history reconciliation and, when rows are needed, until `wandb.finish()` confirms completion. On success it can recreate the local ownership record. A fully synchronized run is a no-op. Existing values are compared by `(update, metric key)` and a conflict aborts before writes. The console reports `[wandb-metrics] synced` and the number of appended rows.
+An uncertain `wandb.init()` or `wandb.finish()` stops automatic connection attempts and keeps the pending local record and any GCS lock. A shared lock never expires automatically. If a writer is gone and an orphaned lock remains, confirm in W&B that the Run is stopped and read the object's live **Generation** at the `gs://` path printed in the error. Add `--recover-lock-generation` and that exact value to the recovery cell's `coordination` list for this one attempt. The command verifies the lock identity and conditionally replaces that exact generation. Direct CLI callers use `--sync-metrics-only --recover-writer` with the existing `--entity` and `--group`, and add `--confirm-writers-stopped` for manual recovery without a bucket.
 
-If a previous writer died after acquiring the shared lock, the next sync reports its `gs://` object path. Confirm that the original writer process or VM is gone and that W&B shows a terminal state, then read the object's live **Generation** in the Cloud Storage console. Add `--recover-lock-generation` and that exact numeric value to the final command. Recovery validates the orphan's identity and replaces that generation conditionally. An occupied lock never expires automatically. Use the same bucket in future notebook runs. The stored bucket binding makes updated reporters reject a different or omitted bucket for that Run.
-
-The CPU command verifies and reads the necessary JSONL members directly from the existing snapshot. Fairseq window metrics require the separately retained execution logs and receipts. The command leaves Drive source data and checkpoints intact. Saved BLEU still uses its dedicated sync mode or the training reporter. [Metric definitions and audit](WANDB_METRIC_AUDIT.md#colab)
+During training the Reporter retries transient W&B lookup errors, delayed stopped states, and writer-lock contention before opening a Writer. The delay starts at two seconds and doubles up to 60 seconds. Training and its local metrics continue while the Reporter waits. A contract, destination, or bucket mismatch stops the Reporter and requires correction.
