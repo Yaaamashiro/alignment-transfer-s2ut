@@ -54,7 +54,11 @@ def s2ut_implementation_files(package):
         approved = read_json(compatibility)
         for variant in approved:
             if all(sources.get(name) == value for name, value in variant["current"].items()):
-                sources.update(variant["previous"])
+                for name, value in variant["previous"].items():
+                    if value is None:
+                        del sources[name]  # Exact reviewed addition with no predecessor file.
+                    else:
+                        sources[name] = value
                 break
     return sources
 
@@ -436,6 +440,7 @@ def train_session(command, work, backup, *, popen=None, publish=None):
     from direct_s2st.session_runtime import run_continuous
     work, backup = session_paths(work, backup)
     native = "alignment_transfer_s2ut.benchmark" in command
+    schema_v3 = native and os.environ.get("S2ST_TRANSFER_METRIC_SCHEMA") == "3"
     identity_command = list(command)
     if native:
         from .benchmark import pilot_target
@@ -480,6 +485,9 @@ def train_session(command, work, backup, *, popen=None, publish=None):
                 state.get("extra_state", {}).get("alignment_contract_hash") != plan["contract_hash"]):
             raise ValueError("restored native training contract differs; use the original settings or a new run")
         del state
+        if schema_v3:
+            from .metric_integrity_v3 import checkpoint_originals
+            checkpoint_originals(work, completed, plan)
     config = {"kind": "s2ut" if native else "tt2", "checkpoint": relative,
               "command": list(command), "resume_args": [],
               "runtime": {"cache_gb": 8, "readers": max(1, readers), "precision": "default", "adaptive_batch": False}}
@@ -489,9 +497,19 @@ def train_session(command, work, backup, *, popen=None, publish=None):
     os.environ.setdefault("S2ST_DRIVE_SAFE", "1")
     os.environ.setdefault("S2ST_BACKUP_MIN_SECONDS", "600")
     os.environ.setdefault("S2ST_BACKUP_MAX_GB", "1024")
+    publish_backup = publish or bench.publish_packed
+
+    def publish_verified(files, destination, identity, update):
+        from .metric_integrity_v3 import checkpoint_originals
+        # Covers the benchmark's forced freeze on trainer failure as well as
+        # scheduled uploads. The input directory contains immutable files.
+        checkpoint_originals(files, update, plan, tail_only=True)
+        return publish_backup(files, destination, identity, update)
+
     with recovery_files():
         result = run_continuous(config, work=work, backup=backup, identity=identity, completed=completed,
-                                total=target, seconds=0, inspect_checkpoint=inspect_checkpoint, publish=publish or bench.publish_packed,
+                                total=target, seconds=0, inspect_checkpoint=inspect_checkpoint,
+                                publish=publish_verified if schema_v3 else publish_backup,
                                 **({"popen":popen} if popen is not None else {}))
     if native:
         if result["durable_updates"] < target:

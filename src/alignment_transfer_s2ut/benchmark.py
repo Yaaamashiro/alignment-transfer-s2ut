@@ -4,6 +4,7 @@ from copy import deepcopy
 import csv
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shutil
 import zipfile
@@ -421,6 +422,18 @@ def train_native(plan, output, resume=False, *, stop_after_update=None):
     from fairseq.distributed import utils as distributed_utils
     from .s2ut import benchmark_extension
     output = Path(output)
+    schema_v3 = os.environ.get("S2ST_TRANSFER_METRIC_SCHEMA") == "3"
+    v3_scope = output.resolve().parent.name == "research-v3-spm-all-layers-run-transfer-fixed-v2"
+    if schema_v3 != v3_scope:
+        raise ValueError("Schema v3 training requires the reserved transfer-fixed-v2 scope and recorder")
+    if schema_v3 and (output.name != plan["transfer"]["method"]
+                      or plan["transfer"]["method"] not in {"distillation", "annealed_distillation", "mask_distillation"}
+                      or plan["training_budget"] != 400000 or plan["selection_policy"].get("interval") != 1000
+                      or plan["selection_policy"]["mode"] == "native"):
+        raise ValueError("Schema v3 requires the registered 400k transfer plan and full Dev selection at 1k")
+    if schema_v3:
+        from .metric_integrity_v3 import checkpoint_originals, plan_tau
+        plan_tau(plan)
     target = pilot_target(plan, stop_after_update)
     marker, last = output / "native-run.json", output / "checkpoints/checkpoint_last.pt"
     if output.exists() and any(output.iterdir()):
@@ -433,11 +446,16 @@ def train_native(plan, output, resume=False, *, stop_after_update=None):
         updates = checkpoint_updates(saved)
         if updates > plan["training_budget"]:
             raise ValueError("native resume checkpoint exceeds the training budget")
+        if schema_v3:
+            benchmark_extension.trim_v3_metrics(output, updates)
+            checkpoint_originals(output, updates, plan)
         if updates >= target:
             return {"checkpoint": str(last), "updates": updates, "optimizer_steps": 0,
                     "status": "COMPLETED" if updates == plan["training_budget"] else "PILOT_PAUSED"}
     if resume and not last.is_file() and (output / "checkpoints/checkpoint_best.pt").exists():
         raise ValueError("last checkpoint missing; refusing to restart a partially saved run")
+    if schema_v3 and not last.is_file() and (output / "alignment-train.jsonl").exists():
+        raise ValueError("Schema v3 history exists without its training checkpoint")
     if plan["config"]["common"].get("fp16") and not torch.cuda.is_available():
         raise RuntimeError("registered FP16 recipe requires CUDA; no precision fallback")
     write_json(marker, plan, overwrite=resume)

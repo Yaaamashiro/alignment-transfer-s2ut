@@ -61,9 +61,9 @@ def test_scale_qualification_checks_every_batch_and_objective(variant, selected)
 
 def test_legacy_top_p_compatibility_binds_unchanged_sources(monkeypatch):
     projection = "alignment/projection.py"
-    files = {projection: "projection hash", "alignment_calibration.py": "new",
-             "alignment/calibration.py": "new", "alignment/precision.py": "new"}
     transition = json.loads((Path(calibration.__file__).parent / "coefficient-compatibility.json").read_text(encoding="utf-8"))
+    # This predecessor is reachable only from the complete reviewed coefficient transition.
+    files = {**transition["current"], projection: "projection hash", "alignment/precision.py": "new"}
     old_sources = files | transition["previous"] | calibration.PREVIOUS_CALIBRATION_SOURCES
     old_sources.pop("alignment/precision.py")
     old = {str(Path(k)): v for k, v in old_sources.items()}
@@ -74,6 +74,9 @@ def test_legacy_top_p_compatibility_binds_unchanged_sources(monkeypatch):
     files[projection] = "changed projection"
     assert old_hash not in calibration.compatible_top_p_hashes(plan)
     files[projection] = "projection hash"
+    with monkeypatch.context() as invalid:
+        invalid.setitem(files, "benchmark.py", "unreviewed coefficient transition")
+        assert old_hash not in calibration.compatible_top_p_hashes(plan)
     monkeypatch.setattr(calibration, "read_json", lambda _: {"alignment_calibration.py": "different code hash"})
     assert old_hash not in calibration.compatible_top_p_hashes(plan)
 

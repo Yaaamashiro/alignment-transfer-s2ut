@@ -20,7 +20,7 @@ from .fairseq_extension import AlignmentS2UT, s2ut_architecture_fisher
 from ..benchmark import read_record, artifact_contract
 from ..config import BackboneConfig
 from ..data.manifest import load_manifest
-from ..io import ArtifactStore, read_json, write_jsonl, read_jsonl
+from ..io import ArtifactStore, read_json, write_json, write_jsonl, read_jsonl
 from ..alignment.losses import encoder_padding_mask, loss_and_logs, coefficient_policy, lambda_at
 from ..training import prior_builder
 
@@ -172,11 +172,14 @@ class AlignmentCriterion(SpeechToUnitMultitaskTaskCriterion):
         padding = encoder_padding_mask(model, sample, raw)
         alignment, diagnostics = loss_and_logs(sample["alignment_prior"], raw, policy,
             model.alignment_updates, self.task.training_budget, padding)
-        loss = task_loss + size * alignment
+        weighted = size * alignment
+        loss = task_loss + weighted
         logs.update(diagnostics)
         logs["alignment/task_loss"] = task_loss.detach() / size
         logs["alignment/weighted_loss"] = alignment.detach()
         logs.update(loss=loss.detach(), alignment_metric_weight=size)
+        if os.environ.get("S2ST_TRANSFER_METRIC_SCHEMA") == "3":
+            logs.update(native_task_loss_sum=task_loss.detach(), native_alignment_loss_sum=weighted.detach())
         return loss, size, logs
 
     @classmethod
@@ -224,18 +227,125 @@ def metric_scalar(value):
     return None
 
 
-def training_metric_row(result, update, learning_rate, seconds):
+def training_metric_row(result, update, learning_rate, seconds, *, required=()):
     row = {"step": update, "metric_schema": 2}
     for key, value in {**result, "train/learning_rate": learning_rate, "train/seconds": seconds}.items():
         if not key.startswith(("alignment/", "train/")):
             continue
         value = metric_scalar(value)
-        if value is None or key == "alignment/task_only_start" and value < 0:
+        if value is None:
+            if key in required:
+                row[key] = None  # The live validator reports an invalid input, never writes it.
+            continue
+        if key == "alignment/task_only_start" and value < 0:
             continue
         if key == "alignment/worst_layer" and not (value >= 0 and value == int(value)):
             continue
         row["train/unit_ce_nats" if key == "train/main_loss" else key] = value
     return row
+
+
+METRIC_AUXILIARIES = {"source_letter": 8, "target_letter": 8, "decoder_target_ctc": 1.6}
+
+
+def loss_sums(logging_outputs, *, training):
+    """Read raw criterion sums from Fairseq's gathered, successful-step logs."""
+    rows = []
+    for log in logging_outputs:
+        count = log["sample_size"]
+        row = {
+            "main_loss": (log["native_main_loss_sum"], count),
+            "task_loss": (log["native_task_loss_sum"], count),
+            "total_loss": (log["loss"] if training else log["native_task_loss_sum"], count),
+            "unit_nll": (log["nll_loss"], log["ntokens"]),
+            "samples": (log["nsentences"], 1),
+        }
+        if training:
+            row["weighted_alignment"] = (log["native_alignment_loss_sum"], count)
+        for name, weight in METRIC_AUXILIARIES.items():
+            aux = log["multitask"][name]
+            if metric_scalar(aux["loss_weight"]) != weight:
+                raise ValueError(f"unexpected auxiliary weight for {name}")
+            row[f"aux/{name}_loss"] = (aux["loss"], aux["sample_size"])
+        rows.append(row)
+    if not rows:
+        raise ValueError("missing raw criterion logging outputs")
+
+    # Transfer small detached scalar vectors together, once per device.
+    groups = {}
+    flat = [value for row in rows for terms in row.values() for value in terms]
+    for index, value in enumerate(flat):
+        if torch.is_tensor(value):
+            if value.ndim != 0 or value.is_complex():
+                raise ValueError("criterion measurements must be real scalars")
+            groups.setdefault(value.device, []).append((index, value.detach()))
+    for group in groups.values():
+        values = torch.stack([value for _, value in group]).cpu().tolist()
+        for (index, _), value in zip(group, values, strict=True):
+            flat[index] = value
+    pairs = iter(flat)
+    totals = {key: [[], []] for key in rows[0]}
+    for row in rows:
+        for key in row:
+            numerator, denominator = next(pairs), next(pairs)
+            if (metric_scalar(numerator) is None or metric_scalar(denominator) is None or denominator <= 0
+                    or denominator != int(denominator)):
+                raise ValueError(f"invalid raw criterion measurement for {key}")
+            totals[key][0].append(numerator)
+            totals[key][1].append(int(denominator))
+    return {key: (math.fsum(values), sum(counts)) for key, (values, counts) in totals.items()}
+
+
+def v3_loss_measurements(parts, split):
+    sums = {key: (math.fsum(part[key][0] for part in parts), sum(part[key][1] for part in parts))
+            for key in parts[0]}
+    main = sums["main_loss"][0]
+    weighted_task = main + math.fsum(weight * sums[f"aux/{name}_loss"][0]
+                                     for name, weight in METRIC_AUXILIARIES.items())
+    task, total = sums["task_loss"][0], sums["total_loss"][0]
+    weighted_alignment = sums.get("weighted_alignment", (0, 0))[0]
+    # Check the independently captured totals within accumulated FP32 arithmetic error.
+    if not (math.isclose(task, weighted_task, rel_tol=1e-6, abs_tol=1e-7)
+            and math.isclose(total, task + weighted_alignment, rel_tol=1e-6, abs_tol=1e-7)):
+        raise ValueError("criterion task or optimization loss differs from its raw components")
+    keep = sums.keys() - {"samples", "weighted_alignment"}
+    if split == "dev":
+        keep -= {"task_loss", "unit_nll"}
+    result = {f"{split}/{name}": sums[name][0] / sums[name][1] for name in sorted(keep)}
+    if split == "train":
+        result["alignment/task_loss"] = result["train/task_loss"]
+        result["alignment/weighted_loss"] = weighted_alignment / sums["main_loss"][1]
+    return {**result, "loss_sums": sums, "sample_count": int(sums["samples"][0])}
+
+
+def trim_v3_metrics(output, update):
+    """On resume, keep measurements through the restored optimizer update."""
+    import json
+
+    for name in ("alignment-train.jsonl", "native-dev.jsonl"):
+        path = Path(output) / name
+        if not path.is_file():
+            continue
+        kept, previous = 0, 0
+        with path.open("rb") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    if not line.endswith(b"\n") and previous >= update:
+                        break
+                    raise
+                step = row.get("step")
+                if row.get("metric_schema") != 3 or type(step) is not int or step <= previous:
+                    raise ValueError("mixed schema or non-increasing metric updates")
+                previous = step
+                if step <= update:
+                    if not line.endswith(b"\n"):
+                        raise ValueError("incomplete metric row through the restored checkpoint")
+                    kept += len(line)
+        if kept != path.stat().st_size:
+            with path.open("r+b") as stream:
+                stream.truncate(kept)
 
 
 def rng_state(model):
@@ -311,6 +421,20 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
     original_validate_save = train.validate_and_save
     original_forward = SpeechToUnitMultitaskTaskCriterion.forward
     original_compute = SpeechToUnitMultitaskTaskCriterion.compute_loss
+    schema_v3 = os.environ.get("S2ST_TRANSFER_METRIC_SCHEMA") == "3"
+    from ..metric_integrity_v3 import required_metrics, validate_row
+
+    def validate_measurement(path, row, policy, split):
+        try:
+            tau = policy["calibrated"]["tau_mask" if policy["method"] == "mask_distillation" else "tau_kl"]
+            validate_row(row, policy["method"], contract_hash, split, tau=tau)
+        except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+            reason = f"Schema v3 {split} measurement failed at update {row['step']}: {error}"
+            write_json(path.parent / "metric-stop.json", {"split": split, "step": row["step"],
+                       "alignment_contract_hash": contract_hash, "error": reason}, overwrite=True)
+            # A successful optimizer step can have an invalid observation. Exit
+            # before Fairseq can save or publish that step (or select it as best).
+            raise ValueError(reason) from error
     selection_policy = selection_policy or {"mode": "native"}
     scaler_fields = ("loss_scale", "_iter", "_last_overflow_iter", "_last_rescale_iter", "_overflows_since_rescale")
 
@@ -326,6 +450,8 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
     def forward(self, *args, **kwargs):
         loss, size, logs = original_forward(self, *args, **kwargs)
         logs["native_main_loss_sum"] = self.native_main_loss_sum
+        if schema_v3 and not self.training:
+            logs["native_task_loss_sum"] = loss.detach()
         if not isinstance(self, AlignmentCriterion):
             metrics.log_scalar("train/main_loss", float(self.native_main_loss_sum) / size, size)
         return loss, size, logs
@@ -339,6 +465,8 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
         checkpoint_epoch_loss = None
         loading_training_checkpoint = False
         resume_mid_epoch = False
+        validation_measurements = None
+        current_measurement = None
 
         def _fp_convert_sample(self, sample):
             converted = super()._fp_convert_sample(sample)
@@ -353,24 +481,56 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                 result["train/gradient_norm"] = measured
                 if self.cfg.optimization.clip_norm > 0:
                     result["train/clip_applied"] = int(measured > self.cfg.optimization.clip_norm)
+            if schema_v3 and (self.model.training or self.validation_measurements is not None):
+                try:
+                    measured_sums = loss_sums(logging_outputs, training=self.model.training)
+                    if self.model.training:
+                        self.current_measurement = v3_loss_measurements([measured_sums], "train")
+                    elif isinstance(self.validation_measurements, list):
+                        self.validation_measurements.append(measured_sums)
+                except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+                    if self.model.training:
+                        self.current_measurement = {"measurement_error": str(error)}
+                    else:
+                        self.validation_measurements = str(error)
             return result
 
         def train_step(self, samples, *args, **kwargs):
             before = self.get_num_updates()
+            scaler_iter = None
+            if schema_v3:
+                self.current_measurement = None
+                if self.cfg.common.fp16:
+                    scaler_iter = getattr(getattr(self.optimizer, "scaler", None), "_iter", None)
             step = lambda values: super(Trainer, self).train_step(values, raise_oom=True)
             result = step(samples) if os.environ.get("S2ST_TRAIN_STAGING") else completed_step(self, samples, step)
-            if result is not None and self.get_num_updates() == before + 1:
+            if (result is not None and self.get_num_updates() == before + 1
+                    and (not schema_v3 or self.is_data_parallel_master)):
                 path = Path(self.cfg.checkpoint.save_dir).parent / "alignment-train.jsonl"
-                row = training_metric_row(result, self.get_num_updates(), self.get_lr(), self.cumulative_training_time())
+                policy = getattr(self.task, "transfer_policy", None)
+                update = self.get_num_updates()
+                required = {key.replace("alignment/update/", "alignment/")
+                            for key in required_metrics(policy["method"], update)} if schema_v3 else ()
+                row = training_metric_row(result, update, self.get_lr(), self.cumulative_training_time(), required=required)
                 scaler = getattr(self.optimizer, "scaler", None) if self.cfg.common.fp16 else None
                 scale = metric_scalar(getattr(scaler, "loss_scale", None))
                 if scale is not None:
                     row["train/loss_scale"] = scale
-                policy = getattr(self.task, "transfer_policy", None)
                 if policy is not None:
                     row["coefficient_policy"] = coefficient_policy(policy, self.task.training_budget)
                     row.update(method=policy["method"], alignment_contract_hash=contract_hash,
                                experiment_run=str(path.parent))
+                if schema_v3:
+                    for key in ("train/unit_ce_nats", "train/unit_nll_nats", "train/optimization_loss_nats",
+                                "alignment/task_loss", "alignment/weighted_loss"):
+                        row.pop(key, None)
+                    row.update(metric_schema=3)
+                    row.update(self.current_measurement or {"measurement_error": "missing successful-step reduction"})
+                    after_iter = getattr(scaler, "_iter", None)
+                    if type(scaler_iter) is int and type(after_iter) is int and 1 <= after_iter - scaler_iter <= 33:
+                        # The pinned scaler counts one iteration per success or confirmed overflow.
+                        row["train/overflow_retries"] = after_iter - scaler_iter - 1
+                    validate_measurement(path, row, policy, "train")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 import json
                 with path.open("a", encoding="utf-8") as stream:
@@ -483,6 +643,8 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
         loss = None
         if update % selection_policy["interval"] == 0 and update != saved["last_validation"]:
             trainer.validation_main = []
+            if schema_v3:
+                trainer.validation_measurements = []
             state = rng_state(trainer.model)
             try:
                 train.validate(cfg, trainer, task, epoch_itr, valid_subsets)
@@ -499,11 +661,27 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
             saved = {**saved, "last_validation": update}
             if improved:
                 saved.update(best=loss, best_update=update)
-            trainer.selection_state = saved
             output = Path(cfg.checkpoint.save_dir).parent / "native-dev.jsonl"
-            values = read_jsonl(output) if output.is_file() else []
-            values = [r for r in values if r["step"] != update] + [{"step": update, "dev/main_loss": loss, "beta": 0}]
-            write_jsonl(output, values, overwrite=True)
+            if not schema_v3 or trainer.is_data_parallel_master:
+                row = {"step": update, "dev/main_loss": loss, "beta": 0}
+                if schema_v3:
+                    row = {"step": update, "metric_schema": 3, "alignment_contract_hash": contract_hash}
+                    try:
+                        measured = trainer.validation_measurements
+                        if not isinstance(measured, list) or not measured:
+                            raise ValueError(measured or "missing full-Dev criterion measurements")
+                        row.update(v3_loss_measurements(measured, "dev"))
+                    except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+                        row["measurement_error"] = str(error)
+                    validate_measurement(output, row, task.transfer_policy, "dev")
+                values = read_jsonl(output) if output.is_file() else []
+                if schema_v3 and any(item["step"] == update for item in values):
+                    raise ValueError("full-Dev measurement already exists for this update")
+                values = [r for r in values if r["step"] != update] + [row]
+                write_jsonl(output, values, overwrite=True)
+            if schema_v3:
+                trainer.validation_measurements = None
+            trainer.selection_state = saved
             if improved:
                 trainer.checkpoint_epoch_loss = loss
                 target = Path(cfg.checkpoint.save_dir) / "checkpoint_best.pt"
