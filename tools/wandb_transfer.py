@@ -388,12 +388,13 @@ def metric_snapshot(args):
 
 def audit_saved_metrics(args):
     contract, published, command = metric_snapshot(args)
-    legacy, logical = {}, {}
+    legacy, unit_ce_updates = {}, set()
     for row in MetricReader(args.work / "alignment-train.jsonl").rows(published):
         if row.get("alignment_contract_hash", contract) != contract:
             continue
         step = row["step"]
-        logical.setdefault(step, {}).update(logical_train_metrics(row))
+        if row.get("metric_schema") == 2 and number(row.get("train/unit_ce_nats")) is not None:
+            unit_ce_updates.add(step)
         value = number(row.get("train/main_loss"))
         if row.get("metric_schema") is None and value is not None:
             legacy[step] = value
@@ -405,7 +406,7 @@ def audit_saved_metrics(args):
     print(json.dumps({"run_id": run_id(contract), "published_update": published,
                       "legacy_main_loss_rows": len(legacy),
                       "legacy_main_loss_min": min(legacy.values(), default=None),
-                      "verified_update_unit_ce_rows": sum("train/unit_ce_nats" in row for row in logical.values()),
+                      "verified_update_unit_ce_rows": len(unit_ce_updates),
                       "window_unit_ce_rows": sum("train/main_loss_fairseq" in row for row in window.values()),
                       "paired_update_and_window_rows": len(paired),
                       "examples": paired[-10:]}, allow_nan=False))

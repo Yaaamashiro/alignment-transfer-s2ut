@@ -67,3 +67,10 @@ if tracking is not None:
 ```
 
 For saved BLEU use the existing [BLEU-only sync](TRANSFER_BLEU.md#sync-scores-already-on-drive). Neither sync requires retraining. A cold VM can recover the JSONL from a published snapshot through the normal restore path. Fairseq windows require the original local execution logs or a separately retained copy at the same locations. An audit can run after restoration; an independent W&B writer still needs the handoff above. Native loss, optimizer, FP16 retry policy, annealing, and checkpoint selection are separate from this migration. The exact reviewed telemetry patch maps to the prior native S2UT implementation identity so old checkpoints and calibration bindings remain usable.
+
+## Verification
+
+- Python 3.10.22, PyTorch 2.7.1 CPU and pinned Fairseq reproduced the old Tensor filtering and rounded-NLL fallback. Unequal microbatch tests checked label smoothing, `ln(2)` conversion, missing values, measured zeros, layer argmax and worst-layer fractions.
+- Fixed-input native CPU comparisons passed for zero-weight transfer versus the stock trainer, stop and restore under all three methods, and confirmed FP16 overflow control using a simulated scaler. A separate nonzero-KL check compared the released criterion and Trainer hooks against their revised versions on the same two microbatches. Losses, gradients, parameters, optimizer, scheduler, update counter and Torch RNG matched exactly.
+- W&B 0.31.0 offline output retained increasing internal steps for earlier BLEU `update` coordinates. Mocked online sync covered historical holes, interrupted submission, identical Run IDs, duplicate prevention and active-run refusal. The compatible scientific source map matched the full released tree for the reviewed patch in LF and CRLF and rejected an unreviewed edit. Notebook release checks and wheel build passed.
+- No production W&B write, live history comparison, CUDA/Colab training test, full production checkpoint restore, or new BLEU evaluation was performed in this audit.
