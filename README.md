@@ -48,6 +48,8 @@ The Colab environment uses Python 3.10.22, PyTorch 2.7.1, and pinned fairseq dep
 
 ## Documentation
 
+- [Transfer Metric Schema v3](docs/TRANSFER_METRIC_SCHEMA_V3.md) documents the shared metrics, the 1k and 1.1k Colab validation, and recovery from verified snapshots.
+
 - [Method, calibration, and microbatch definitions](docs/METHOD.md)
 - [Experimental conditions](docs/EXPERIMENTS.md) and [all-layer transfer](docs/ALL_LAYER_TRANSFER.md)
 - [Baseline comparison and recovery](docs/BENCHMARK_COMPARISON.md)

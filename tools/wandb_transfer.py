@@ -18,7 +18,8 @@ from zipfile import ZipFile
 # Keep the W&B runtime independent of the scientific Python environment.
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parents[1] / "src")]
 from alignment_transfer_s2ut.process_logging import graceful_sigterm, log_event, run_process
-from transfer_bleu import CHECKPOINT, PLAN, SHA256, evaluation_scope, publishable, result_hash
+from transfer_bleu import CHECKPOINT, PLAN, SHA256, baseline_dev_hash, evaluation_scope, publishable, result_hash
+import transfer_metrics_v3 as v3
 from wandb_history import DEV_UPDATE, DEV_WINDOW, LEGACY_TRAIN, TRAIN_UPDATE, TRAIN_WINDOW, number, reconcile_history
 from wandb_writer import WriterBusy, shared_writer
 
@@ -31,6 +32,7 @@ IDLE_STATES = {"finished", "failed", "crashed", "killed"}
 LEGACY_LOGICAL_TRAIN = {"train/learning_rate", "train/seconds"}
 TRAIN_JSONL = "alignment-train.jsonl"
 DEV_JSONL = "native-dev.jsonl"
+EVAL_PROGRESS = "wandb_eval_update_v3"
 
 
 class WriterConfigurationError(RuntimeError):
@@ -264,13 +266,17 @@ def saved_bleu_points(args, plan_sha, maximum, *, contract=None):
         exact = published_snapshot(args.work.resolve(), args.backup, plan_sha, update - 1, args.method, exact=update)
         if exact and exact[2][CHECKPOINT] != row["checkpoint_sha256"]:
             raise ValueError(f"Saved BLEU checkpoint differs from the receipt at update {update}")
+        if v3.enabled(args):
+            if not exact or update not in v3.MILESTONES:
+                raise ValueError(f"Schema v3 BLEU requires its exact milestone receipt at {update}")
+            v3.check_bleu(row)
         if update in points and points[update] != row:
             raise ValueError(f"Conflicting BLEU results at update {update}")
         points[update] = row
     return sorted(points.items())
 
 
-def sync_bleu(run, points, sent):
+def sync_bleu(run, points, sent, *, schema_v3=False):
     written = 0
     for update, row in points:
         marker = f"wandb_bleu_checkpoint_{update}"
@@ -280,7 +286,10 @@ def sync_bleu(run, points, sent):
             continue
         if previous is not None:
             raise ValueError(f"W&B already contains another BLEU checkpoint at update {update}")
-        values = {f"eval/{name}": row[name] for name in ("aux_bleu", "asr_bleu", "aux_failures", "asr_failures")}
+        names = ("aux_bleu", "asr_bleu", "aux_failures", "asr_failures")
+        if schema_v3:
+            names += ("aux_samples", "asr_samples")
+        values = {f"eval/{name}": row[name] for name in names}
         # W&B's internal step must increase. Only the chart coordinate may go backward.
         run.log({**values, "update": update, marker: checkpoint})
         sent[update] = checkpoint
@@ -305,7 +314,8 @@ def writer_lock(contract):
 
 
 def writer_identity(args, contract, entity):
-    return dict(entity=entity, project=args.project, run_id=run_id(contract), contract_hash=contract, method=args.method)
+    return dict(entity=entity, project=args.project, run_id=run_id(v3.namespace(contract, args)),
+                contract_hash=contract, method=args.method)
 
 
 def check_target(target, args, identity, *, require_group=False):
@@ -315,6 +325,12 @@ def check_target(target, args, identity, *, require_group=False):
             or target.summary.get(WRITER_CONTRACT, identity["contract_hash"]) != identity["contract_hash"]
             or require_group and getattr(target, "group", None) != args.group):
         raise WriterConfigurationError("Existing W&B run identity does not match the verified training experiment")
+    if v3.enabled(args):
+        binding = v3.binding(identity["contract_hash"], args)
+        if any(target.config.get(key) != value for key, value in binding.items()):
+            raise WriterConfigurationError("Existing W&B run has a different Schema v3 binding")
+    elif target.config.get("metric_schema") == 3:
+        raise WriterConfigurationError("A Schema v3 W&B run cannot accept legacy metrics")
     if target.summary.get(WRITER_BUCKET) not in (None, getattr(args, "writer_bucket", None)):
         raise WriterConfigurationError("Set the shared writer bucket already bound to this W&B run")
     if target.state not in IDLE_STATES:
@@ -332,6 +348,11 @@ def verified_target(wandb, args, identity, *, require_group):
     return target
 
 
+def run_not_found(wandb, error):
+    missing = wandb.apis.public.RunNotFoundError
+    return isinstance(error, missing) or isinstance(getattr(error, "exc", None), missing)
+
+
 def live_target(wandb, args, contract):
     api = wandb.Api(timeout=20)
     entity = args.entity or api.default_entity
@@ -341,8 +362,7 @@ def live_target(wandb, args, contract):
     try:
         target = api.run(f"{identity['entity']}/{args.project}/{identity['run_id']}")
     except (wandb.apis.public.RunNotFoundError, wandb.errors.CommError) as error:
-        if not isinstance(error, wandb.apis.public.RunNotFoundError) and not isinstance(
-                getattr(error, "exc", None), wandb.apis.public.RunNotFoundError):
+        if not run_not_found(wandb, error):
             raise
         return identity, None
     check_target(target, args, identity, require_group=bool(args.group))
@@ -382,7 +402,7 @@ def check_pending_writer(contract):
 
 def start_writer(wandb, args, identity, lease, resume):
     contract = identity["contract_hash"]
-    store_writer_record(writer_path(contract, ".pending.json"), {**identity, "session": lease.token})
+    store_writer_record(writer_path(v3.namespace(contract, args), ".pending.json"), {**identity, "session": lease.token})
     lease.opening()
     return open_run(wandb, args, contract, entity=identity["entity"], resume=resume)
 
@@ -404,7 +424,8 @@ def sync_writer(wandb, args, contract):
     bucket = getattr(args, "writer_bucket", None)
     recover = getattr(args, "recover_writer", False)
     generation = getattr(args, "recover_lock_generation", None)
-    with writer_lock(contract):
+    key = v3.namespace(contract, args)
+    with writer_lock(key):
         owner = None
         if recover:
             if not args.entity or not args.group:
@@ -415,8 +436,8 @@ def sync_writer(wandb, args, contract):
                 raise RuntimeError("Recovering a lock generation requires --writer-bucket")
             entity = args.entity
         else:
-            check_pending_writer(contract)
-            owner = read_owner(contract)
+            check_pending_writer(key)
+            owner = read_owner(key)
             if owner is None:
                 raise RuntimeError("No local W&B ownership receipt; see the --recover-writer instructions")
             entity = owner["entity"]
@@ -426,14 +447,20 @@ def sync_writer(wandb, args, contract):
         identity = writer_identity(args, contract, entity)
 
         def get_target():
-            current = verified_target(wandb, args, identity, require_group=recover or bool(getattr(args, "group", None)))
+            try:
+                current = verified_target(wandb, args, identity, require_group=recover or bool(getattr(args, "group", None)))
+            except (wandb.apis.public.RunNotFoundError, wandb.errors.CommError) as error:
+                if (v3.enabled(args) and recover and getattr(args, "confirm_writers_stopped", False)
+                        and read_owner(key) is None and run_not_found(wandb, error)):
+                    return None
+                raise
             if owner is not None and current.summary.get(REPORTER_SESSION) != owner["session"]:
                 raise RuntimeError("Another training reporter owns this W&B run. Leave the scores on Drive for that reporter.")
             return current
 
         target = get_target()
         state = writer_state(target)
-        bound_bucket, token, session = state
+        bound_bucket, token, session = state or (None, None, None)
         with shared_writer(bucket, identity, previous_token=token, recover_generation=generation) as lease:
             def recheck():
                 if writer_state(get_target()) != state:
@@ -441,7 +468,7 @@ def sync_writer(wandb, args, contract):
 
             def start_run():
                 recheck()
-                run = start_writer(wandb, args, identity, lease, "must")
+                run = start_writer(wandb, args, identity, lease, "must" if target is not None else "never")
                 bind_writer(run, bucket, lease, contract)
                 if recover:
                     run.summary[REPORTER_SESSION] = lease.token
@@ -453,22 +480,24 @@ def sync_writer(wandb, args, contract):
                     if not isinstance(session, str) or not session or bucket != bound_bucket:
                         # Establish a remote session or first-time bucket binding without
                         # writing a history row.
-                        finish_writer(contract, lease, start_run())
+                        finish_writer(key, lease, start_run())
                     else:
                         recheck()
-                store_owner(contract, dict(entity=entity, project=args.project, method=args.method,
-                                           session=lease.token if lease.opened else session))
-                writer_path(contract, ".pending.json").unlink(missing_ok=True)
+                store_owner(key, dict(entity=entity, project=args.project, method=args.method,
+                                      session=lease.token if lease.opened else session))
+                writer_path(key, ".pending.json").unlink(missing_ok=True)
                 log_event("wandb-writer", "recovered", args.logs, identity["run_id"])
 
 
 def open_run(wandb, args, contract, *, entity=None, resume="allow"):
-    identifier = run_id(contract)
+    identifier = run_id(v3.namespace(contract, args))
     options = {}
-    if resume == "allow":
+    if resume in ("allow", "never"):
         entity = entity or args.entity or None
         options = {"group": args.group, "name": args.method, "config": {"condition": args.method}}
-    if resume == "must" or getattr(args, "writer_bucket", None):
+        if v3.enabled(args):
+            options["config"] = v3.binding(contract, args)
+    if resume == "must" or v3.enabled(args) or getattr(args, "writer_bucket", None):
         options["mode"] = "online"
     run = wandb.init(project=args.project, entity=entity, id=identifier, resume=resume,
                      dir=str(args.logs.resolve()), save_code=False, **options,
@@ -485,16 +514,21 @@ def open_run(wandb, args, contract, *, entity=None, resume="allow"):
     return run
 
 
-def set_training_progress(run, published):
+def set_training_progress(run, published, *, schema_v3=False):
     name = "train/max_update"
     previous = number(run.summary.get(name)) or 0
     training = number(run.summary.get(LEGACY_TRAIN)) or 0
     maximum = int(max(published, previous, training, number(run.summary.get(TRAIN_UPDATE)) or 0))
     if maximum != previous:
         run.summary[name] = maximum
+    if schema_v3:
+        run.summary["train/target_update"] = v3.MAX_UPDATE
+        run.summary["train/durable_update"] = max(number(run.summary.get("train/durable_update")) or 0, published)
 
 
 def sync_saved_bleu(args):
+    if v3.enabled(args):
+        return sync_saved_metrics(args)
     import wandb
 
     snapshot = published_snapshot(args.work.resolve(), args.backup, None, 0, args.method)
@@ -520,7 +554,7 @@ def sync_saved_bleu(args):
 
 
 @contextmanager
-def metric_snapshot(args):
+def metric_snapshot(args, *, plan_only=False):
     """Copy and verify only the archived plan and declared metric files."""
     snapshot = published_snapshot(args.work.resolve(), args.backup, None, 0, args.method, include_archive=True)
     if snapshot is None:
@@ -528,7 +562,7 @@ def metric_snapshot(args):
     published, command, files, archive = snapshot
     if not isinstance(files[CHECKPOINT], str) or SHA256.fullmatch(files[CHECKPOINT]) is None:
         raise ValueError("Invalid published SHA-256 for the checkpoint")
-    members = (PLAN, *(name for name in (TRAIN_JSONL, DEV_JSONL) if name in files))
+    members = (PLAN,) if plan_only else (PLAN, *(name for name in (TRAIN_JSONL, DEV_JSONL) if name in files))
     with TemporaryDirectory(prefix="wandb-metrics-") as directory:
         local = Path(directory)
         with ZipFile(archive) as source:
@@ -583,6 +617,43 @@ def audit_saved_metrics(args):
                       "examples": paired[-10:]}, allow_nan=False))
 
 
+def v3_bleu_rows(args, plan_sha, maximum, contract):
+    if not args.bleu_results:
+        return []
+    points = saved_bleu_points(args, plan_sha, maximum, contract=contract)
+    if points:
+        dev_sha = baseline_dev_hash(args.backup.parent.parent / "baseline", args.work.resolve(), v3.MAX_UPDATE)
+        if any(row["dev_sha256"] != dev_sha for _, row in points):
+            raise ValueError("Schema v3 BLEU Dev references do not match the registered Baseline")
+    return [(EVAL_PROGRESS, update, {key: row[key.removeprefix("eval/")] for key in v3.BLEU})
+            for update, row in points]
+
+
+def v3_source_rows(args, plan_sha, maximum, contract, local, *, allow_unpublished=False):
+    train, train_status = v3.coverage(local / TRAIN_JSONL, maximum, args.method, contract, "train",
+                                      allow_unpublished=allow_unpublished)
+    dev, dev_status = v3.coverage(local / DEV_JSONL, maximum, args.method, contract, "dev",
+                                  allow_unpublished=allow_unpublished)
+    bleu = v3_bleu_rows(args, plan_sha, maximum, contract)
+    scored = {update for _, update, _ in bleu}
+    failed = set()
+    if args.bleu_results:
+        for path in args.bleu_results.glob(f"{args.method}/*/*/failed-*.json"):
+            row = json.loads(path.read_bytes())
+            update = row.get("update")
+            if update in v3.MILESTONES and update <= maximum and row.get("status") == "failed":
+                exact = published_snapshot(args.work.resolve(), args.backup, plan_sha, update - 1, args.method, exact=update)
+                if exact and exact[2][CHECKPOINT] == row.get("checkpoint_sha256"):
+                    failed.add(update)
+    scheduled = {update for update in v3.MILESTONES if update <= maximum}
+    reports = {"train": train_status, "dev": dev_status,
+               "bleu": {"completed": sorted(scored), "failed": sorted((scheduled - scored) & failed),
+                        "waiting": sorted(scheduled - scored - failed), "complete": scored == scheduled}}
+    rows = [(TRAIN_UPDATE, update, values) for update, values in train.items()]
+    rows.extend((DEV_UPDATE, update, values) for update, values in dev.items())
+    return rows, bleu, reports
+
+
 def saved_metric_sources(args, *, compare_attempts=False):
     with metric_snapshot(args) as (contract, published, command, local, members):
         snapshot = list(logical_metric_rows(MetricReader(local / TRAIN_JSONL), MetricReader(local / DEV_JSONL),
@@ -590,6 +661,60 @@ def saved_metric_sources(args, *, compare_attempts=False):
     window = fairseq_metric_rows(FairseqProgressReader(args.logs, compare_attempts=compare_attempts),
                                  command, contract, published)
     return contract, published, members, {"snapshot_jsonl": snapshot, "local_fairseq": window}
+
+
+def verified_v3_sources(args, audit_scope="snapshot"):
+    with metric_snapshot(args) as (contract, published, command, local, members):
+        if published > v3.MAX_UPDATE:
+            raise ValueError("Schema v3 snapshot exceeds the registered budget")
+        plan_sha = hashlib.sha256((local / PLAN).read_bytes()).hexdigest()
+        source = args.work if audit_scope == "local" else local
+        if audit_scope == "local" and (not (source / PLAN).is_file()
+                or hashlib.sha256((source / PLAN).read_bytes()).hexdigest() != plan_sha):
+            raise ValueError("Local metric plan differs from the published snapshot")
+        metrics, bleu, reports = v3_source_rows(args, plan_sha, published, contract, source,
+                                              allow_unpublished=audit_scope == "local")
+    windows = fairseq_metric_rows(FairseqProgressReader(args.logs, compare_attempts=True), command, contract, published)
+    return contract, published, members, {"original_jsonl": metrics, "local_fairseq": windows,
+                                         "qualified_bleu": bleu}, reports
+
+
+def verify_v3_plan(args):
+    old = argparse.Namespace(work=args.previous_work, backup=args.previous_backup, method=args.method, contract=None)
+    if not v3.scope(args.method, old.work, old.backup, v3.OLD_SCOPE):
+        raise ValueError("Schema v3 preflight requires the original transfer-fixed-v1 stage")
+    with metric_snapshot(old, plan_only=True) as (_, _, _, local, _):
+        evidence = v3.scientific_plan(json.loads((local / PLAN).read_bytes()),
+                                      json.loads(args.verify_v3_plan.read_bytes()))
+    print(json.dumps(evidence))
+
+
+def audit_v3(args):
+    contract, published, members, sources, reports = verified_v3_sources(args, args.audit_v3)
+    original_ok = reports["train"]["complete"] and reports["dev"]["complete"]
+    report = {"scope": args.audit_v3, "published_update": published, "originals": reports,
+              "verified_snapshot_members": members, "run_id": run_id(v3.namespace(contract, args))}
+    remote_ok = True
+    if args.audit_v3 == "wandb":
+        import wandb
+        _, target = live_target(wandb, args, contract)
+        # Materialize once because exact history and transport comparison share the same scan.
+        if target is None:
+            remote_ok = False
+            report["delivery"] = {"status": "NOT_PUBLISHED"}
+        else:
+            report["delivery"] = v3.remote_audit(target, sources, published)
+            progress = {key: number(target.summary.get(key)) for key in v3.SUMMARY}
+            summary_ok = (progress["train/target_update"] == v3.MAX_UPDATE
+                          and progress["train/durable_update"] == published
+                          and published <= (progress["train/max_update"] or 0) <= v3.MAX_UPDATE)
+            report["delivery"].update(summary=progress, summary_matches=summary_ok)
+            remote_ok = report["delivery"]["status"] == "VERIFIED" and summary_ok
+    report["status"] = ("FAILED" if not original_ok or args.final and not reports["bleu"]["complete"]
+                        else "INCOMPLETE_DELIVERY" if not remote_ok
+                        else "VERIFIED" if reports["bleu"]["complete"] else "EVALUATION_PENDING")
+    print(json.dumps(report, allow_nan=False, sort_keys=True), flush=True)
+    return report["status"] == "VERIFIED" or not args.final and report["status"] == "EVALUATION_PENDING"
 
 
 def require_history_destination(args):
@@ -612,20 +737,33 @@ def sync_saved_metrics(args):
     include_legacy = getattr(args, "include_legacy_history", False)
     if include_legacy:
         require_history_destination(args)
-    contract, published, _, sources = saved_metric_sources(args, compare_attempts=include_legacy)
+    schema_v3 = v3.enabled(args)
+    if schema_v3:
+        contract, published, _, sources, reports = verified_v3_sources(args)
+        if not (reports["train"]["complete"] and reports["dev"]["complete"]):
+            raise ValueError("Incomplete Schema v3 originals; run the read-only audit")
+    else:
+        contract, published, _, sources = saved_metric_sources(args, compare_attempts=include_legacy)
     import wandb
     with sync_writer(wandb, args, contract) as (target, start_run, lease):
-        missing, report = reconcile_history(target, sources, published=published, include_legacy=include_legacy)
-        if missing:
+        if schema_v3:
+            missing, report = v3.reconcile_delivery(target, sources, published)
+        else:
+            missing, report = reconcile_history(target, sources, published=published, include_legacy=include_legacy)
+        progress_due = schema_v3 and target is not None and (
+            target.summary.get("train/target_update") != v3.MAX_UPDATE
+            or (number(target.summary.get("train/durable_update")) or 0) < published
+            or (number(target.summary.get("train/max_update")) or 0) < published)
+        if missing or progress_due:
             # Recheck ownership and idle state after the read-only history scan.
             run = start_run()
             try:
                 watermarks = {}
                 for (progress, update), values in missing.items():
                     publish_metrics(run, progress, update, values, watermarks, backfill=True)
-                set_training_progress(run, published)
+                set_training_progress(run, published, schema_v3=schema_v3)
             finally:
-                finish_writer(contract, lease, run)
+                finish_writer(v3.namespace(contract, args), lease, run)
     if include_legacy:
         print(json.dumps({"run_id": run_id(contract), "published_update": published, **report},
                          allow_nan=False, sort_keys=True), flush=True)
@@ -660,8 +798,9 @@ def retry_writer_preflight(stop, logs, delay, error):
 
 
 def reporter_preflight(wandb, args, writer_scope):
-    check_pending_writer(args.contract)
-    owner = read_owner(args.contract)
+    key = v3.namespace(args.contract, args)
+    check_pending_writer(key)
+    owner = read_owner(key)
     if owner is not None:
         verify_owner_destination(owner, args.entity or owner["entity"], args)
     with ExitStack() as attempt:
@@ -694,6 +833,7 @@ def report(args, stop):
     run = None
     writer_scope = ExitStack()
     bucket = getattr(args, "writer_bucket", None)
+    schema_v3 = v3.enabled(args)
     retry_delay = 2
     try:
         while True:
@@ -710,7 +850,21 @@ def report(args, stop):
                         published, published_command, _ = snapshot
                         if run is None:
                             try:
-                                identity, current, lease = reporter_preflight(wandb, args, writer_scope)
+                                with ExitStack() as attempt:
+                                    identity, current, lease = reporter_preflight(wandb, args, attempt)
+                                    missing = {}
+                                    if schema_v3 and current is not None:
+                                        state = writer_state(current)
+                                        history = logical_metric_rows(MetricReader(work / TRAIN_JSONL),
+                                            MetricReader(work / DEV_JSONL), published, contract=args.contract,
+                                            schema_v3=True, method=args.method)
+                                        bleu_rows = v3_bleu_rows(args, plan_sha, published, args.contract)
+                                        missing, _ = v3.reconcile_delivery(current, {"original_jsonl": history,
+                                            "qualified_bleu": bleu_rows}, published)
+                                        _, checked = live_target(wandb, args, args.contract)
+                                        if writer_state(checked) != state:
+                                            raise WriterBusy("Another writer connected during history reconciliation")
+                                    writer_scope.callback(attempt.pop_all().close)
                             except Exception as error:
                                 if not retryable_preflight(error, wandb):
                                     raise
@@ -719,19 +873,29 @@ def report(args, stop):
                                 retry_delay = min(2 * retry_delay, 60)
                                 continue
                             # After attempting init only confirmed finish can release this writer.
-                            run = start_writer(wandb, args, identity, lease, "must" if current is not None else "allow")
+                            resume = "must" if current is not None else "never" if schema_v3 else "allow"
+                            run = start_writer(wandb, args, identity, lease, resume)
                             session = lease.token
                             run.summary[REPORTER_SESSION] = session
                             bind_writer(run, bucket, lease, args.contract)
-                        set_training_progress(run, published)
+                            for (progress, update), values in missing.items():
+                                publish_metrics(run, progress, update, values, watermarks, backfill=True)
+                        set_training_progress(run, published, schema_v3=schema_v3)
                     if run is not None:
-                        sync_rows(run, train, dev, published, watermarks, contract=args.contract)
+                        sync_rows(run, train, dev, published, watermarks, contract=args.contract,
+                                  schema_v3=schema_v3, method=args.method)
                         sync_logged_layers(run, layers, published_command, args.contract, published,
                                            watermarks)
                         if getattr(args, "bleu_results", None) and (snapshot is not None or finishing):
                             try:
-                                points = saved_bleu_points(args, plan_sha, published, contract=args.contract)
-                                if written := sync_bleu(run, points, sent_bleu):
+                                if schema_v3:
+                                    for progress, update, values in v3_bleu_rows(args, plan_sha, published, args.contract):
+                                        publish_metrics(run, progress, update, values, watermarks)
+                                    written = 0
+                                else:
+                                    points = saved_bleu_points(args, plan_sha, published, contract=args.contract)
+                                    written = sync_bleu(run, points, sent_bleu)
+                                if written:
                                     log_event("wandb-bleu", "synced", args.logs, f"{written} new checkpoint results")
                             except (OSError, ValueError, TypeError, KeyError) as error:
                                 log_event("wandb-bleu", "failed", args.logs, str(error))
@@ -741,7 +905,7 @@ def report(args, stop):
     finally:
         try:
             if run is not None:
-                finish_writer(args.contract, lease, run)
+                finish_writer(v3.namespace(args.contract, args), lease, run)
             elif published == 0:
                 log_event("wandb", "skipped", args.logs, "No published updates for this contract")
         finally:
@@ -777,10 +941,29 @@ def logical_train_metrics(row):
     return output
 
 
-def logical_metric_rows(train, dev, published, *, contract=None):
+def logical_metric_rows(train, dev, published, *, contract=None, schema_v3=False, method=None):
     for reader, progress in ((train, TRAIN_UPDATE), (dev, DEV_UPDATE)):
         for row in reader.rows(published):
             update = row["step"]
+            if schema_v3:
+                split = "train" if reader is train else "dev"
+                if row.get("alignment_contract_hash") != contract:
+                    raise ValueError(f"Foreign Schema v3 measurement at update {update}")
+                if (split == "train" and update != 1 and update % 100) or (split == "dev" and update % 1000):
+                    continue
+                values = v3.metric_values(row, split)
+                v3.check_raw(row, split)
+                required = v3.required_metrics(method, update) if split == "train" else v3.DEV
+                if any(not v3.valid_number(values.get(key)) for key in required):
+                    raise ValueError(f"Incomplete {split} Schema v3 measurements at update {update}")
+                if any(not v3.valid_number(value) for value in values.values()):
+                    raise ValueError(f"Nonfinite {split} Schema v3 measurement at update {update}")
+                if split == "train":
+                    v3.check_alignment(values, method, update)
+                yield progress, update, values
+                continue
+            if row.get("metric_schema") == 3:
+                raise ValueError("Legacy telemetry cannot publish Schema v3 measurements")
             if reader is train and contract is not None and row.get("alignment_contract_hash", contract) != contract:
                 continue
             if reader is train and update != 1 and update % 100 and update != published:
@@ -792,8 +975,9 @@ def logical_metric_rows(train, dev, published, *, contract=None):
                 yield progress, update, values
 
 
-def sync_rows(run, train, dev, published, watermarks, *, contract=None):
-    for progress, update, values in logical_metric_rows(train, dev, published, contract=contract):
+def sync_rows(run, train, dev, published, watermarks, *, contract=None, schema_v3=False, method=None):
+    for progress, update, values in logical_metric_rows(train, dev, published, contract=contract,
+                                                        schema_v3=schema_v3, method=method):
         publish_metrics(run, progress, update, values, watermarks)
 
 
@@ -840,7 +1024,8 @@ def supervise(args):
 
         try:
             delay = 2
-            lock = writer_lock(args.contract)
+            key = v3.namespace(args.contract, args)
+            lock = writer_lock(key)
             while True:
                 try:
                     lock.acquire()
@@ -851,7 +1036,7 @@ def supervise(args):
                     delay = min(2 * delay, 60)
             try:
                 if owner := report(args, stop):
-                    store_owner(args.contract, owner)
+                    store_owner(key, owner)
             finally:
                 lock.release()
         except Exception as error:
@@ -880,6 +1065,7 @@ def main():
     for option in ("method", "project"):
         parser.add_argument("--" + option, required=True)
     parser.add_argument("--contract")
+    parser.add_argument("--metric-schema", type=int, choices=(2, 3), default=2)
     parser.add_argument("--group")
     parser.add_argument("--entity")
     parser.add_argument("--writer-bucket", default=os.environ.get("WANDB_WRITER_BUCKET") or None)
@@ -897,12 +1083,29 @@ def main():
     modes.add_argument("--audit-metrics-only", action="store_true")
     modes.add_argument("--audit-history-only", action="store_true",
                        help="Preview candidate and missing v2 metrics using read-only W&B history")
+    modes.add_argument("--audit-v3", choices=("local", "snapshot", "wandb"))
+    modes.add_argument("--verify-v3-plan", type=Path)
+    parser.add_argument("--previous-work", type=Path)
+    parser.add_argument("--previous-backup", type=Path)
+    parser.add_argument("--final", action="store_true", help="Require all scheduled BLEU evaluations in a v3 audit")
     parser.add_argument("--include-legacy-history", action="store_true",
                         help="Use marked legacy W&B history as another source for --sync-metrics-only")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command[:1] == ["--"]:
         args.command = args.command[1:]
+    v3.verify_destination(args)
+    if args.verify_v3_plan is not None:
+        if not v3.enabled(args) or not args.previous_work or not args.previous_backup or args.command:
+            parser.error("--verify-v3-plan requires Schema v3 and the original work and backup paths")
+        verify_v3_plan(args)
+        return
+    if args.audit_v3:
+        if not v3.enabled(args) or args.command or args.after_training:
+            parser.error("--audit-v3 requires Schema v3 and no training command")
+        if not audit_v3(args):
+            raise SystemExit(1)
+        return
     if args.recover_writer and not args.sync_metrics_only:
         parser.error("--recover-writer requires --sync-metrics-only")
     if args.confirm_writers_stopped and not args.recover_writer:

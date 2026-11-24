@@ -336,6 +336,7 @@ def main():
     parser.add_argument("--plan-sha")
     parser.add_argument("--update", type=int)
     parser.add_argument("--allow-new", action="store_true")
+    parser.add_argument("--stop-after-update", type=int)
     args = parser.parse_args()
     if args.plan_sha and not SHA256.fullmatch(args.plan_sha):
         parser.error("--plan-sha must be a SHA256")
@@ -352,6 +353,9 @@ def main():
                       allow_new=args.allow_new)
     listing = inventory(found, MILESTONES)
     if args.action == "inventory":
+        if args.stop_after_update is not None:
+            from transfer_metrics_v3 import segment_targets
+            listing["targets"] = segment_targets(listing["latest"], args.stop_after_update)
         print(json.dumps(listing))
         return
     if not all((args.scratch, args.output, args.logs, args.baseline_backup)):

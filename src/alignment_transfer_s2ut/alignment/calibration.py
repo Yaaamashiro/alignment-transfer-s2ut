@@ -1,6 +1,5 @@
 """Pure calibration estimators; failures are explicit, without fallback constants."""
 import math
-from hashlib import sha256
 from pathlib import Path
 import torch
 from ..io import digest, read_json
@@ -127,9 +126,9 @@ def calibration_implementation_hashes(plan):
     package = Path(__file__).resolve().parents[1]
     compatibility = read_json(package / "coefficient-compatibility.json")
     accepted = {plan["implementation_hash"]}
-    if all(sha256((package / name).read_text(encoding="utf-8").encode("utf-8")).hexdigest() == expected
-           for name, expected in compatibility["current"].items()):
-        sources = s2ut_implementation_files(package)
+    sources = s2ut_implementation_files(package)
+    if any(all(sources.get(name) == expected for name, expected in reviewed.items())
+           for reviewed in (compatibility["current"], compatibility.get("current_crlf", compatibility["current"]))):
         sources.update(compatibility["previous"])
         accepted.add(digest({str(Path(name)): value for name, value in sources.items()}))
     return accepted
