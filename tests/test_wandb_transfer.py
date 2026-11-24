@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import pytest
 
@@ -20,17 +21,28 @@ def native_command(work, method="mask_distillation"):
             "--mask-top-p", "0.8", "--all-layers", "--resume"]
 
 
-def publish_receipt(work, backup, step, *, complete=True, method="mask_distillation", checkpoint="last"):
+def publish_receipt(work, backup, step, *, complete=True, method="mask_distillation", checkpoint="last", archive=False):
     target = backup / f"{step:012d}-fixture"
     target.mkdir(parents=True)
     (target / ("snapshot.zip" if complete else "snapshot.zip.tmp")).touch()
     if complete:
-        plan_sha = hashlib.sha256((work / "native-run.json").read_bytes()).hexdigest()
+        files = {"native-run.json": hashlib.sha256((work / "native-run.json").read_bytes()).hexdigest(),
+                 "checkpoints/checkpoint_last.pt": checkpoint}
+        if archive:
+            payloads = {name: (work / name).read_bytes()
+                        for name in ("native-run.json", "alignment-train.jsonl", "native-dev.jsonl")
+                        if (work / name).is_file()}
+            payloads["checkpoints/checkpoint_last.pt"] = b"not a model"
+            with ZipFile(target / "snapshot.zip", "w") as output:
+                for name, value in payloads.items():
+                    output.writestr(name, value)
+            files = {name: hashlib.sha256(value).hexdigest() for name, value in payloads.items()}
         (target / "snapshot.json").write_text(json.dumps({
             "updates": step, "storage": "zip-v1",
             "identity": {"work": str(work), "command": native_command(work, method)},
-            "files": {"native-run.json": plan_sha, "checkpoints/checkpoint_last.pt": checkpoint},
+            "files": files,
         }), encoding="utf-8")
+    return target
 
 
 def test_tracking_resumes_and_uploads_only_published_numeric_rows(tmp_path, monkeypatch):
@@ -300,13 +312,14 @@ def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch, cap
     work, other, backup, logs = [tmp_path / name for name in ("work", "other", "backup", "logs")]
     for folder in (work, other, backup, logs):
         folder.mkdir()
-    (work / "native-run.json").write_text('{"contract_hash":"matching-plan"}', encoding="utf-8")
+    contract = "a" * 64
+    (work / "native-run.json").write_text(json.dumps({"contract_hash": contract, "transfer": {"method": method}}), encoding="utf-8")
     (work / "alignment-train.jsonl").write_text(
         '{"step":100,"train/main_loss":2.0,"alignment/lambda":10.0,"alignment/w_0":0.4}\n',
         encoding="utf-8",
     )
     (work / "native-dev.jsonl").write_text('{"step":100,"dev/main_loss":2.5}\n', encoding="utf-8")
-    publish_receipt(work, backup, 100, method=method)
+    publish_receipt(work, backup, 100, method=method, archive=True)
     expected = native_command(work, method)
 
     def make_log(name, command, lines, started="2026-11-18T00:00:02+00:00"):
@@ -348,7 +361,7 @@ def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch, cap
     make_plan("old-contract", 0, "different-plan")
     make_log("old-contract-train", expected, [train(100, **{"alignment/foreign": "7"}), checkpoint(100)],
              started="2026-11-18T00:00:00.500000+00:00")
-    make_plan("matching-contract", 1, "matching-plan")
+    make_plan("matching-contract", 1, contract)
     # This is the outer notebook receipt from a run with W&B disabled.
     past = ["python", "-m", "alignment_transfer_s2ut.pilot", "--", "python", "-m",
             "alignment_transfer_s2ut.colab_runtime", "--training", "--", *expected, "--stop-after-update", "200"]
@@ -371,7 +384,7 @@ def test_backfill_historical_fairseq_training_and_dev(tmp_path, monkeypatch, cap
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init, Settings=dict))
     args = argparse.Namespace(work=work, backup=backup, logs=logs, project="project",
                               entity="", group="exp/trial", method=method,
-                              contract="matching-plan")
+                              contract=contract)
     done = Event()
     done.set()
     tool["report"](args, done)
@@ -415,22 +428,28 @@ def test_sync_only_fills_gaps_resumes_after_connection_failure(tmp_path, monkeyp
     work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
     work.mkdir()
     logs.mkdir()
-    contract = "matching-plan"
-    (work / "native-run.json").write_text(json.dumps({"contract_hash": contract}), encoding="utf-8")
+    contract = "b" * 64
+    (work / "native-run.json").write_text(json.dumps({"contract_hash": contract,
+        "transfer": {"method": "mask_distillation"}}), encoding="utf-8")
     (work / "alignment-train.jsonl").write_text("".join(
-        json.dumps({"step": step, "metric_schema": 2, "train/unit_ce_nats": 1.8}) + "\n"
+        json.dumps({"step": step, "metric_schema": 2, "train/unit_ce_nats": 1.8,
+                    "train/optimization_loss_nats": 2.3}) + "\n"
         for step in (100, 200, 300, 400)), encoding="utf-8")
-    publish_receipt(work, backup, 300)
+    publish_receipt(work, backup, 300, archive=True)
     marker = tool["TRAIN_UPDATE"]
-    history = [{marker: 300, "update": 300}]
+    history = [{marker: 300, "update": 300, "train/unit_ce_nats": 1.8}]
     summary = {marker: 300, "train/max_update": 300, tool["REPORTER_SESSION"]: "session"}
     owner = dict(entity="entity", project="project", method="mask_distillation", session="session")
     monkeypatch.setitem(tool["writer_lock"].__globals__, "gettempdir", lambda: str(tmp_path))
     with tool["writer_lock"](contract):
         tool["writer_path"](contract, ".owner.json").write_text(json.dumps(owner), encoding="utf-8")
+    def scan_history(*, page_size, use_cache):
+        assert page_size == 1000 and use_cache is False
+        return iter(history)
     remote = SimpleNamespace(config={"condition": "mask_distillation"}, state="finished", summary=summary,
-        scan_history=lambda keys: (row for row in history if keys[0] in row))
+                             scan_history=scan_history)
     fail = [True]
+    opened = []
     def log(values):
         if values["update"] == 200 and fail[0]:
             fail[0] = False
@@ -439,6 +458,7 @@ def test_sync_only_fills_gaps_resumes_after_connection_failure(tmp_path, monkeyp
         summary.update(values)
     def init(**kw):
         assert kw["id"] == tool["run_id"](contract) and kw["resume"] == "must"
+        opened.append(kw)
         return SimpleNamespace(summary=summary, log=log, define_metric=lambda *a, **kw: None,
                                url="https://wandb.ai/entity/project", finish=lambda: None)
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init, Settings=dict,
@@ -449,11 +469,118 @@ def test_sync_only_fills_gaps_resumes_after_connection_failure(tmp_path, monkeyp
         tool["sync_saved_metrics"](args)
     tool["sync_saved_metrics"](args)
     tool["sync_saved_metrics"](args)
-    assert [row["update"] for row in history] == [300, 100, 200]
+    assert [row["update"] for row in history] == [300, 100, 200, 300]
+    assert history[-1] == {marker: 300, "update": 300, "train/update/optimization_loss_nats": 2.3}
+    assert len(opened) == 2  # The final idempotent retry never opens a writer.
     assert summary[marker] == summary["train/max_update"] == 300
+    # A conflicting metric must block all writes, including a genuinely missing metric at another update.
+    history[0]["train/unit_ce_nats"] = 1.7
+    del history[1]["train/update/optimization_loss_nats"]
+    with pytest.raises(ValueError, match="metric conflict for train/unit_ce_nats at update 300"):
+        tool["sync_saved_metrics"](args)
+    assert len(opened) == 2 and len(history) == 4
     remote.state = "running"
     with pytest.raises(RuntimeError, match="active"):
         tool["sync_saved_metrics"](args)
+
+
+def test_metric_audit_reads_verified_zip_on_cold_cpu_runtime(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    work, backup = tmp_path / "work", tmp_path / "backup"
+    work.mkdir()
+    plan = {"contract_hash": "c" * 64, "transfer": {"method": "mask_distillation"}}
+    (work / "native-run.json").write_text(json.dumps(plan), encoding="utf-8")
+    (work / "alignment-train.jsonl").write_text('{"step":100,"metric_schema":2,"train/unit_ce_nats":2.0}\n', encoding="utf-8")
+    (work / "native-dev.jsonl").write_text('{"step":100,"dev/main_loss":3.0}\n', encoding="utf-8")
+    receipt = publish_receipt(work, backup, 100, archive=True)
+    for file in work.iterdir():
+        file.unlink()
+    work.rmdir()
+    command = [sys.executable, "-S", str(root / "tools/wandb_transfer.py"), "--audit-metrics-only",
+               "--work", str(work), "--backup", str(backup), "--logs", str(tmp_path / "logs"),
+               "--method", "mask_distillation", "--project", "project"]
+    result = subprocess.run(command, capture_output=True, text=True, check=True)
+    audit = json.loads(result.stdout)
+    assert audit["verified_snapshot_members"] == ["native-run.json", "alignment-train.jsonl", "native-dev.jsonl"]
+    assert audit["verified_update_unit_ce_rows"] == audit["verified_dev_rows"] == 1
+    assert not work.exists()
+    assert (receipt / "snapshot.zip").is_file()
+
+
+def test_metric_snapshot_does_not_open_checkpoint_or_use_local_metric_copies(tmp_path, monkeypatch):
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    work, backup = tmp_path / "work", tmp_path / "backup"
+    work.mkdir()
+    contract = "e" * 64
+    (work / "native-run.json").write_text(json.dumps({"contract_hash": contract,
+        "transfer": {"method": "mask_distillation"}}), encoding="utf-8")
+    archived = b'{"step":100,"metric_schema":2,"train/unit_ce_nats":2.0}\n'
+    train = work / "alignment-train.jsonl"
+    train.write_bytes(archived)
+    publish_receipt(work, backup, 100, archive=True)
+    train.write_bytes(b"unverified local data")
+    opened = []
+    original = ZipFile.open
+    def record_open(self, entry, *args, **kwargs):
+        opened.append(entry.filename)
+        return original(self, entry, *args, **kwargs)
+    monkeypatch.setattr(ZipFile, "open", record_open)
+    args = argparse.Namespace(work=work, backup=backup, method="mask_distillation", contract=contract)
+    with tool["metric_snapshot"](args) as (_, _, _, local, members):
+        assert (local / train.name).read_bytes() == archived
+        assert opened == list(members) == ["native-run.json", train.name]
+        assert not (local / "native-dev.jsonl").exists()
+    assert train.read_bytes() == b"unverified local data"
+
+
+def test_metric_backfill_recognizes_sparse_history_without_stream_markers():
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    key = "train/unit_ce_nats"
+    loss = "train/update/optimization_loss_nats"
+    stream = tool["TRAIN_UPDATE"]
+    history = [{"update": 100, key: 2.0}, {"update": 200, key: None, loss: 3.0}]
+    remote = SimpleNamespace(scan_history=lambda **kwargs: iter(history))
+    points = [(stream, 100, {key: 2.0, loss: 3.0}), (stream, 200, {key: 2.1, loss: 3.0})]
+    assert tool["missing_metrics"](remote, points) == {(stream, 100): {loss: 3.0}, (stream, 200): {key: 2.1}}
+    with pytest.raises(ValueError, match="Conflicting source metric"):
+        tool["missing_metrics"](remote, [*points, (stream, 100, {key: 3.5})])
+
+
+def test_baseline_schema_v2_spec_maps_the_emitted_shared_series():
+    root = Path(__file__).resolve().parents[1]
+    tool = runpy.run_path(str(root / "tools/wandb_transfer.py"))
+    spec = (root / "docs/WANDB_BASELINE_COMPARISON.md").read_text(encoding="utf-8")
+    shared = tool["logical_train_metrics"]({"metric_schema": 2, "train/unit_ce_nats": 2.0,
+                                             "train/learning_rate": 0.001, "alignment/task_loss": 3.0})
+    reader = SimpleNamespace(rows=lambda *args: iter([(100, {"dev/loss": 1.5,
+        **{f"dev/multitask_{task}_loss": 2.0 for task in ("source_letter", "target_letter", "decoder_target_ctc")}})]))
+    _, _, dev = next(tool["fairseq_metric_rows"](reader, [], "contract", 100))
+    table = [line.split("|")[2].strip().strip("`") for line in spec.splitlines() if line.startswith("| ")]
+    assert {*shared, *dev, "dev/main_loss"} <= set(table)
+    assert not {"train/main_loss", "train/update/optimization_loss_nats", "train/window/loss_fairseq"} & set(table)
+
+
+@pytest.mark.parametrize("member", ["native-run.json", "alignment-train.jsonl", "native-dev.jsonl"])
+def test_metric_modes_reject_bad_archived_member_before_network(tmp_path, member):
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    work, backup = tmp_path / "work", tmp_path / "backup"
+    work.mkdir()
+    plan = {"contract_hash": "d" * 64, "transfer": {"method": "mask_distillation"}}
+    (work / "native-run.json").write_text(json.dumps(plan), encoding="utf-8")
+    for name in ("alignment-train.jsonl", "native-dev.jsonl"):
+        (work / name).write_text('{"step":100}\n', encoding="utf-8")
+    folder = publish_receipt(work, backup, 100, archive=True)
+    archive = folder / "snapshot.zip"
+    with ZipFile(archive) as source:
+        entries = {name: source.read(name) for name in source.namelist()}
+    entries[member] += b" "  # A valid ZIP member whose bytes no longer match the receipt.
+    with ZipFile(archive, "w") as dest:
+        for name, value in entries.items():
+            dest.writestr(name, value)
+    args = argparse.Namespace(work=work, backup=backup, logs=tmp_path / "logs", method="mask_distillation")
+    for mode in ("audit_saved_metrics", "sync_saved_metrics"):
+        with pytest.raises(ValueError, match="Archived .* SHA-256 differs"):
+            tool[mode](args)
 
 
 def test_reads_observed_colab_log_format():

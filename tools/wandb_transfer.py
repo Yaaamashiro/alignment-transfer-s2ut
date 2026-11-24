@@ -2,6 +2,7 @@
 
 import argparse
 from bisect import bisect_right
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -9,9 +10,10 @@ import os
 from pathlib import Path
 import re
 import sys
-from tempfile import gettempdir
+from tempfile import TemporaryDirectory, gettempdir
 from threading import Event, Thread
 from uuid import uuid4
+from zipfile import ZipFile
 
 # Keep the W&B runtime independent of the scientific Python environment.
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parents[1] / "src")]
@@ -25,6 +27,8 @@ TRAIN_WINDOW = "wandb_train_window_v2"
 DEV_WINDOW = "wandb_dev_full_v2"
 DEV_UPDATE = "wandb_dev_update"
 LEGACY_LOGICAL_TRAIN = {"train/learning_rate", "train/seconds"}
+TRAIN_JSONL = "alignment-train.jsonl"
+DEV_JSONL = "native-dev.jsonl"
 
 
 class MetricReader:
@@ -208,7 +212,7 @@ class FairseqProgressReader:
         yield from sorted(points.items())
 
 
-def published_snapshot(work, backup, plan_sha, minimum, method, *, exact=None):
+def published_snapshot(work, backup, plan_sha, minimum, method, *, exact=None, include_archive=False):
     """Read publication receipts without opening checkpoint archives."""
     folders = backup.glob(f"{exact:012d}-*") if exact is not None else backup.glob("*")
     for folder in sorted(folders, reverse=True):
@@ -233,7 +237,8 @@ def published_snapshot(work, backup, plan_sha, minimum, method, *, exact=None):
                     and command[command.index("--method") + 1] == method
                     and CHECKPOINT in files and PLAN in files
                     and (SHA256.fullmatch(files[PLAN]) if plan_sha is None else files[PLAN] == plan_sha)):
-                return update, command, files
+                match = update, command, files
+                return (*match, marker.parent / "snapshot.zip") if include_archive else match
         except (OSError, ValueError, IndexError, KeyError, TypeError):
             continue
     return None
@@ -296,19 +301,24 @@ def writer_lock(contract):
     return FileLock(str(path), timeout=0)
 
 
+def idle_run(wandb, args, contract, owner):
+    entity = owner["entity"]
+    if (not entity or args.entity and args.entity != entity
+            or args.project != owner["project"] or args.method != owner["method"]):
+        raise RuntimeError("W&B destination differs from the last training reporter in this runtime")
+    target = wandb.Api(timeout=20).run(f"{entity}/{args.project}/{run_id(contract)}")
+    if target.state not in {"finished", "failed", "crashed", "killed"} or target.config.get("condition") != args.method:
+        raise RuntimeError("W&B run is active or does not match the selected training condition")
+    if target.summary.get(REPORTER_SESSION) != owner["session"]:
+        raise RuntimeError("Another training reporter owns this W&B run. Leave the scores on Drive for that reporter.")
+    return target
+
+
 def open_run(wandb, args, contract, *, owner=None):
     identifier = run_id(contract)
-    options = {}
     if owner is not None:
-        entity = owner["entity"]
-        if (not entity or args.entity and args.entity != entity
-                or args.project != owner["project"] or args.method != owner["method"]):
-            raise RuntimeError("W&B destination differs from the last training reporter in this runtime")
-        target = wandb.Api(timeout=20).run(f"{entity}/{args.project}/{identifier}")
-        if target.state not in {"finished", "failed", "crashed", "killed"} or target.config.get("condition") != args.method:
-            raise RuntimeError("W&B run is active or does not match the selected training condition")
-        if target.summary.get(REPORTER_SESSION) != owner["session"]:
-            raise RuntimeError("Another training reporter owns this W&B run. Leave the scores on Drive for that reporter.")
+        idle_run(wandb, args, contract, owner)
+        entity, options = owner["entity"], {}
     else:
         entity = args.entity or None
         options = {"group": args.group, "name": args.method, "config": {"condition": args.method}}
@@ -365,45 +375,62 @@ def sync_saved_bleu(args):
             run.finish()
 
 
-def metric_history(run, marker):
-    # scan_history is unsampled. Do not use the Summary watermark to hide holes.
-    updates = set()
-    for row in run.scan_history(keys=[marker]):
-        value = number(row.get(marker))
-        if value is not None and value > 0 and value == int(value):
-            updates.add(int(value))
-    return updates
-
-
+@contextmanager
 def metric_snapshot(args):
-    plan = (args.work / PLAN).read_bytes()
-    contract = json.loads(plan)["contract_hash"]
-    plan_sha = hashlib.sha256(plan).hexdigest()
-    snapshot = published_snapshot(args.work.resolve(), args.backup, plan_sha, 0, args.method)
+    """Copy and verify only the archived plan and declared metric files."""
+    snapshot = published_snapshot(args.work.resolve(), args.backup, None, 0, args.method, include_archive=True)
     if snapshot is None:
         raise ValueError("No matching published checkpoint for metric backfill")
-    published, command, _ = snapshot
-    return contract, published, command
+    published, command, files, archive = snapshot
+    if not isinstance(files[CHECKPOINT], str) or SHA256.fullmatch(files[CHECKPOINT]) is None:
+        raise ValueError("Invalid published SHA-256 for the checkpoint")
+    members = (PLAN, *(name for name in (TRAIN_JSONL, DEV_JSONL) if name in files))
+    with TemporaryDirectory(prefix="wandb-metrics-") as directory:
+        local = Path(directory)
+        with ZipFile(archive) as source:
+            for name in members:
+                if not isinstance(files[name], str) or SHA256.fullmatch(files[name]) is None:
+                    raise ValueError(f"Invalid published SHA-256 for {name}")
+                entries = [entry for entry in source.infolist() if entry.filename == name]
+                if len(entries) != 1 or entries[0].is_dir():
+                    raise ValueError(f"Expected one archived member for {name}")
+                digest = hashlib.sha256()
+                with source.open(entries[0]) as stream, (local / name).open("xb") as target:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                        target.write(block)
+                if digest.hexdigest() != files[name]:
+                    raise ValueError(f"Archived {name} SHA-256 differs from the published receipt")
+        plan = json.loads((local / PLAN).read_bytes())
+        contract = plan.get("contract_hash")
+        if (not isinstance(contract, str) or SHA256.fullmatch(contract) is None
+                or getattr(args, "contract", None) not in (None, contract)
+                or plan.get("transfer", {}).get("method") != args.method):
+            raise ValueError("Archived metric plan does not match the expected training contract")
+        yield contract, published, command, local, members
 
 
 def audit_saved_metrics(args):
-    contract, published, command = metric_snapshot(args)
     legacy, unit_ce_updates = {}, set()
-    for row in MetricReader(args.work / "alignment-train.jsonl").rows(published):
-        if row.get("alignment_contract_hash", contract) != contract:
-            continue
-        step = row["step"]
-        if row.get("metric_schema") == 2 and number(row.get("train/unit_ce_nats")) is not None:
-            unit_ce_updates.add(step)
-        value = number(row.get("train/main_loss"))
-        if row.get("metric_schema") is None and value is not None:
-            legacy[step] = value
+    with metric_snapshot(args) as (contract, published, command, local, members):
+        for row in MetricReader(local / TRAIN_JSONL).rows(published):
+            if row.get("alignment_contract_hash", contract) != contract:
+                continue
+            step = row["step"]
+            if row.get("metric_schema") == 2 and number(row.get("train/unit_ce_nats")) is not None:
+                unit_ce_updates.add(step)
+            value = number(row.get("train/main_loss"))
+            if row.get("metric_schema") is None and value is not None:
+                legacy[step] = value
+        dev_rows = sum(1 for _ in MetricReader(local / DEV_JSONL).rows(published))
     window = dict(FairseqProgressReader(args.logs).rows(command, contract, published))
     paired = [{"update": step, "legacy_update_main_loss_nats": legacy[step],
                "window_unit_ce_nats": row.get("train/main_loss_fairseq"),
                "window_unit_nll_nats": row["train/nll_loss"] * math.log(2)}
               for step, row in window.items() if step in legacy and "train/nll_loss" in row]
     print(json.dumps({"run_id": run_id(contract), "published_update": published,
+                      "verified_snapshot_members": members,
+                      "verified_dev_rows": dev_rows,
                       "legacy_main_loss_rows": len(legacy),
                       "legacy_main_loss_min": min(legacy.values(), default=None),
                       "verified_update_unit_ce_rows": len(unit_ce_updates),
@@ -412,36 +439,71 @@ def audit_saved_metrics(args):
                       "examples": paired[-10:]}, allow_nan=False))
 
 
+def missing_metrics(remote, candidates):
+    """Compare sparse history by metric and update before opening a writer."""
+    expected, coordinates = {}, {}
+    for progress, update, values in candidates:
+        for name, value in values.items():
+            point = update, name
+            if point in expected and expected[point] != value:
+                raise ValueError(f"Conflicting source metric {name} at update {update}")
+            expected[point] = value
+            coordinates[point] = progress
+    if not expected:
+        return {}
+    found = set()
+    for row in remote.scan_history(page_size=1000, use_cache=False):
+        step = number(row.get("update"))
+        if step is None or step < 1 or step != int(step):
+            continue
+        step = int(step)
+        for name, value in row.items():
+            point = step, name
+            if point in expected and value is not None:
+                if number(value) != expected[point]:
+                    raise ValueError(f"W&B metric conflict for {name} at update {step}")
+                found.add(point)
+    missing = {}
+    for point, value in expected.items():
+        if point not in found:
+            update, name = point
+            missing.setdefault((coordinates[point], update), {})[name] = value
+    return missing
+
+
 def sync_saved_metrics(args):
-    contract, published, command = metric_snapshot(args)
+    with metric_snapshot(args) as (contract, published, command, local, _):
+        candidates = list(logical_metric_rows(MetricReader(local / TRAIN_JSONL), MetricReader(local / DEV_JSONL),
+                                              published, contract=contract))
+    candidates.extend(fairseq_metric_rows(FairseqProgressReader(args.logs), command, contract, published))
     with writer_lock(contract):
         owner_path = writer_path(contract, ".owner.json")
         if not owner_path.is_file():
             raise RuntimeError("Metric backfill requires the stopped reporter's owning Colab runtime")
         owner = json.loads(owner_path.read_text(encoding="utf-8"))
         import wandb
-        # open_run checks the remote state, condition, and latest writer session; it uses resume=must.
+        missing = missing_metrics(idle_run(wandb, args, contract, owner), candidates)
+        if not missing:
+            log_event("wandb-metrics", "synced", args.logs, f"0 historical metric rows through update {published}")
+            return
+        # Recheck ownership and idle state after the read-only history scan.
         run = open_run(wandb, args, contract, owner=owner)
         try:
-            remote = wandb.Api(timeout=20).run(f"{owner['entity']}/{args.project}/{run_id(contract)}")
-            known = {name: metric_history(remote, name) for name in (TRAIN_UPDATE, TRAIN_WINDOW, DEV_WINDOW, DEV_UPDATE)}
-            counts = {name: len(steps) for name, steps in known.items()}
-            sync_rows(run, MetricReader(args.work / "alignment-train.jsonl"),
-                      MetricReader(args.work / "native-dev.jsonl"), published, {}, known, contract=contract)
-            sync_logged_layers(run, FairseqProgressReader(args.logs), command, contract, published, {}, known)
+            watermarks = {}
+            for (progress, update), values in missing.items():
+                publish_metrics(run, progress, update, values, watermarks, backfill=True)
             set_training_progress(run, published)
-            written = sum(len(known[name]) - count for name, count in counts.items())
         finally:
             run.finish()
-        log_event("wandb-metrics", "synced", args.logs, f"{written} historical metric rows through update {published}")
+        log_event("wandb-metrics", "synced", args.logs, f"{len(missing)} historical metric rows through update {published}")
 
 
 def report(args, stop):
     import wandb
 
     work = args.work.resolve()
-    train = MetricReader(work / "alignment-train.jsonl")
-    dev = MetricReader(work / "native-dev.jsonl")
+    train = MetricReader(work / TRAIN_JSONL)
+    dev = MetricReader(work / DEV_JSONL)
     layers = FairseqProgressReader(args.logs)
     published = 0
     watermarks = {}
@@ -488,18 +550,15 @@ def report(args, stop):
         return {"entity": run.entity, "project": args.project, "method": args.method, "session": session}
 
 
-def publish_metrics(run, progress, update, values, watermarks, known):
+def publish_metrics(run, progress, update, values, watermarks, *, backfill=False):
     previous = watermarks.setdefault(progress, number(run.summary.get(progress)) or 0)
-    duplicate = update <= previous if known is None else update in known[progress]
-    if not values or duplicate:
+    if not values or (not backfill and update <= previous):
         return
     run.log({**values, "update": update, progress: update})
     watermarks[progress] = max(previous, update)
     # Preserve the high-water mark when explicitly filling an earlier gap.
     if update < previous:
         run.summary[progress] = previous
-    if known is not None:
-        known[progress].add(update)
 
 
 def logical_train_metrics(row):
@@ -518,7 +577,7 @@ def logical_train_metrics(row):
     return output
 
 
-def sync_rows(run, train, dev, published, watermarks, known=None, *, contract=None):
+def logical_metric_rows(train, dev, published, *, contract=None):
     for reader, progress in ((train, TRAIN_UPDATE), (dev, DEV_UPDATE)):
         for row in reader.rows(published):
             update = row["step"]
@@ -529,7 +588,13 @@ def sync_rows(run, train, dev, published, watermarks, known=None, *, contract=No
             values = logical_train_metrics(row) if reader is train else {
                 key: value for key, value in row.items()
                 if key.startswith("dev/") and type(value) in (int, float) and number(value) is not None}
-            publish_metrics(run, progress, update, values, watermarks, known)
+            if values:
+                yield progress, update, values
+
+
+def sync_rows(run, train, dev, published, watermarks, *, contract=None):
+    for progress, update, values in logical_metric_rows(train, dev, published, contract=contract):
+        publish_metrics(run, progress, update, values, watermarks)
 
 
 def window_alignment(values):
@@ -545,7 +610,7 @@ def window_alignment(values):
     return output
 
 
-def sync_logged_layers(run, reader, command, contract, published, watermarks, known=None):
+def fairseq_metric_rows(reader, command, contract, published):
     """Keep train log-window metrics and full-Dev metrics separate from update rows."""
     for update, values in reader.rows(command, contract, published):
         window = {"train/window/" + key.removeprefix("train/"): value for key, value in values.items()
@@ -555,8 +620,15 @@ def sync_logged_layers(run, reader, command, contract, published, watermarks, kn
         window.update(window_alignment(values))
         full_dev = {"dev/full/" + key.removeprefix("dev/"): value for key, value in values.items()
                     if key.startswith("dev/")}
-        publish_metrics(run, TRAIN_WINDOW, update, window, watermarks, known)
-        publish_metrics(run, DEV_WINDOW, update, full_dev, watermarks, known)
+        if window:
+            yield TRAIN_WINDOW, update, window
+        if full_dev:
+            yield DEV_WINDOW, update, full_dev
+
+
+def sync_logged_layers(run, reader, command, contract, published, watermarks):
+    for progress, update, values in fairseq_metric_rows(reader, command, contract, published):
+        publish_metrics(run, progress, update, values, watermarks)
 
 
 def supervise(args):
