@@ -19,6 +19,7 @@ from zipfile import ZipFile
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parents[1] / "src")]
 from alignment_transfer_s2ut.process_logging import graceful_sigterm, log_event, run_process
 from transfer_bleu import CHECKPOINT, PLAN, SHA256, evaluation_scope, publishable, result_hash
+from wandb_history import DEV_UPDATE, DEV_WINDOW, LEGACY_TRAIN, TRAIN_UPDATE, TRAIN_WINDOW, number, reconcile_history
 from wandb_writer import WriterBusy, shared_writer
 
 
@@ -27,10 +28,6 @@ WRITER_BUCKET = "wandb_writer_lock_bucket"
 WRITER_TOKEN = "wandb_writer_lock_token"
 WRITER_CONTRACT = "wandb_writer_contract_hash"
 IDLE_STATES = {"finished", "failed", "crashed", "killed"}
-TRAIN_UPDATE = "wandb_train_update_v2"
-TRAIN_WINDOW = "wandb_train_window_v2"
-DEV_WINDOW = "wandb_dev_full_v2"
-DEV_UPDATE = "wandb_dev_update"
 LEGACY_LOGICAL_TRAIN = {"train/learning_rate", "train/seconds"}
 TRAIN_JSONL = "alignment-train.jsonl"
 DEV_JSONL = "native-dev.jsonl"
@@ -97,16 +94,6 @@ def training_command(command, action="train"):
     return None
 
 
-def number(value):
-    if type(value) not in (int, float, str):
-        return None
-    try:
-        value = float(value) if isinstance(value, str) else value
-        return value if math.isfinite(value) else None
-    except (ValueError, OverflowError):
-        return None
-
-
 PROGRESS = re.compile(
     rb"(?:^INFO:(?P<colab>train_inner|dev):\s*|(?:^| \| )(?P<pipe>train_inner|dev) \| )"
     rb"(?P<record>\{.*\})\s*$"
@@ -160,9 +147,10 @@ def fairseq_row(line):
 class FairseqProgressReader:
     """Recover diagnostics only from checkpointed portions of matching process logs."""
 
-    def __init__(self, logs):
+    def __init__(self, logs, *, compare_attempts=False):
         self.logs = Path(logs).resolve()
         self.offsets = {}
+        self.compare_attempts = compare_attempts
 
     def sources(self, expected, contract):
         plans = {}
@@ -216,7 +204,13 @@ class FairseqProgressReader:
                 for step in sorted(pending):
                     if step > limit:
                         break
-                    points.setdefault(step, {}).update(pending.pop(step))
+                    values = pending.pop(step)
+                    previous = points.setdefault(step, {})
+                    if self.compare_attempts:
+                        for key in previous.keys() & values.keys():
+                            if previous[key] != values[key]:
+                                raise ValueError(f"Conflicting local Fairseq metric {key} at update {step}")
+                    previous.update(values)
                 self.offsets[path] = (identity, offset, pending, durable)
         yield from sorted(points.items())
 
@@ -332,6 +326,12 @@ def writer_state(target):
         return tuple(target.summary.get(key) for key in (WRITER_BUCKET, WRITER_TOKEN, REPORTER_SESSION))
 
 
+def verified_target(wandb, args, identity, *, require_group):
+    target = wandb.Api(timeout=20).run(f"{identity['entity']}/{identity['project']}/{identity['run_id']}")
+    check_target(target, args, identity, require_group=require_group)
+    return target
+
+
 def live_target(wandb, args, contract):
     api = wandb.Api(timeout=20)
     entity = args.entity or api.default_entity
@@ -426,8 +426,7 @@ def sync_writer(wandb, args, contract):
         identity = writer_identity(args, contract, entity)
 
         def get_target():
-            current = wandb.Api(timeout=20).run(f"{entity}/{args.project}/{identity['run_id']}")
-            check_target(current, args, identity, require_group=recover or bool(getattr(args, "group", None)))
+            current = verified_target(wandb, args, identity, require_group=recover or bool(getattr(args, "group", None)))
             if owner is not None and current.summary.get(REPORTER_SESSION) != owner["session"]:
                 raise RuntimeError("Another training reporter owns this W&B run. Leave the scores on Drive for that reporter.")
             return current
@@ -489,7 +488,7 @@ def open_run(wandb, args, contract, *, entity=None, resume="allow"):
 def set_training_progress(run, published):
     name = "train/max_update"
     previous = number(run.summary.get(name)) or 0
-    training = number(run.summary.get("wandb_train_update")) or 0
+    training = number(run.summary.get(LEGACY_TRAIN)) or 0
     maximum = int(max(published, previous, training, number(run.summary.get(TRAIN_UPDATE)) or 0))
     if maximum != previous:
         run.summary[name] = maximum
@@ -584,46 +583,39 @@ def audit_saved_metrics(args):
                       "examples": paired[-10:]}, allow_nan=False))
 
 
-def missing_metrics(remote, candidates):
-    """Compare sparse history by metric and update before opening a writer."""
-    expected, coordinates = {}, {}
-    for progress, update, values in candidates:
-        for name, value in values.items():
-            point = update, name
-            if point in expected and expected[point] != value:
-                raise ValueError(f"Conflicting source metric {name} at update {update}")
-            expected[point] = value
-            coordinates[point] = progress
-    if not expected:
-        return {}
-    found = set()
-    for row in remote.scan_history(page_size=1000, use_cache=False):
-        step = number(row.get("update"))
-        if step is None or step < 1 or step != int(step):
-            continue
-        step = int(step)
-        for name, value in row.items():
-            point = step, name
-            if point in expected and value is not None:
-                if number(value) != expected[point]:
-                    raise ValueError(f"W&B metric conflict for {name} at update {step}")
-                found.add(point)
-    missing = {}
-    for point, value in expected.items():
-        if point not in found:
-            update, name = point
-            missing.setdefault((coordinates[point], update), {})[name] = value
-    return missing
+def saved_metric_sources(args, *, compare_attempts=False):
+    with metric_snapshot(args) as (contract, published, command, local, members):
+        snapshot = list(logical_metric_rows(MetricReader(local / TRAIN_JSONL), MetricReader(local / DEV_JSONL),
+                                           published, contract=contract))
+    window = fairseq_metric_rows(FairseqProgressReader(args.logs, compare_attempts=compare_attempts),
+                                 command, contract, published)
+    return contract, published, members, {"snapshot_jsonl": snapshot, "local_fairseq": window}
+
+
+def require_history_destination(args):
+    if not getattr(args, "entity", None) or not getattr(args, "group", None):
+        raise ValueError("Legacy W&B history requires the existing --entity and --group")
+
+
+def audit_metric_history(args):
+    require_history_destination(args)
+    contract, published, members, sources = saved_metric_sources(args, compare_attempts=True)
+    import wandb
+    identity = writer_identity(args, contract, args.entity)
+    target = verified_target(wandb, args, identity, require_group=True)
+    _, report = reconcile_history(target, sources, published=published, include_legacy=True)
+    print(json.dumps({**identity, "group": args.group, "published_update": published,
+                      "verified_snapshot_members": members, **report}, allow_nan=False, sort_keys=True))
 
 
 def sync_saved_metrics(args):
-    with metric_snapshot(args) as (contract, published, command, local, _):
-        candidates = list(logical_metric_rows(MetricReader(local / TRAIN_JSONL), MetricReader(local / DEV_JSONL),
-                                              published, contract=contract))
-    candidates.extend(fairseq_metric_rows(FairseqProgressReader(args.logs), command, contract, published))
+    include_legacy = getattr(args, "include_legacy_history", False)
+    if include_legacy:
+        require_history_destination(args)
+    contract, published, _, sources = saved_metric_sources(args, compare_attempts=include_legacy)
     import wandb
     with sync_writer(wandb, args, contract) as (target, start_run, lease):
-        missing = missing_metrics(target, candidates)
+        missing, report = reconcile_history(target, sources, published=published, include_legacy=include_legacy)
         if missing:
             # Recheck ownership and idle state after the read-only history scan.
             run = start_run()
@@ -634,6 +626,9 @@ def sync_saved_metrics(args):
                 set_training_progress(run, published)
             finally:
                 finish_writer(contract, lease, run)
+    if include_legacy:
+        print(json.dumps({"run_id": run_id(contract), "published_update": published, **report},
+                         allow_nan=False, sort_keys=True), flush=True)
     log_event("wandb-metrics", "synced", args.logs, f"{len(missing)} historical metric rows through update {published}")
 
 
@@ -900,6 +895,10 @@ def main():
     modes.add_argument("--sync-bleu-only", action="store_true")
     modes.add_argument("--sync-metrics-only", action="store_true")
     modes.add_argument("--audit-metrics-only", action="store_true")
+    modes.add_argument("--audit-history-only", action="store_true",
+                       help="Preview candidate and missing v2 metrics using read-only W&B history")
+    parser.add_argument("--include-legacy-history", action="store_true",
+                        help="Use marked legacy W&B history as another source for --sync-metrics-only")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command[:1] == ["--"]:
@@ -908,6 +907,8 @@ def main():
         parser.error("--recover-writer requires --sync-metrics-only")
     if args.confirm_writers_stopped and not args.recover_writer:
         parser.error("--confirm-writers-stopped requires --recover-writer")
+    if args.include_legacy_history and not args.sync_metrics_only:
+        parser.error("--include-legacy-history requires --sync-metrics-only")
     if args.recover_lock_generation is not None and (
             args.recover_lock_generation < 1 or not args.recover_writer or not args.writer_bucket):
         parser.error("--recover-lock-generation requires --recover-writer, --writer-bucket and a positive generation")
@@ -920,6 +921,11 @@ def main():
         if args.command or args.after_training:
             parser.error("--audit-metrics-only requires no training command")
         audit_saved_metrics(args)
+        return
+    if args.audit_history_only:
+        if args.command or args.after_training:
+            parser.error("--audit-history-only requires no training command")
+        audit_metric_history(args)
         return
     if args.sync_bleu_only:
         if not args.bleu_results or args.command or args.after_training:

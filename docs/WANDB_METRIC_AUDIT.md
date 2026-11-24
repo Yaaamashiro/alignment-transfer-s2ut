@@ -36,6 +36,8 @@ The 73k KL snapshot receipt advertises `alignment-train.jsonl`, `native-dev.json
 
 ## Historical migration
 
+Use [W&B legacy history migration](WANDB_LEGACY_MIGRATION.md) to recover qualified metrics already recorded in W&B, including from a cold runtime. Its online read-only audit reports the eligible points and update ranges for each source before import.
+
 - **Already measured** include checkpointed native Dev Unit CE, verified BLEU artifacts, and safe native v1 logical alignment diagnostics, LR and elapsed time where present. The new live reporter can publish safe logical values under the corrected names.
 - **Recoverable from Fairseq logs** include displayed CE, NLL, perplexity, auxiliaries, alignment statistics and the optimizer diagnostics in the table. Keep them in `train/window/*`, `alignment/window/*` or `dev/full/*`, preserving the printed precision. Their source log must match the command and contract and show its own durable checkpoint progress.
 - **No exact reconstruction** for historical per-update CE where v1 stored a fallback, omitted tensor diagnostics where the sole surviving value is a window statistic, fabricated zero gradients, or values from unpublished progress. Existing `train/main_loss` and unscoped legacy alignment history remain in W&B. Exclude that legacy `train/main_loss` from matched CE comparisons.
@@ -69,7 +71,7 @@ if tracking is not None:
                      AT_LOG_WANDB_DRAIN='1'))
 ```
 
-For saved BLEU use the existing [BLEU-only sync](TRANSFER_BLEU.md#sync-scores-already-on-drive). Neither sync requires retraining or model loading. Fairseq windows require the original execution logs or a retained copy with matching command, plan and durable progress receipts. Those process logs use their existing provenance checks and are separate from the verified archived JSONL members. An independent W&B writer still needs the ownership handoff above. Native loss, optimizer, FP16 retry policy, annealing, and checkpoint selection are separate from this migration. The exact reviewed telemetry patch maps to the prior native S2UT implementation identity so old checkpoints and calibration bindings remain usable.
+For saved BLEU use the existing [BLEU-only sync](TRANSFER_BLEU.md#sync-scores-already-on-drive). Both sync modes use CPU and existing artifacts. Local Fairseq windows require execution logs with the matching command, plan and durable progress receipts. The separate W&B history migration can recover appropriately marked old window values when those logs are gone. An independent W&B writer still needs the ownership handoff above. The exact reviewed telemetry patch maps to the prior native S2UT implementation identity so old checkpoints and calibration bindings remain usable.
 
 ## Verification
 

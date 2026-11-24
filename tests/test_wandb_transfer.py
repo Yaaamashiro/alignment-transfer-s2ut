@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import runpy
 import subprocess
 import sys
@@ -142,20 +143,24 @@ def test_recovery_notebook_uses_only_cpu_audit_and_wandb(tmp_path, monkeypatch, 
     exec(recovery, ns)
     assert not calls
     enabled = recovery.replace("RECOVER_WANDB_METRICS = False", "RECOVER_WANDB_METRICS = True")
+    exec(enabled, ns)
+    assert len(calls) == 4
+    assert "--audit-history-only" in calls[-1][0] and "--recover-writer" not in calls[-1][0]
+    assert "google-cloud-storage==3.4.1" not in calls[-2][0] and not authenticated
+    calls.clear()
+    enabled = enabled.replace("AUDIT_WANDB_METRICS_ONLY = True", "AUDIT_WANDB_METRICS_ONLY = False")
     with pytest.raises(ValueError, match="confirm"):
         exec(enabled, ns)
     assert not calls
     exec(enabled.replace("CONFIRM_WANDB_WRITERS_STOPPED = False", "CONFIRM_WANDB_WRITERS_STOPPED = True"), ns)
-    assert len(calls) == 5
-    assert "--audit-metrics-only" in calls[0][0]
+    assert len(calls) == 4
     assert any("wandb==0.31.0" in args for args, _ in calls)
     assert ("google-cloud-storage==3.4.1" in calls[-2][0]) == bool(bucket)
     assert bool(authenticated) == bool(bucket)
     command, options = calls[-1]
     assert command[command.index("--group") + 1] == "experiment-001/fixed-trial"
     assert command[command.index("--method") + 1] == "distillation"
-    assert {"--sync-metrics-only", "--recover-writer", "--confirm-writers-stopped"} <= set(command)
-    assert ("--writer-bucket" in command) == bool(bucket)
+    assert {"--sync-metrics-only", "--include-legacy-history", "--recover-writer", "--confirm-writers-stopped"} <= set(command)
     assert "only-in-env" not in command and options["env"]["WANDB_API_KEY"] == "only-in-env"
     assert options["env"]["WANDB_WRITER_BUCKET"] == bucket
     assert options["env"]["AT_LOG_WANDB_DRAIN"] == "1"
@@ -972,9 +977,157 @@ def test_metric_backfill_recognizes_sparse_history_without_stream_markers():
     history = [{"update": 100, key: 2.0}, {"update": 200, key: None, loss: 3.0}]
     remote = SimpleNamespace(scan_history=lambda **kwargs: iter(history))
     points = [(stream, 100, {key: 2.0, loss: 3.0}), (stream, 200, {key: 2.1, loss: 3.0})]
-    assert tool["missing_metrics"](remote, points) == {(stream, 100): {loss: 3.0}, (stream, 200): {key: 2.1}}
+    missing, _ = tool["reconcile_history"](remote, {"snapshot_jsonl": points})
+    assert missing == {(stream, 100): {loss: 3.0}, (stream, 200): {key: 2.1}}
     with pytest.raises(ValueError, match="Conflicting source metric"):
-        tool["missing_metrics"](remote, [*points, (stream, 100, {key: 3.5})])
+        tool["reconcile_history"](remote, {"snapshot_jsonl": [*points, (stream, 100, {key: 3.5})]})
+
+
+def legacy_history():
+    fixture = Path(__file__).with_name("fixtures") / "wandb_legacy_history.jsonl"
+    return [json.loads(line) for line in fixture.read_text(encoding="utf-8").splitlines()]
+
+
+def test_cold_legacy_history_audit_and_sync_reuse_manual_ownership(tmp_path, monkeypatch, capsys):
+    from filelock import Timeout
+
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    work.mkdir()
+    contract, method = "e" * 64, "mask_distillation"
+    plan = work / "native-run.json"
+    plan.write_text(json.dumps({"contract_hash": contract, "transfer": {"method": method}}), encoding="utf-8")
+    publish_receipt(work, backup, 300, archive=True)
+    plan.unlink()
+    work.rmdir()
+    history = legacy_history()
+    before = history.copy()
+    run_id = tool["run_id"](contract)
+    summary = {tool["TRAIN_WINDOW"]: 500, tool["DEV_WINDOW"]: 500, tool["TRAIN_UPDATE"]: 500,
+               "wandb_train_update": 500, "wandb_layer_update": 500, "train/max_update": 500}
+    remote = SimpleNamespace(id=run_id, entity="team", project="project", group="exp/id", state="finished",
+                             config={"condition": method}, summary=summary)
+    opened, lookups = [], []
+
+    def scan_history(**kw):
+        assert kw == {"page_size": 1000, "use_cache": False}
+        return iter(history)
+
+    def lookup(path):
+        assert path == "team/project/" + run_id
+        lookups.append(path)
+        return remote
+
+    def emit(row):
+        assert "_step" not in row
+        history.append({"_step": history[-1]["_step"] + 1, **row})
+        summary.update(row)
+
+    def init(**kw):
+        with pytest.raises(Timeout):
+            with tool["writer_lock"](contract):
+                pass
+        assert kw["id"] == run_id and kw["resume"] == "must"
+        opened.append(run_id)
+        return SimpleNamespace(summary=summary, log=emit, define_metric=lambda *a, **kw: None,
+                               url="https://wandb.ai/team/project", finish=lambda: None)
+
+    remote.scan_history = scan_history
+    monkeypatch.setitem(tool["writer_path"].__globals__, "gettempdir", lambda: str(tmp_path / "vm"))
+    monkeypatch.setitem(sys.modules, "wandb", sdk(init, lookup))
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, project="project", entity="team", group="exp/id",
+                              method=method, contract=contract, include_legacy_history=True, recover_writer=True,
+                              confirm_writers_stopped=True)
+    owner = tool["writer_path"](contract, ".owner.json")
+    monkeypatch.setattr(sys, "argv", ["wandb_transfer.py", "--audit-history-only",
+                                    "--work", str(work), "--backup", str(backup), "--logs", str(logs),
+                                    "--method", method, "--project", "project", "--entity", "team",
+                                    "--group", "exp/id", "--contract", contract])
+    tool["main"]()
+    audit = json.loads(capsys.readouterr().out)
+    assert audit["run_id"] == run_id and audit["published_update"] == 300
+    assert audit["verified_snapshot_members"] == ["native-run.json"]
+    assert audit["sources"]["snapshot_jsonl"] == audit["sources"]["local_fairseq"] == {}
+    window_ce = "train/window/main_loss_fairseq"
+    assert audit["sources"]["wandb_legacy_history"][window_ce] == {
+        "points": 2, "first_update": 100, "last_update": 200}
+    assert audit["missing_metrics"][window_ce] == {"points": 1, "first_update": 100, "last_update": 100}
+    assert audit["missing_rows"] == 4 and not opened and not owner.exists() and history == before
+    history.append({"update": 100, window_ce: 2.05})
+    with pytest.raises(ValueError, match="W&B metric conflict"):
+        tool["sync_saved_metrics"](args)
+    assert not owner.exists() and not opened
+    history.pop()
+    tool["sync_saved_metrics"](args)
+    assert owner.is_file() and len(lookups) == 4 and opened == [run_id]
+    assert history[:len(before)] == before
+    emitted = history[len(before):]
+    assert [(row["_step"], row["update"]) for row in emitted] == [(20, 100), (21, 100), (22, 100), (23, 200)]
+    by_key = {(row["update"], key): value for row in emitted for key, value in row.items()}
+    assert by_key[(100, "alignment/update/task_loss")] == 4.123
+    assert by_key[(100, "alignment/window/task_loss")] == 3.123
+    assert by_key[(100, "train/window/clip_fraction")] == 0.047
+    assert by_key[(100, "train/update/learning_rate")] == 0.0003
+    assert by_key[(100, "train/window/multitask_source_letter_loss_weight")] == 8
+    assert by_key[(100, "dev/full/loss")] == 3.51
+    assert by_key[(100, "dev/full/multitask_target_letter_loss")] == 1.25
+    assert by_key[(200, "dev/full/loss")] == 3.2
+    assert not {"train/unit_ce_nats", "train/update/optimization_loss_nats", "train/update/gradient_norm",
+                "alignment/update/worst_layer", "alignment/window/worst_layer", "dev/main_loss"} & {
+                    key for _, key in by_key}
+    assert all(summary[key] == 500 for key in (tool["TRAIN_UPDATE"], tool["TRAIN_WINDOW"], tool["DEV_WINDOW"],
+                                              "wandb_layer_update", "train/max_update"))
+    tool["sync_saved_metrics"](args)
+    assert len(history) == len(before) + 4 and opened == [run_id]
+
+
+@pytest.mark.parametrize("conflict", [None, "snapshot", "fairseq", "wandb", "clip", "duplicate_legacy"])
+def test_legacy_history_checks_sources_and_existing_values(conflict):
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    history = legacy_history()
+    ce = "train/window/main_loss_fairseq"
+    clip = "train/window/clip_fraction"
+    lr = "train/update/learning_rate"
+    snapshot = {lr: 0.0004 if conflict == "snapshot" else 0.0003}
+    fairseq = {ce: 2.03855 if conflict == "fairseq" else 2.0385448932647705, clip: 0.047}
+    history.insert(0, {"_step": 9, "update": 100, clip: 0.0471 if conflict == "clip" else math.nextafter(0.047, 1.0),
+                       **({ce: 2.04} if conflict == "wandb" else {})})
+    if conflict == "duplicate_legacy":
+        history.append({"_step": 20, "update": 100, "wandb_layer_update": 100, "train/main_loss_fairseq": 2.03855,
+                        "train/loss_fairseq": 7.75})
+    sources = {"snapshot_jsonl": [(tool["TRAIN_UPDATE"], 100, snapshot)],
+               "local_fairseq": [(tool["TRAIN_WINDOW"], 100, fairseq)]}
+    remote = SimpleNamespace(scan_history=lambda **kw: iter(history))
+    if conflict:
+        expected = "W&B metric conflict" if conflict in ("wandb", "clip") else "Conflicting source metric"
+        with pytest.raises(ValueError, match=expected):
+            tool["reconcile_history"](remote, sources, published=300, include_legacy=True)
+    else:
+        missing, audit = tool["reconcile_history"](remote, sources, published=300, include_legacy=True)
+        assert missing[tool["TRAIN_WINDOW"], 100][ce] == fairseq[ce]
+        assert clip not in missing[tool["TRAIN_WINDOW"], 100]
+        assert audit["sources"]["snapshot_jsonl"][lr]["points"] == 1
+        assert audit["sources"]["wandb_legacy_history"][lr]["points"] == 1
+        assert audit["sources"]["local_fairseq"][ce]["points"] == 1
+
+
+def test_legacy_migration_rejects_disagreeing_durable_local_attempts(tmp_path, monkeypatch):
+    tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    paths = [tmp_path / name for name in ("first.log", "second.log")]
+    paths[0].write_text('INFO:train_inner:{"num_updates":100,"loss":2.5}\n'
+                        '[recovery] learned_at_least=100 durable_updates=100\n', encoding="utf-8")
+    content = 'INFO:train_inner:{"num_updates":100,"loss":2.6}\n'
+    paths[1].write_text(content, encoding="utf-8")
+
+    def rows():
+        reader = tool["FairseqProgressReader"](tmp_path, compare_attempts=True)
+        monkeypatch.setattr(reader, "sources", lambda *args: iter(paths))
+        return list(reader.rows([], "contract", 100))
+
+    assert rows() == [(100, {"train/loss_fairseq": 2.5})]
+    paths[1].write_text(content + '[recovery] learned_at_least=100 durable_updates=100\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="Conflicting local Fairseq metric"):
+        rows()
 
 
 def test_baseline_schema_v2_spec_maps_the_emitted_shared_series():
