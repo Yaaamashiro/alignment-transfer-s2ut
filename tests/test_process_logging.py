@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -131,3 +132,63 @@ def test_interrupt_terminates_nested_loggers_and_their_worker(tmp_path, monkeypa
     while not stopped() and time.monotonic() < deadline:
         time.sleep(.01)
     assert stopped()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SIGTERM and process groups")
+def test_sigterm_keeps_nested_reporter_alive_until_owner_receipt_is_written(tmp_path):
+    repo = Path(__file__).resolve().parents[1]
+    reporter = """
+import os, runpy, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+base, toolpath = Path(sys.argv[1]), sys.argv[2]
+tool = runpy.run_path(toolpath)
+g = tool['report'].__globals__
+g['gettempdir'] = lambda: str(base)
+def report(args, stop):
+    (base / 'reporter-ready').touch()
+    assert stop.wait(20)
+    time.sleep(5.2)  # The old outer five-second SIGKILL would terminate this reporter.
+    return dict(entity='team', project='project', method='distillation', session='closed')
+g['report'] = report
+task = [sys.executable, '-c', 'import time; time.sleep(20)']
+tool['supervise'](SimpleNamespace(contract='contract', logs=base / 'self', command=task, after_training=None))
+"""
+    pilot = """
+import sys
+from pathlib import Path
+from alignment_transfer_s2ut.process_logging import run_process
+base = Path(sys.argv[1])
+run_process([sys.executable, '-c', sys.argv[2], str(base), sys.argv[3]], base / 'pilot')
+"""
+    outer = """
+import os, sys
+from pathlib import Path
+from alignment_transfer_s2ut.process_logging import run_process
+base = Path(sys.argv[1])
+env = dict(os.environ, AT_LOG_WANDB_DRAIN='1')
+env.pop('AT_LOG_MANAGED_GROUP', None)
+try:
+    run_process([sys.executable, '-c', sys.argv[2], str(base), *sys.argv[3:]], base / 'outer', env=env)
+except KeyboardInterrupt:
+    sys.exit(42)
+"""
+    pythonpath = os.pathsep.join(filter(None, (str(repo / "src"), os.environ.get("PYTHONPATH"))))
+    env = dict(os.environ, PYTHONPATH=pythonpath)
+    proc = subprocess.Popen([sys.executable, "-c", outer, str(tmp_path), pilot, reporter,
+                             str(repo / "tools/wandb_transfer.py")], env=env, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "reporter-ready").exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert (tmp_path / "reporter-ready").exists()
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=15) == 42
+        receipt, = (tmp_path / "alignment-wandb-writers").glob("*.owner.json")
+        assert json.loads(receipt.read_text())["session"] == "closed"
+        assert record_at(tmp_path / "outer")["status"] == "failed_or_interrupted"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

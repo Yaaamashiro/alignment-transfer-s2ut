@@ -2,7 +2,7 @@
 
 import argparse
 from bisect import bisect_right
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import math
@@ -17,11 +17,16 @@ from zipfile import ZipFile
 
 # Keep the W&B runtime independent of the scientific Python environment.
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parents[1] / "src")]
-from alignment_transfer_s2ut.process_logging import log_event, run_process
+from alignment_transfer_s2ut.process_logging import graceful_sigterm, log_event, run_process
 from transfer_bleu import CHECKPOINT, PLAN, SHA256, evaluation_scope, publishable, result_hash
+from wandb_writer import WriterBusy, shared_writer
 
 
 REPORTER_SESSION = "wandb_reporter_session"
+WRITER_BUCKET = "wandb_writer_lock_bucket"
+WRITER_TOKEN = "wandb_writer_lock_token"
+WRITER_CONTRACT = "wandb_writer_contract_hash"
+IDLE_STATES = {"finished", "failed", "crashed", "killed"}
 TRAIN_UPDATE = "wandb_train_update_v2"
 TRAIN_WINDOW = "wandb_train_window_v2"
 DEV_WINDOW = "wandb_dev_full_v2"
@@ -29,6 +34,10 @@ DEV_UPDATE = "wandb_dev_update"
 LEGACY_LOGICAL_TRAIN = {"train/learning_rate", "train/seconds"}
 TRAIN_JSONL = "alignment-train.jsonl"
 DEV_JSONL = "native-dev.jsonl"
+
+
+class WriterConfigurationError(RuntimeError):
+    """A writer requires an operator to correct its configuration or ownership."""
 
 
 class MetricReader:
@@ -301,28 +310,168 @@ def writer_lock(contract):
     return FileLock(str(path), timeout=0)
 
 
-def idle_run(wandb, args, contract, owner):
-    entity = owner["entity"]
-    if (not entity or args.entity and args.entity != entity
-            or args.project != owner["project"] or args.method != owner["method"]):
-        raise RuntimeError("W&B destination differs from the last training reporter in this runtime")
-    target = wandb.Api(timeout=20).run(f"{entity}/{args.project}/{run_id(contract)}")
-    if target.state not in {"finished", "failed", "crashed", "killed"} or target.config.get("condition") != args.method:
-        raise RuntimeError("W&B run is active or does not match the selected training condition")
-    if target.summary.get(REPORTER_SESSION) != owner["session"]:
-        raise RuntimeError("Another training reporter owns this W&B run. Leave the scores on Drive for that reporter.")
-    return target
+def writer_identity(args, contract, entity):
+    return dict(entity=entity, project=args.project, run_id=run_id(contract), contract_hash=contract, method=args.method)
 
 
-def open_run(wandb, args, contract, *, owner=None):
+def check_target(target, args, identity, *, require_group=False):
+    if (target.id != identity["run_id"] or target.entity != identity["entity"] or target.project != identity["project"]
+            or target.config.get("condition") != identity["method"]
+            or target.config.get("alignment_contract_hash", identity["contract_hash"]) != identity["contract_hash"]
+            or target.summary.get(WRITER_CONTRACT, identity["contract_hash"]) != identity["contract_hash"]
+            or require_group and getattr(target, "group", None) != args.group):
+        raise WriterConfigurationError("Existing W&B run identity does not match the verified training experiment")
+    if target.summary.get(WRITER_BUCKET) not in (None, getattr(args, "writer_bucket", None)):
+        raise WriterConfigurationError("Set the shared writer bucket already bound to this W&B run")
+    if target.state not in IDLE_STATES:
+        raise WriterBusy("W&B run is active; wait for the previous writer to finish")
+
+
+def writer_state(target):
+    if target is not None:
+        return tuple(target.summary.get(key) for key in (WRITER_BUCKET, WRITER_TOKEN, REPORTER_SESSION))
+
+
+def live_target(wandb, args, contract):
+    api = wandb.Api(timeout=20)
+    entity = args.entity or api.default_entity
+    if not entity:
+        raise WriterConfigurationError("Set the W&B entity for this reporter")
+    identity = writer_identity(args, contract, entity)
+    try:
+        target = api.run(f"{identity['entity']}/{args.project}/{identity['run_id']}")
+    except (wandb.apis.public.RunNotFoundError, wandb.errors.CommError) as error:
+        if not isinstance(error, wandb.apis.public.RunNotFoundError) and not isinstance(
+                getattr(error, "exc", None), wandb.apis.public.RunNotFoundError):
+            raise
+        return identity, None
+    check_target(target, args, identity, require_group=bool(args.group))
+    return identity, target
+
+
+def store_writer_record(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f".{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def store_owner(contract, owner):
+    store_writer_record(writer_path(contract, ".owner.json"), owner)
+
+
+def read_owner(contract):
+    try:
+        return json.loads(writer_path(contract, ".owner.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+
+
+def verify_owner_destination(owner, entity, args):
+    if entity != owner["entity"] or args.project != owner["project"] or args.method != owner["method"]:
+        raise WriterConfigurationError("W&B destination differs from the last training reporter in this runtime")
+
+
+def check_pending_writer(contract):
+    if writer_path(contract, ".pending.json").exists():
+        raise WriterConfigurationError("A previous W&B init or finish was unconfirmed; stop that writer and use --recover-writer")
+
+
+def start_writer(wandb, args, identity, lease, resume):
+    contract = identity["contract_hash"]
+    store_writer_record(writer_path(contract, ".pending.json"), {**identity, "session": lease.token})
+    lease.opening()
+    return open_run(wandb, args, contract, entity=identity["entity"], resume=resume)
+
+
+def finish_writer(contract, lease, run):
+    lease.finish(run)
+    writer_path(contract, ".pending.json").unlink(missing_ok=True)
+
+
+def bind_writer(run, bucket, lease, contract):
+    if bucket:
+        run.summary[WRITER_BUCKET] = bucket
+        run.summary[WRITER_TOKEN] = lease.token
+        run.summary[WRITER_CONTRACT] = contract
+
+
+@contextmanager
+def sync_writer(wandb, args, contract):
+    bucket = getattr(args, "writer_bucket", None)
+    recover = getattr(args, "recover_writer", False)
+    generation = getattr(args, "recover_lock_generation", None)
+    with writer_lock(contract):
+        owner = None
+        if recover:
+            if not args.entity or not args.group:
+                raise RuntimeError("Writer recovery requires the existing --entity and --group")
+            if not bucket and not getattr(args, "confirm_writers_stopped", False):
+                raise RuntimeError("Without GCS, stop all writers and pass --confirm-writers-stopped")
+            if generation is not None and not bucket:
+                raise RuntimeError("Recovering a lock generation requires --writer-bucket")
+            entity = args.entity
+        else:
+            check_pending_writer(contract)
+            owner = read_owner(contract)
+            if owner is None:
+                raise RuntimeError("No local W&B ownership receipt; see the --recover-writer instructions")
+            entity = owner["entity"]
+            if not entity:
+                raise WriterConfigurationError("The local W&B ownership receipt has no entity")
+            verify_owner_destination(owner, args.entity or entity, args)
+        identity = writer_identity(args, contract, entity)
+
+        def get_target():
+            current = wandb.Api(timeout=20).run(f"{entity}/{args.project}/{identity['run_id']}")
+            check_target(current, args, identity, require_group=recover or bool(getattr(args, "group", None)))
+            if owner is not None and current.summary.get(REPORTER_SESSION) != owner["session"]:
+                raise RuntimeError("Another training reporter owns this W&B run. Leave the scores on Drive for that reporter.")
+            return current
+
+        target = get_target()
+        state = writer_state(target)
+        bound_bucket, token, session = state
+        with shared_writer(bucket, identity, previous_token=token, recover_generation=generation) as lease:
+            def recheck():
+                if writer_state(get_target()) != state:
+                    raise RuntimeError("Another W&B writer connected during recovery")
+
+            def start_run():
+                recheck()
+                run = start_writer(wandb, args, identity, lease, "must")
+                bind_writer(run, bucket, lease, contract)
+                if recover:
+                    run.summary[REPORTER_SESSION] = lease.token
+                return run
+
+            yield target, start_run, lease
+            if recover and not lease.unfinished:
+                if not lease.opened:
+                    if not isinstance(session, str) or not session or bucket != bound_bucket:
+                        # Establish a remote session or first-time bucket binding without
+                        # writing a history row.
+                        finish_writer(contract, lease, start_run())
+                    else:
+                        recheck()
+                store_owner(contract, dict(entity=entity, project=args.project, method=args.method,
+                                           session=lease.token if lease.opened else session))
+                writer_path(contract, ".pending.json").unlink(missing_ok=True)
+                log_event("wandb-writer", "recovered", args.logs, identity["run_id"])
+
+
+def open_run(wandb, args, contract, *, entity=None, resume="allow"):
     identifier = run_id(contract)
-    if owner is not None:
-        idle_run(wandb, args, contract, owner)
-        entity, options = owner["entity"], {}
-    else:
-        entity = args.entity or None
+    options = {}
+    if resume == "allow":
+        entity = entity or args.entity or None
         options = {"group": args.group, "name": args.method, "config": {"condition": args.method}}
-    run = wandb.init(project=args.project, entity=entity, id=identifier, resume="must" if owner else "allow",
+    if resume == "must" or getattr(args, "writer_bucket", None):
+        options["mode"] = "online"
+    run = wandb.init(project=args.project, entity=entity, id=identifier, resume=resume,
                      dir=str(args.logs.resolve()), save_code=False, **options,
                      settings=wandb.Settings(console="off", disable_git=True, disable_code=True,
                                              x_disable_meta=True, x_disable_stats=True,
@@ -361,18 +510,14 @@ def sync_saved_bleu(args):
     if len(contracts) != 1:
         raise ValueError("Saved BLEU results must belong to a single training contract")
     contract = contracts.pop()
-    with writer_lock(contract):
-        owner_path = writer_path(contract, ".owner.json")
-        if not owner_path.is_file():
-            raise RuntimeError("Sync-only requires this run's training reporter to have finished in the same Colab runtime. "
-                               "Leave the scores on Drive for the active training reporter.")
-        run = open_run(wandb, args, contract, owner=json.loads(owner_path.read_text(encoding="utf-8")))
+    with sync_writer(wandb, args, contract) as (_, start_run, lease):
+        run = start_run()
         try:
             set_training_progress(run, snapshot[0])
             written = sync_bleu(run, points, {})
             log_event("wandb-bleu", "synced", args.logs, f"{written} new checkpoint results")
         finally:
-            run.finish()
+            finish_writer(contract, lease, run)
 
 
 @contextmanager
@@ -476,26 +621,68 @@ def sync_saved_metrics(args):
         candidates = list(logical_metric_rows(MetricReader(local / TRAIN_JSONL), MetricReader(local / DEV_JSONL),
                                               published, contract=contract))
     candidates.extend(fairseq_metric_rows(FairseqProgressReader(args.logs), command, contract, published))
-    with writer_lock(contract):
-        owner_path = writer_path(contract, ".owner.json")
-        if not owner_path.is_file():
-            raise RuntimeError("Metric backfill requires the stopped reporter's owning Colab runtime")
-        owner = json.loads(owner_path.read_text(encoding="utf-8"))
-        import wandb
-        missing = missing_metrics(idle_run(wandb, args, contract, owner), candidates)
-        if not missing:
-            log_event("wandb-metrics", "synced", args.logs, f"0 historical metric rows through update {published}")
-            return
-        # Recheck ownership and idle state after the read-only history scan.
-        run = open_run(wandb, args, contract, owner=owner)
-        try:
-            watermarks = {}
-            for (progress, update), values in missing.items():
-                publish_metrics(run, progress, update, values, watermarks, backfill=True)
-            set_training_progress(run, published)
-        finally:
-            run.finish()
-        log_event("wandb-metrics", "synced", args.logs, f"{len(missing)} historical metric rows through update {published}")
+    import wandb
+    with sync_writer(wandb, args, contract) as (target, start_run, lease):
+        missing = missing_metrics(target, candidates)
+        if missing:
+            # Recheck ownership and idle state after the read-only history scan.
+            run = start_run()
+            try:
+                watermarks = {}
+                for (progress, update), values in missing.items():
+                    publish_metrics(run, progress, update, values, watermarks, backfill=True)
+                set_training_progress(run, published)
+            finally:
+                finish_writer(contract, lease, run)
+    log_event("wandb-metrics", "synced", args.logs, f"{len(missing)} historical metric rows through update {published}")
+
+
+def retryable_preflight(error, wandb):
+    from requests.exceptions import ConnectionError as RequestConnectionError, SSLError, Timeout
+
+    if isinstance(error, WriterBusy):
+        return True
+    if isinstance(error, wandb.errors.CommError):
+        error = getattr(error, "exc", None) or error
+    if isinstance(error, SSLError):
+        return False
+    if isinstance(error, (RequestConnectionError, ConnectionError, Timeout, TimeoutError)):
+        return True
+    response = getattr(error, "response", None)
+    # W&B 0.31 wraps the core's ApiErrorResponse. Google API errors expose .code.
+    status = getattr(response, "http_status", None) or getattr(response, "status_code", None) or getattr(error, "code", None)
+    return status in (408, 429, 500, 502, 503, 504) or (
+        not status and type(error).__name__ == "WandbApiFailedError")
+
+
+def retry_writer_preflight(stop, logs, delay, error):
+    reason = str(error) if isinstance(error, WriterBusy) else type(error).__name__
+    if stop.is_set():
+        log_event("wandb", "skipped", logs, f"Writer unavailable at shutdown ({reason})")
+        return True
+    log_event("wandb", "retrying", logs, f"Writer preflight: {reason}; retry in {delay}s")
+    return stop.wait(delay)
+
+
+def reporter_preflight(wandb, args, writer_scope):
+    check_pending_writer(args.contract)
+    owner = read_owner(args.contract)
+    if owner is not None:
+        verify_owner_destination(owner, args.entity or owner["entity"], args)
+    with ExitStack() as attempt:
+        identity, target = live_target(wandb, args, args.contract)
+        if owner is not None:
+            verify_owner_destination(owner, identity["entity"], args)
+            if target is None:
+                raise WriterBusy("The previous W&B run is not visible yet")
+        state = writer_state(target)
+        token = state[1] if state is not None else None
+        lease = attempt.enter_context(shared_writer(getattr(args, "writer_bucket", None), identity, previous_token=token))
+        current_identity, current = live_target(wandb, args, args.contract)
+        if current_identity != identity or writer_state(current) != state:
+            raise WriterBusy("Another W&B writer connected while the reporter was opening")
+        writer_scope.callback(attempt.pop_all().close)
+        return identity, current, lease
 
 
 def report(args, stop):
@@ -510,7 +697,9 @@ def report(args, stop):
     sent_bleu = {}
     published_command = None
     run = None
-    session = uuid4().hex
+    writer_scope = ExitStack()
+    bucket = getattr(args, "writer_bucket", None)
+    retry_delay = 2
     try:
         while True:
             finishing = stop.is_set()
@@ -520,12 +709,25 @@ def report(args, stop):
                 plan = json.loads(plan_bytes)
                 if plan.get("contract_hash") == args.contract:
                     plan_sha = hashlib.sha256(plan_bytes).hexdigest()
-                    snapshot = published_snapshot(work, args.backup, plan_sha, published, args.method)
+                    snapshot = published_snapshot(work, args.backup, plan_sha, published if run is not None else 0,
+                                                  args.method)
                     if snapshot is not None:
                         published, published_command, _ = snapshot
                         if run is None:
-                            run = open_run(wandb, args, args.contract)
+                            try:
+                                identity, current, lease = reporter_preflight(wandb, args, writer_scope)
+                            except Exception as error:
+                                if not retryable_preflight(error, wandb):
+                                    raise
+                                if retry_writer_preflight(stop, args.logs, retry_delay, error):
+                                    return
+                                retry_delay = min(2 * retry_delay, 60)
+                                continue
+                            # After attempting init only confirmed finish can release this writer.
+                            run = start_writer(wandb, args, identity, lease, "must" if current is not None else "allow")
+                            session = lease.token
                             run.summary[REPORTER_SESSION] = session
+                            bind_writer(run, bucket, lease, args.contract)
                         set_training_progress(run, published)
                     if run is not None:
                         sync_rows(run, train, dev, published, watermarks, contract=args.contract)
@@ -542,10 +744,13 @@ def report(args, stop):
                 break
             stop.wait(15)
     finally:
-        if run is not None:
-            run.finish()
-        else:
-            log_event("wandb", "skipped", args.logs, "No published updates for this contract")
+        try:
+            if run is not None:
+                finish_writer(args.contract, lease, run)
+            elif published == 0:
+                log_event("wandb", "skipped", args.logs, "No published updates for this contract")
+        finally:
+            writer_scope.close()
     if run is not None:
         return {"entity": run.entity, "project": args.project, "method": args.method, "session": session}
 
@@ -631,23 +836,37 @@ def sync_logged_layers(run, reader, command, contract, published, watermarks):
         publish_metrics(run, progress, update, values, watermarks)
 
 
+@graceful_sigterm
 def supervise(args):
     stop = Event()
 
     def publish():
+        from filelock import Timeout as LockTimeout
+
         try:
-            with writer_lock(args.contract):
-                owner_path = writer_path(args.contract, ".owner.json")
-                owner_path.unlink(missing_ok=True)
+            delay = 2
+            lock = writer_lock(args.contract)
+            while True:
+                try:
+                    lock.acquire()
+                    break
+                except LockTimeout as error:
+                    if retry_writer_preflight(stop, args.logs, delay, error):
+                        return
+                    delay = min(2 * delay, 60)
+            try:
                 if owner := report(args, stop):
-                    owner_path.write_text(json.dumps(owner), encoding="utf-8")
+                    store_owner(args.contract, owner)
+            finally:
+                lock.release()
         except Exception as error:
-            log_event("wandb", "failed", args.logs, type(error).__name__)
+            detail = str(error) if isinstance(error, WriterConfigurationError) else type(error).__name__
+            log_event("wandb", "failed", args.logs, detail)
 
     worker = Thread(target=publish, name="wandb-metrics", daemon=True)
     worker.start()
     try:
-        env = {key: value for key, value in os.environ.items() if key != "WANDB_API_KEY"}
+        env = {key: value for key, value in os.environ.items() if key not in {"WANDB_API_KEY", "AT_LOG_WANDB_DRAIN"}}
         run_process(args.command, args.logs, name="wandb-training-child", env=env)
         if args.after_training:
             run_process(args.after_training, args.logs, name="online-bleu-after-checkpoint", env=env)
@@ -658,6 +877,7 @@ def supervise(args):
             log_event("wandb", "failed", args.logs, "Timed out waiting for metric upload at shutdown")
 
 
+@graceful_sigterm
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("work", "backup", "logs"):
@@ -667,6 +887,13 @@ def main():
     parser.add_argument("--contract")
     parser.add_argument("--group")
     parser.add_argument("--entity")
+    parser.add_argument("--writer-bucket", default=os.environ.get("WANDB_WRITER_BUCKET") or None)
+    parser.add_argument("--recover-writer", action="store_true",
+                        help="Recover ownership of an existing stopped run")
+    parser.add_argument("--confirm-writers-stopped", action="store_true",
+                        help="Confirm all previous writers are stopped for manual recovery without a shared bucket")
+    parser.add_argument("--recover-lock-generation", type=int,
+                        help="Replace this exact orphaned shared writer generation after confirming its VM is gone")
     parser.add_argument("--bleu-results", type=Path)
     parser.add_argument("--after-training", type=json.loads)
     modes = parser.add_mutually_exclusive_group()
@@ -677,6 +904,13 @@ def main():
     args = parser.parse_args()
     if args.command[:1] == ["--"]:
         args.command = args.command[1:]
+    if args.recover_writer and not args.sync_metrics_only:
+        parser.error("--recover-writer requires --sync-metrics-only")
+    if args.confirm_writers_stopped and not args.recover_writer:
+        parser.error("--confirm-writers-stopped requires --recover-writer")
+    if args.recover_lock_generation is not None and (
+            args.recover_lock_generation < 1 or not args.recover_writer or not args.writer_bucket):
+        parser.error("--recover-lock-generation requires --recover-writer, --writer-bucket and a positive generation")
     if args.sync_metrics_only:
         if args.command or args.after_training:
             parser.error("--sync-metrics-only requires no training command")

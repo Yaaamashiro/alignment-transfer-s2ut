@@ -335,7 +335,7 @@ def test_sync_only_notebook_skips_evaluation_and_cuda(tmp_path, monkeypatch):
     calls = []
     colab = SimpleNamespace(userdata=SimpleNamespace(get=lambda name: "fixture-key"))
     monkeypatch.setitem(sys.modules, "google.colab", colab)
-    ns.update(SYNC_SAVED_TRANSFER_BLEU=True, EVALUATE_S2UT=False, ENABLE_WANDB=True,
+    ns.update(SYNC_SAVED_TRANSFER_BLEU=True, EVALUATE_S2UT=False, ENABLE_WANDB=True, WANDB_WRITER_BUCKET="shared-lock",
               COMPARE_MASK_DISTILLATION=True, execute=lambda *args, **kwargs: calls.append((args, kwargs)))
     for cell in ("preflight", "restore-inputs", "bleu-backfill"):
         exec(cells[cell], ns)
@@ -343,4 +343,6 @@ def test_sync_only_notebook_skips_evaluation_and_cuda(tmp_path, monkeypatch):
     assert cmd[2:5] == ("--sync-bleu-only", "--method", "mask_distillation")
     assert "--bleu-results" in cmd and "--baseline-backup" not in cmd
     assert options["env"]["WANDB_API_KEY"] == "fixture-key"
+    assert options["env"]["AT_LOG_WANDB_DRAIN"] == "1"
+    assert cmd[cmd.index("--writer-bucket") + 1] == "shared-lock"
     assert not any("--cuda" in cmd or "backfill" in cmd for cmd, _ in calls)
