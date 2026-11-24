@@ -20,7 +20,7 @@ from .fairseq_extension import AlignmentS2UT, s2ut_architecture_fisher
 from ..benchmark import read_record, artifact_contract
 from ..config import BackboneConfig
 from ..data.manifest import load_manifest
-from ..io import ArtifactStore, read_json, write_jsonl, read_jsonl
+from ..io import ArtifactStore, read_json, write_json, write_jsonl, read_jsonl
 from ..alignment.losses import encoder_padding_mask, loss_and_logs, coefficient_policy, lambda_at
 from ..training import prior_builder
 
@@ -227,13 +227,17 @@ def metric_scalar(value):
     return None
 
 
-def training_metric_row(result, update, learning_rate, seconds):
+def training_metric_row(result, update, learning_rate, seconds, *, required=()):
     row = {"step": update, "metric_schema": 2}
     for key, value in {**result, "train/learning_rate": learning_rate, "train/seconds": seconds}.items():
         if not key.startswith(("alignment/", "train/")):
             continue
         value = metric_scalar(value)
-        if value is None or key == "alignment/task_only_start" and value < 0:
+        if value is None:
+            if key in required:
+                row[key] = None  # The live validator reports an invalid input, never writes it.
+            continue
+        if key == "alignment/task_only_start" and value < 0:
             continue
         if key == "alignment/worst_layer" and not (value >= 0 and value == int(value)):
             continue
@@ -418,6 +422,19 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
     original_forward = SpeechToUnitMultitaskTaskCriterion.forward
     original_compute = SpeechToUnitMultitaskTaskCriterion.compute_loss
     schema_v3 = os.environ.get("S2ST_TRANSFER_METRIC_SCHEMA") == "3"
+    from ..metric_integrity_v3 import required_metrics, validate_row
+
+    def validate_measurement(path, row, policy, split):
+        try:
+            tau = policy["calibrated"]["tau_mask" if policy["method"] == "mask_distillation" else "tau_kl"]
+            validate_row(row, policy["method"], contract_hash, split, tau=tau)
+        except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+            reason = f"Schema v3 {split} measurement failed at update {row['step']}: {error}"
+            write_json(path.parent / "metric-stop.json", {"split": split, "step": row["step"],
+                       "alignment_contract_hash": contract_hash, "error": reason}, overwrite=True)
+            # A successful optimizer step can have an invalid observation. Exit
+            # before Fairseq can save or publish that step (or select it as best).
+            raise ValueError(reason) from error
     selection_policy = selection_policy or {"mode": "native"}
     scaler_fields = ("loss_scale", "_iter", "_last_overflow_iter", "_last_rescale_iter", "_overflows_since_rescale")
 
@@ -490,12 +507,15 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
             if (result is not None and self.get_num_updates() == before + 1
                     and (not schema_v3 or self.is_data_parallel_master)):
                 path = Path(self.cfg.checkpoint.save_dir).parent / "alignment-train.jsonl"
-                row = training_metric_row(result, self.get_num_updates(), self.get_lr(), self.cumulative_training_time())
+                policy = getattr(self.task, "transfer_policy", None)
+                update = self.get_num_updates()
+                required = {key.replace("alignment/update/", "alignment/")
+                            for key in required_metrics(policy["method"], update)} if schema_v3 else ()
+                row = training_metric_row(result, update, self.get_lr(), self.cumulative_training_time(), required=required)
                 scaler = getattr(self.optimizer, "scaler", None) if self.cfg.common.fp16 else None
                 scale = metric_scalar(getattr(scaler, "loss_scale", None))
                 if scale is not None:
                     row["train/loss_scale"] = scale
-                policy = getattr(self.task, "transfer_policy", None)
                 if policy is not None:
                     row["coefficient_policy"] = coefficient_policy(policy, self.task.training_budget)
                     row.update(method=policy["method"], alignment_contract_hash=contract_hash,
@@ -510,6 +530,7 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                     if type(scaler_iter) is int and type(after_iter) is int and 1 <= after_iter - scaler_iter <= 33:
                         # The pinned scaler counts one iteration per success or confirmed overflow.
                         row["train/overflow_retries"] = after_iter - scaler_iter - 1
+                    validate_measurement(path, row, policy, "train")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 import json
                 with path.open("a", encoding="utf-8") as stream:
@@ -640,7 +661,6 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
             saved = {**saved, "last_validation": update}
             if improved:
                 saved.update(best=loss, best_update=update)
-            trainer.selection_state = saved
             output = Path(cfg.checkpoint.save_dir).parent / "native-dev.jsonl"
             if not schema_v3 or trainer.is_data_parallel_master:
                 row = {"step": update, "dev/main_loss": loss, "beta": 0}
@@ -653,6 +673,7 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                         row.update(v3_loss_measurements(measured, "dev"))
                     except (KeyError, TypeError, ValueError, ArithmeticError) as error:
                         row["measurement_error"] = str(error)
+                    validate_measurement(output, row, task.transfer_policy, "dev")
                 values = read_jsonl(output) if output.is_file() else []
                 if schema_v3 and any(item["step"] == update for item in values):
                     raise ValueError("full-Dev measurement already exists for this update")
@@ -660,6 +681,7 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                 write_jsonl(output, values, overwrite=True)
             if schema_v3:
                 trainer.validation_measurements = None
+            trainer.selection_state = saved
             if improved:
                 trainer.checkpoint_epoch_loss = loss
                 target = Path(cfg.checkpoint.save_dir) / "checkpoint_best.pt"

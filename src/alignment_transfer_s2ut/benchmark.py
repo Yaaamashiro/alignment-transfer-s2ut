@@ -431,6 +431,9 @@ def train_native(plan, output, resume=False, *, stop_after_update=None):
                       or plan["training_budget"] != 400000 or plan["selection_policy"].get("interval") != 1000
                       or plan["selection_policy"]["mode"] == "native"):
         raise ValueError("Schema v3 requires the registered 400k transfer plan and full Dev selection at 1k")
+    if schema_v3:
+        from .metric_integrity_v3 import checkpoint_originals, plan_tau
+        plan_tau(plan)
     target = pilot_target(plan, stop_after_update)
     marker, last = output / "native-run.json", output / "checkpoints/checkpoint_last.pt"
     if output.exists() and any(output.iterdir()):
@@ -445,6 +448,7 @@ def train_native(plan, output, resume=False, *, stop_after_update=None):
             raise ValueError("native resume checkpoint exceeds the training budget")
         if schema_v3:
             benchmark_extension.trim_v3_metrics(output, updates)
+            checkpoint_originals(output, updates, plan)
         if updates >= target:
             return {"checkpoint": str(last), "updates": updates, "optimizer_steps": 0,
                     "status": "COMPLETED" if updates == plan["training_budget"] else "PILOT_PAUSED"}

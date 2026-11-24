@@ -48,7 +48,44 @@ The observer runs after the successful native reduction. It gathers a small vect
 
 `--audit-v3=local` uses local JSONL through the newest published update. `snapshot` verifies the archived plan and declared JSONL against their receipt SHA-256. `wandb` also reads uncached, unsampled history on the contract-bound Run. The audit checks fixed update sets, successful train rows, duplicates, recorded sample counts, finite values, raw ratios, required phase/condition fields, result hashes and the Summary. It reports unavailable originals, waiting or failed BLEU, eligible unsent W&B cells, acknowledgement/indexing delays, and conflicting or duplicate cells separately. `--final` requires all BLEU milestones through the audited update.
 
+The same original-row validator runs in the trainer on every successful optimizer update and every scheduled full-Dev result. It checks τ against the registered Calibration, nonnegative integral row and frame counts, normalized eligible layer weights and worst-layer fractions, the worst layer against the reduced layer losses, and the actual applied `lambda × loss`. Mask coverage and region mass must be probabilities. Small FP32 rounding differences are permitted. The validator uses the existing sample-size-weighted statistics and does not recompute weights from averaged layer losses.
+
+### Stop and resume after an original-measurement failure
+
+1. Read the training log and the local run folder's `metric-stop.json` for the attempted update and validation error. The trainer exits before saving that update or replacing the best checkpoint. The benchmark publisher checks the frozen copy against the checkpoint update, including the fallback freeze after a child exits. The capture of normal earlier updates can still produce a valid durable point.
+2. Keep the existing run, backup and W&B identities. Run **Recover W&B writer and sync saved metrics** with `AUDIT_WANDB_METRICS_ONLY=True` and `V3_AUDIT_SCOPE='snapshot'` to identify the durable point. Turn `V3_REQUIRE_SCHEDULED_BLEU` off when checking originals after a failed or interrupted evaluation. A rejected Snapshot must not be used as a recovery source. Keep its files for diagnosis.
+3. Resolve the reported measurement issue before restarting. Run the same training cell with the same inputs and intended stop. The normal recovery path restores the published state, retains a displaced local work folder, and checks every original row through the restored update before training. The current guard prevents a failed observation from becoming a new published resume point. If an older release already published incomplete originals, the resume guard stops and reports that Snapshot for investigation.
+4. Each successful segment runs `--audit-v3 snapshot --originals-only --expected-update <step>` automatically. A failed audit ends the notebook loop before the next segment. This audit is independent of W&B and BLEU. When a Snapshot passes and W&B is unavailable, the reporter can recover from the saved originals without restarting training.
+
 The W&B Run ID is the first 24 hexadecimal digits of the SHA-256 of compact UTF-8 JSON `["transfer",3,entity,project,group,method,scientific_contract]`. Config verifies that identity and records `metric_schema=3`. W&B's internal step increases naturally, and every chart uses `update`. `train/target_update`, `train/max_update`, and `train/durable_update` are Summary fields. Existing writers reopen with `resume="must"`. An uncreated v3 Run uses the same derived ID with create-only resume semantics. Sync uses the existing ownership/FileLock mechanism, rejects source and remote conflicts before opening a writer, and waits for acknowledgement if a known watermark covers missing history. For manual recovery without GCS, stop all other writers to the Run across all VMs. A Run already bound to GCS requires the same bucket. [Writer recovery](WANDB_RECOVERY.md#restore-writer-ownership-on-a-cpu-runtime)
+
+### Repair repeatedly observed W&B gaps
+
+`missing` identifies eligible cells without an acknowledgement watermark. `ack_pending` means a cell is absent in the current history scan even though the watermark covers it. A single scan cannot distinguish late indexing from a lost cell. Normal sync never resends a cell in `ack_pending`. Duplicates, value conflicts, or a change in Run, writer, or Snapshot identity block gap repair.
+
+With all writers stopped, use the same v3 W&B command and SDK environment as in **Recover W&B writer and sync saved metrics**. In a copy of that cell, use its `recovery_command`, `python` and `env` for the following three **separate** invocations. The observation files are local to this CPU runtime. The observation command can return a nonzero status while the audit still reports incomplete delivery.
+
+```python
+first = Path('/content/v3-gap-first.json')
+second = Path('/content/v3-gap-second.json')
+execute(python, *recovery_command, '--audit-v3', 'wandb', '--record-v3-gaps', first, env=env)
+```
+
+Wait at least 10 minutes with writers stopped. Use a new filename if repeating an observation.
+
+```python
+execute(python, *recovery_command, '--audit-v3', 'wandb', '--record-v3-gaps', second,
+        '--compare-v3-gaps', first, env=env)
+```
+
+Inspect `repeatedly_observed_gaps`. After confirming the points and that all writers remain stopped, authorize repair explicitly.
+
+```python
+execute(python, *recovery_command, '--sync-metrics-only', '--recover-writer',
+        '--confirm-writers-stopped', '--repair-v3-gaps', first, second, env=env)
+```
+
+Repair revalidates the published originals, scans again immediately before opening the existing Run, and appends only verified cells missing in both observations and the fresh scan. The final scan reports gaps still pending or any conflicts. If indexing is still pending, wait and rerun the read-only audit. A completed repair can be rerun without adding duplicate history.
 
 ## Colab workflow
 

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from tempfile import TemporaryDirectory, gettempdir
 from threading import Event, Thread
 from uuid import uuid4
@@ -33,6 +34,7 @@ LEGACY_LOGICAL_TRAIN = {"train/learning_rate", "train/seconds"}
 TRAIN_JSONL = "alignment-train.jsonl"
 DEV_JSONL = "native-dev.jsonl"
 EVAL_PROGRESS = "wandb_eval_update_v3"
+GAP_OBSERVATION_SECONDS = 600
 
 
 class WriterConfigurationError(RuntimeError):
@@ -466,8 +468,13 @@ def sync_writer(wandb, args, contract):
                 if writer_state(get_target()) != state:
                     raise RuntimeError("Another W&B writer connected during recovery")
 
-            def start_run():
-                recheck()
+            def start_run(check=None):
+                current = get_target()
+                if writer_state(current) != state:
+                    raise RuntimeError("Another W&B writer connected during recovery")
+                if check is not None:
+                    check(current)
+                    recheck()  # A scan can take long enough for another VM to reconnect.
                 run = start_writer(wandb, args, identity, lease, "must" if target is not None else "never")
                 bind_writer(run, bucket, lease, contract)
                 if recover:
@@ -629,11 +636,16 @@ def v3_bleu_rows(args, plan_sha, maximum, contract):
             for update, row in points]
 
 
-def v3_source_rows(args, plan_sha, maximum, contract, local, *, allow_unpublished=False):
+def v3_source_rows(args, plan_sha, maximum, contract, local, *, tau, allow_unpublished=False,
+                   originals_only=False):
     train, train_status = v3.coverage(local / TRAIN_JSONL, maximum, args.method, contract, "train",
-                                      allow_unpublished=allow_unpublished)
+                                      tau=tau, allow_unpublished=allow_unpublished)
     dev, dev_status = v3.coverage(local / DEV_JSONL, maximum, args.method, contract, "dev",
-                                  allow_unpublished=allow_unpublished)
+                                  tau=tau, allow_unpublished=allow_unpublished)
+    rows = [(TRAIN_UPDATE, update, values) for update, values in train.items()]
+    rows.extend((DEV_UPDATE, update, values) for update, values in dev.items())
+    if originals_only:
+        return rows, [], {"train": train_status, "dev": dev_status}
     bleu = v3_bleu_rows(args, plan_sha, maximum, contract)
     scored = {update for _, update, _ in bleu}
     failed = set()
@@ -649,8 +661,6 @@ def v3_source_rows(args, plan_sha, maximum, contract, local, *, allow_unpublishe
     reports = {"train": train_status, "dev": dev_status,
                "bleu": {"completed": sorted(scored), "failed": sorted((scheduled - scored) & failed),
                         "waiting": sorted(scheduled - scored - failed), "complete": scored == scheduled}}
-    rows = [(TRAIN_UPDATE, update, values) for update, values in train.items()]
-    rows.extend((DEV_UPDATE, update, values) for update, values in dev.items())
     return rows, bleu, reports
 
 
@@ -663,18 +673,21 @@ def saved_metric_sources(args, *, compare_attempts=False):
     return contract, published, members, {"snapshot_jsonl": snapshot, "local_fairseq": window}
 
 
-def verified_v3_sources(args, audit_scope="snapshot"):
+def verified_v3_sources(args, audit_scope="snapshot", *, originals_only=False):
     with metric_snapshot(args) as (contract, published, command, local, members):
         if published > v3.MAX_UPDATE:
             raise ValueError("Schema v3 snapshot exceeds the registered budget")
-        plan_sha = hashlib.sha256((local / PLAN).read_bytes()).hexdigest()
+        plan_bytes = (local / PLAN).read_bytes()
+        plan_sha = hashlib.sha256(plan_bytes).hexdigest()
+        tau = v3.plan_tau(json.loads(plan_bytes))
         source = args.work if audit_scope == "local" else local
         if audit_scope == "local" and (not (source / PLAN).is_file()
                 or hashlib.sha256((source / PLAN).read_bytes()).hexdigest() != plan_sha):
             raise ValueError("Local metric plan differs from the published snapshot")
-        metrics, bleu, reports = v3_source_rows(args, plan_sha, published, contract, source,
-                                              allow_unpublished=audit_scope == "local")
-    windows = fairseq_metric_rows(FairseqProgressReader(args.logs, compare_attempts=True), command, contract, published)
+        metrics, bleu, reports = v3_source_rows(args, plan_sha, published, contract, source, tau=tau,
+            allow_unpublished=audit_scope == "local", originals_only=originals_only)
+    windows = () if originals_only else fairseq_metric_rows(
+        FairseqProgressReader(args.logs, compare_attempts=True), command, contract, published)
     return contract, published, members, {"original_jsonl": metrics, "local_fairseq": windows,
                                          "qualified_bleu": bleu}, reports
 
@@ -689,9 +702,97 @@ def verify_v3_plan(args):
     print(json.dumps(evidence))
 
 
+def gap_sources(args, contract, update, sources):
+    snapshot = published_snapshot(args.work.resolve(), args.backup, None, update - 1, args.method, exact=update)
+    if snapshot is None:
+        raise ValueError("Gap evidence requires the original published Snapshot")
+    scope = dict(writer_identity(args, contract, args.entity), group=args.group, metric_schema=3,
+                 update=update, members={name: snapshot[2].get(name)
+                     for name in (PLAN, CHECKPOINT, TRAIN_JSONL, DEV_JSONL)})
+    return scope, {key: list(sources[key]) for key in ("original_jsonl", "qualified_bleu")}
+
+
+def gap_observation(scope, target, report):
+    return {"scope": scope, "observed_at": time.time(), "writer_state": list(writer_state(target)),
+            "unconfirmed": report["ack_pending"]}
+
+
+def gap_points(observation):
+    return {(update, key) for key, updates in observation.items() for update in updates}
+
+
+def repeated_gaps(first, second, scope):
+    if (first.get("scope") != scope or second.get("scope") != scope
+            or first.get("writer_state") != second.get("writer_state")):
+        raise ValueError("Gap observations must bind the same Snapshot, Run, Schema and stopped writer")
+    times = [item.get("observed_at") for item in (first, second)]
+    if (not all(v3.valid_number(value) for value in times) or times[1] > time.time()
+            or times[1] - times[0] < GAP_OBSERVATION_SECONDS):
+        raise ValueError(f"Gap observations must be at least {GAP_OBSERVATION_SECONDS} seconds apart")
+    return gap_points(first["unconfirmed"]) & gap_points(second["unconfirmed"])
+
+
+def repair_v3_gaps(args, wandb, contract, published, sources):
+    if not args.recover_writer or not args.confirm_writers_stopped:
+        raise ValueError("Gap repair requires explicit confirmation that all W&B writers are stopped")
+    paths = args.repair_v3_gaps
+    first, second = (json.loads(path.read_bytes()) for path in paths)
+    scope, durable = gap_sources(args, contract, published, sources)
+    confirmed = repeated_gaps(first, second, scope)
+    if not confirmed:
+        raise ValueError("No repeatedly observed gaps; W&B delivery is uncertain, so nothing was written")
+
+    def repair_rows(target):
+        if target is None:
+            raise ValueError("Persistent gap recovery requires the existing verified W&B Run")
+        audit = v3.remote_audit(target, durable, published)
+        if audit["status"] == "CONFLICT":
+            raise ValueError(f"W&B value conflict or duplicate; nothing was written: {audit['errors']}")
+        gaps = gap_points(audit["ack_pending"]) & confirmed
+        if confirmed & gap_points(audit["missing"]):
+            raise ValueError("A confirmed gap is no longer below its recorded watermark; collect fresh observations")
+        if gaps and list(writer_state(target)) != second["writer_state"]:
+            raise ValueError("Writer changed since the gap observations; collect fresh evidence")
+        return {(progress, update): subset for points in durable.values() for progress, update, values in points
+                if (subset := {key: value for key, value in values.items() if (update, key) in gaps})}
+
+    _, target = live_target(wandb, args, contract)
+    written = {}
+    if repair_rows(target):
+        with sync_writer(wandb, args, contract) as (_, start_run, lease):
+            # Use a fresh uncached scan under the existing writer guards,
+            # immediately before wandb.init. This also recomputes the missing cells.
+            def check(current):
+                written.update(repair_rows(current))
+                if not written:
+                    raise WriterBusy("The confirmed gaps became visible; run the read-only audit again")
+
+            run = start_run(check)
+            try:
+                watermarks = {}
+                for (progress, update), values in sorted(written.items(), key=lambda item: (item[0][1], item[0][0])):
+                    publish_metrics(run, progress, update, values, watermarks, backfill=True)
+            finally:
+                finish_writer(v3.namespace(contract, args), lease, run)
+    _, target = live_target(wandb, args, contract)
+    audit = v3.remote_audit(target, durable, published)
+    remaining = confirmed & (gap_points(audit["missing"]) | gap_points(audit["ack_pending"]))
+    status = "CONFLICT" if audit["status"] == "CONFLICT" else "ACK_PENDING" if remaining else "RECOVERED"
+    print(json.dumps({"status": status,
+                      "repaired_rows": len(written), "remaining_confirmed_gaps": sorted(remaining),
+                      "delivery": audit}, allow_nan=False, sort_keys=True), flush=True)
+    if remaining or audit["status"] == "CONFLICT":
+        raise RuntimeError("W&B repair is not verified; wait and rerun the read-only audit before doing anything else")
+
+
 def audit_v3(args):
-    contract, published, members, sources, reports = verified_v3_sources(args, args.audit_v3)
+    originals_only = getattr(args, "originals_only", False)
+    record = getattr(args, "record_v3_gaps", None)
+    contract, published, members, sources, reports = verified_v3_sources(
+        args, args.audit_v3, originals_only=originals_only)
     original_ok = reports["train"]["complete"] and reports["dev"]["complete"]
+    if getattr(args, "expected_update", None) not in (None, published):
+        raise ValueError(f"Expected the milestone snapshot at {args.expected_update}, found {published}")
     report = {"scope": args.audit_v3, "published_update": published, "originals": reports,
               "verified_snapshot_members": members, "run_id": run_id(v3.namespace(contract, args))}
     remote_ok = True
@@ -710,9 +811,23 @@ def audit_v3(args):
                           and published <= (progress["train/max_update"] or 0) <= v3.MAX_UPDATE)
             report["delivery"].update(summary=progress, summary_matches=summary_ok)
             remote_ok = report["delivery"]["status"] == "VERIFIED" and summary_ok
-    report["status"] = ("FAILED" if not original_ok or args.final and not reports["bleu"]["complete"]
+            if record and original_ok:
+                # The evidence covers only durable sources available on a cold VM.
+                scope, durable = gap_sources(args, contract, published, sources)
+                delivery = v3.remote_audit(target, durable, published)
+                if delivery["status"] == "CONFLICT":
+                    raise ValueError("Conflicting or duplicate history cannot produce gap recovery evidence")
+                with record.open("x", encoding="utf-8") as output:
+                    observation = gap_observation(scope, target, delivery)
+                    json.dump(observation, output, allow_nan=False, sort_keys=True)
+                report["gap_observation"] = str(record)
+                if earlier := getattr(args, "compare_v3_gaps", None):
+                    report["repeatedly_observed_gaps"] = sorted(repeated_gaps(
+                        json.loads(earlier.read_bytes()), observation, scope))
+    bleu_complete = originals_only or reports["bleu"]["complete"]
+    report["status"] = ("FAILED" if not original_ok or args.final and not bleu_complete
                         else "INCOMPLETE_DELIVERY" if not remote_ok
-                        else "VERIFIED" if reports["bleu"]["complete"] else "EVALUATION_PENDING")
+                        else "VERIFIED" if bleu_complete else "EVALUATION_PENDING")
     print(json.dumps(report, allow_nan=False, sort_keys=True), flush=True)
     return report["status"] == "VERIFIED" or not args.final and report["status"] == "EVALUATION_PENDING"
 
@@ -745,6 +860,8 @@ def sync_saved_metrics(args):
     else:
         contract, published, _, sources = saved_metric_sources(args, compare_attempts=include_legacy)
     import wandb
+    if getattr(args, "repair_v3_gaps", None):
+        return repair_v3_gaps(args, wandb, contract, published, sources)
     with sync_writer(wandb, args, contract) as (target, start_run, lease):
         if schema_v3:
             missing, report = v3.reconcile_delivery(target, sources, published)
@@ -857,7 +974,7 @@ def report(args, stop):
                                         state = writer_state(current)
                                         history = logical_metric_rows(MetricReader(work / TRAIN_JSONL),
                                             MetricReader(work / DEV_JSONL), published, contract=args.contract,
-                                            schema_v3=True, method=args.method)
+                                            schema_v3=True, method=args.method, tau=v3.plan_tau(plan))
                                         bleu_rows = v3_bleu_rows(args, plan_sha, published, args.contract)
                                         missing, _ = v3.reconcile_delivery(current, {"original_jsonl": history,
                                             "qualified_bleu": bleu_rows}, published)
@@ -883,7 +1000,7 @@ def report(args, stop):
                         set_training_progress(run, published, schema_v3=schema_v3)
                     if run is not None:
                         sync_rows(run, train, dev, published, watermarks, contract=args.contract,
-                                  schema_v3=schema_v3, method=args.method)
+                                  schema_v3=schema_v3, method=args.method, tau=v3.plan_tau(plan) if schema_v3 else None)
                         sync_logged_layers(run, layers, published_command, args.contract, published,
                                            watermarks)
                         if getattr(args, "bleu_results", None) and (snapshot is not None or finishing):
@@ -941,7 +1058,7 @@ def logical_train_metrics(row):
     return output
 
 
-def logical_metric_rows(train, dev, published, *, contract=None, schema_v3=False, method=None):
+def logical_metric_rows(train, dev, published, *, contract=None, schema_v3=False, method=None, tau=None):
     for reader, progress in ((train, TRAIN_UPDATE), (dev, DEV_UPDATE)):
         for row in reader.rows(published):
             update = row["step"]
@@ -951,15 +1068,7 @@ def logical_metric_rows(train, dev, published, *, contract=None, schema_v3=False
                     raise ValueError(f"Foreign Schema v3 measurement at update {update}")
                 if (split == "train" and update != 1 and update % 100) or (split == "dev" and update % 1000):
                     continue
-                values = v3.metric_values(row, split)
-                v3.check_raw(row, split)
-                required = v3.required_metrics(method, update) if split == "train" else v3.DEV
-                if any(not v3.valid_number(values.get(key)) for key in required):
-                    raise ValueError(f"Incomplete {split} Schema v3 measurements at update {update}")
-                if any(not v3.valid_number(value) for value in values.values()):
-                    raise ValueError(f"Nonfinite {split} Schema v3 measurement at update {update}")
-                if split == "train":
-                    v3.check_alignment(values, method, update)
+                values = v3.validate_row(row, method, contract, split, tau=tau)
                 yield progress, update, values
                 continue
             if row.get("metric_schema") == 3:
@@ -975,9 +1084,9 @@ def logical_metric_rows(train, dev, published, *, contract=None, schema_v3=False
                 yield progress, update, values
 
 
-def sync_rows(run, train, dev, published, watermarks, *, contract=None, schema_v3=False, method=None):
+def sync_rows(run, train, dev, published, watermarks, *, contract=None, schema_v3=False, method=None, tau=None):
     for progress, update, values in logical_metric_rows(train, dev, published, contract=contract,
-                                                        schema_v3=schema_v3, method=method):
+                                                        schema_v3=schema_v3, method=method, tau=tau):
         publish_metrics(run, progress, update, values, watermarks)
 
 
@@ -1048,6 +1157,8 @@ def supervise(args):
     try:
         env = {key: value for key, value in os.environ.items() if key not in {"WANDB_API_KEY", "AT_LOG_WANDB_DRAIN"}}
         run_process(args.command, args.logs, name="wandb-training-child", env=env)
+        if audit := getattr(args, "after_training_audit", None):
+            run_process(audit, args.logs, name="schema-v3-milestone-originals", env=env)
         if args.after_training:
             run_process(args.after_training, args.logs, name="online-bleu-after-checkpoint", env=env)
     finally:
@@ -1077,6 +1188,7 @@ def main():
                         help="Replace this exact orphaned shared writer generation after confirming its VM is gone")
     parser.add_argument("--bleu-results", type=Path)
     parser.add_argument("--after-training", type=json.loads)
+    parser.add_argument("--after-training-audit", type=json.loads)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--sync-bleu-only", action="store_true")
     modes.add_argument("--sync-metrics-only", action="store_true")
@@ -1088,6 +1200,12 @@ def main():
     parser.add_argument("--previous-work", type=Path)
     parser.add_argument("--previous-backup", type=Path)
     parser.add_argument("--final", action="store_true", help="Require all scheduled BLEU evaluations in a v3 audit")
+    parser.add_argument("--originals-only", action="store_true", help="Audit the checkpoint's Train/Dev originals without BLEU or W&B")
+    parser.add_argument("--expected-update", type=int, help="Require a publication at this exact milestone")
+    parser.add_argument("--record-v3-gaps", type=Path, metavar="OUTPUT", help="Save a stopped Run's read-only gap observation locally")
+    parser.add_argument("--compare-v3-gaps", type=Path, metavar="EARLIER", help="Report gaps absent in both qualified observations")
+    parser.add_argument("--repair-v3-gaps", type=Path, nargs=2, metavar=("FIRST", "SECOND"),
+                        help="Append proven gaps after explicit stopped-writer recovery")
     parser.add_argument("--include-legacy-history", action="store_true",
                         help="Use marked legacy W&B history as another source for --sync-metrics-only")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -1095,6 +1213,18 @@ def main():
     if args.command[:1] == ["--"]:
         args.command = args.command[1:]
     v3.verify_destination(args)
+    if (args.originals_only or args.expected_update is not None) and not (v3.enabled(args) and args.audit_v3 == "snapshot"):
+        parser.error("--originals-only and --expected-update require Schema v3 --audit-v3 snapshot")
+    if (args.record_v3_gaps or args.compare_v3_gaps) and not (
+            v3.enabled(args) and args.audit_v3 == "wandb" and args.record_v3_gaps):
+        parser.error("Gap observations require Schema v3 --audit-v3 wandb --record-v3-gaps OUTPUT")
+    if args.repair_v3_gaps and not (v3.enabled(args) and args.sync_metrics_only
+                                   and args.recover_writer and args.confirm_writers_stopped and not args.command):
+        parser.error("Gap repair requires Schema v3 --sync-metrics-only --recover-writer --confirm-writers-stopped")
+    if args.after_training_audit is not None and not (
+            v3.enabled(args) and args.command and isinstance(args.after_training_audit, list)
+            and all(isinstance(arg, str) for arg in args.after_training_audit)):
+        parser.error("--after-training-audit requires Schema v3 and a JSON array of command arguments")
     if args.verify_v3_plan is not None:
         if not v3.enabled(args) or not args.previous_work or not args.previous_backup or args.command:
             parser.error("--verify-v3-plan requires Schema v3 and the original work and backup paths")
