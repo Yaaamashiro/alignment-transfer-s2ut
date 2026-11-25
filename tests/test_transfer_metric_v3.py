@@ -532,8 +532,84 @@ def test_v3_cold_snapshot_sync_uses_bound_run_id_and_is_idempotent(tmp_path, mon
     assert reporter["audit_v3"](args)
 
 
+def test_reporter_reconnects_after_5000_bleu_when_dev_originals_are_being_restored(tmp_path, monkeypatch):
+    from threading import Event
+    from test_wandb_transfer import CommError, RunNotFoundError
+
+    reporter = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    scope = reporter["report"].__globals__
+    method, contract = "distillation", "a" * 64
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    write_json(work / "native-run.json", {"contract_hash": contract, "prepared": {"files": {"dev.tsv": DEV_REFERENCE[0]}},
+        "config": {"dataset": {"required_batch_size_multiple": DEV_REFERENCE[1]}}, "transfer": {
+        "method": method, "calibrated": {"tau_kl": TAU}, "coefficient_policy": {"tau": TAU}}})
+    train, dev = work / "alignment-train.jsonl", work / "native-dev.jsonl"
+    original = row_for(1, contract)
+    write_jsonl(train, [dict(original, step=step) for step in range(1, 5001)])
+    write_jsonl(dev, [row_for(step, contract, "dev") for step in range(1000, 5001, 1000)])
+    publish_receipt(work, backup, 5000, method=method, archive=True)
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, method=method, metric_schema=3,
+                              project=v3.PROJECT, entity=v3.ENTITY, group=v3.GROUP, contract=contract,
+                              bleu_results=tmp_path / "bleu")
+    identity = reporter["run_id"](v3.namespace(contract, args))
+    history, summary, sessions, finishes = [], {}, [], []
+    remote = SimpleNamespace(id=identity, entity=v3.ENTITY, project=v3.PROJECT, group=v3.GROUP,
+                             state="finished", config=v3.binding(contract, args), summary=summary,
+                             scan_history=lambda **options: iter(history))
+    restoring = work / "dev.restoring"
+    replace_on_lookup = False
+
+    def lookup(path):
+        nonlocal replace_on_lookup
+        assert path == f"{v3.ENTITY}/{v3.PROJECT}/{identity}"
+        if not sessions:
+            raise CommError(RunNotFoundError(path))
+        if replace_on_lookup:
+            replace_on_lookup = False
+            dev.replace(restoring)
+        return remote
+
+    def init(**options):
+        assert options["id"] == identity
+        sessions.append(options["resume"])
+
+        def log(row):
+            history.append(row)
+            summary.update(row)
+
+        return SimpleNamespace(entity=v3.ENTITY, summary=summary, log=log, url="https://wandb.ai/example",
+                               define_metric=lambda *a, **kw: None, finish=lambda: finishes.append(identity))
+
+    monkeypatch.setitem(sys.modules, "wandb", sdk(init, lookup))
+    monkeypatch.setitem(scope, "gettempdir", lambda: str(tmp_path / "runtime"))
+    monkeypatch.setitem(scope, "v3_bleu_rows", lambda *_: [(reporter["EVAL_PROGRESS"], 5000, {"eval/aux_bleu": 10.})])
+    previous = Event()
+    previous.set()
+    reporter["report"](args, previous)
+    assert finishes == [identity] and summary["eval/aux_bleu"] == 10.
+    distinct_before = len(history)
+
+    class NextSegment(Event):
+        def wait(self, delay):
+            assert delay == 2 and sessions == ["never"]  # Retry before opening a Writer.
+            restoring.replace(dev)
+            write_jsonl(train, [dict(original, step=step) for step in range(1, 5101)], overwrite=True)
+            publish_receipt(work, backup, 5100, method=method, archive=True)
+            self.set()
+            return False  # Inputs became ready on the next poll.
+
+    replace_on_lookup = True
+    reporter["report"](args, NextSegment())
+    assert sessions == ["never", "must"] and finishes == [identity, identity]
+    assert [row["update"] for row in history[distinct_before:]] == [5100]
+    assert sum("eval/aux_bleu" in row for row in history) == 1
+    assert summary["train/durable_update"] == 5100
+
+
 @pytest.mark.parametrize("damaged", [False, True])
 def test_reporter_failure_leaves_originals_verifiable(tmp_path, monkeypatch, damaged):
+    from urllib.parse import quote
+
     reporter = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
     scope = reporter["supervise"].__wrapped__.__globals__
     method, contract = "distillation", "f" * 64
@@ -544,10 +620,14 @@ def test_reporter_failure_leaves_originals_verifiable(tmp_path, monkeypatch, dam
         project=v3.PROJECT, entity=v3.ENTITY, group=v3.GROUP, contract=contract, audit_v3="snapshot", final=True,
         originals_only=True, expected_update=1, command=["trainer"], after_training_audit=["audit"],
         after_training=["bleu"])
-    events, commands = [], []
+    commands = []
+    token = "fixture/token+secret"
+    monkeypatch.setenv("WANDB_API_KEY", token)
 
     def disconnected(*_):
-        raise TimeoutError("WANDB unavailable")
+        raise ValueError(f"W&B history conflict for {token} and {quote(token, safe='')}. "
+                         "Authorization: Basic Zml4dHVyZTprZXk= "
+                         "https://operator:fixture-password@example.org/run?access_token=fixture-bearer")
 
     def run(command, *_, **__):
         commands.extend(command)
@@ -561,7 +641,6 @@ def test_reporter_failure_leaves_originals_verifiable(tmp_path, monkeypatch, dam
 
     monkeypatch.setitem(scope, "report", disconnected)
     monkeypatch.setitem(scope, "run_process", run)
-    monkeypatch.setitem(scope, "log_event", lambda *args: events.append(args))
     monkeypatch.setitem(scope, "gettempdir", lambda: str(tmp_path / "runtime"))
     if damaged:
         with pytest.raises(ValueError, match="archived originals failed audit"):
@@ -570,7 +649,12 @@ def test_reporter_failure_leaves_originals_verifiable(tmp_path, monkeypatch, dam
     else:
         reporter["supervise"](args)
         assert commands == ["trainer", "audit", "bleu"]
-    assert any(event[1] == "failed" for event in events)
+    log = (args.logs / "notebook-events.log").read_text(encoding="utf-8")
+    assert "[wandb] failed ValueError: W&B history conflict" in log
+    assert "Traceback (most recent call last):" in log and "in disconnected" in log
+    assert "Authorization: Basic [REDACTED]" in log
+    assert token not in log and quote(token, safe="") not in log and "Zml4dHVyZTprZXk=" not in log
+    assert "fixture-password" not in log and "fixture-bearer" not in log
 
 
 @pytest.mark.parametrize("latest,stop,audit_failure", [
