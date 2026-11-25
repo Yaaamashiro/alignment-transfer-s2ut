@@ -420,6 +420,9 @@ def finish_writer(contract, lease, run, *, track_delivery=False):
         if track_delivery:
             try:
                 cursor = run.step
+                # Core initializes its history step on the first log, so an idle resumed Run still reports 0.
+                if type(cursor) is int and cursor == 0:
+                    cursor = run.starting_step
                 if type(cursor) is not int or cursor < 0:
                     raise ValueError("W&B returned an invalid history cursor")
             except Exception as error:
@@ -444,9 +447,9 @@ def v3_history_floor(args, contract):
 
 
 def check_v3_resume_cursor(run, audit):
-    # The SDK's resume cursor is independent of the Public API history scan.
+    # Compare the resume response with the Public API; run.step is not initialized before the first log.
     last = audit["history_step"]
-    if last is not None and run.step != last + 1:
+    if last is not None and run.starting_step != last + 1:
         raise WriterBusy("ACK_PENDING: the SDK resume cursor differs from the W&B history scan; run a read-only audit")
 
 

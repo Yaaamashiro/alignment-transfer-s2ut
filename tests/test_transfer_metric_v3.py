@@ -501,12 +501,13 @@ def test_v3_cold_snapshot_sync_uses_bound_run_id_and_is_idempotent(tmp_path, mon
         assert kw["id"] == identity and kw["resume"] == ("must" if opened else "never")
         assert kw.get("config") == (None if opened else binding)
         opened.append(kw["id"])
-        run = SimpleNamespace(step=len(history), summary=summary, finish=lambda: None, define_metric=lambda *a, **kw: None,
+        run = SimpleNamespace(starting_step=len(history), step=0, summary=summary, finish=lambda: None, define_metric=lambda *a, **kw: None,
                               url="https://wandb.ai/example")
 
         def log(row):
-            history.append({**row, "_step": run.step})
-            run.step += 1
+            step = run.step or run.starting_step
+            history.append({**row, "_step": step})
+            run.step = step + 1
             summary.update(row)
 
         run.log = log
@@ -622,12 +623,13 @@ def test_v3_recovery_waits_for_both_public_views_and_checks_the_resume_cursor(tm
     def init(**options):
         assert options["id"] == identity and options["resume"] == "must"
         opened.append(identity)
-        run = SimpleNamespace(step=len(history), summary=summary, url="https://wandb.ai/example",
+        run = SimpleNamespace(starting_step=len(history), step=0, summary=summary, url="https://wandb.ai/example",
                               define_metric=lambda *a, **kw: None, finish=lambda: None)
 
         def log(values):
-            history.append({**values, "_step": run.step})
-            run.step += 1
+            step = run.step or run.starting_step
+            history.append({**values, "_step": step})
+            run.step = step + 1
             summary.update(values)
 
         run.log = log
@@ -699,12 +701,13 @@ def test_reporter_reconnects_after_5000_bleu_when_dev_originals_are_being_restor
         assert options["id"] == identity
         sessions.append(options["resume"])
 
-        run = SimpleNamespace(step=len(history), entity=v3.ENTITY, summary=summary, url="https://wandb.ai/example",
+        run = SimpleNamespace(starting_step=len(history), step=0, entity=v3.ENTITY, summary=summary, url="https://wandb.ai/example",
                               define_metric=lambda *a, **kw: None, finish=lambda: finishes.append(identity))
 
         def log(row):
-            history.append({**row, "_step": run.step})
-            run.step += 1
+            step = run.step or run.starting_step
+            history.append({**row, "_step": step})
+            run.step = step + 1
             summary.update(row)
 
         run.log = log
@@ -801,7 +804,7 @@ def test_v3_reporter_rechecks_cursor_only_after_confirmed_finish(tmp_path, monke
     def init(**options):
         assert options["resume"] == "must" and options["id"] == identity
         opened.append(identity)
-        run = SimpleNamespace(step=len(history), entity=v3.ENTITY, summary=summary,
+        run = SimpleNamespace(starting_step=len(history), step=0, entity=v3.ENTITY, summary=summary,
                               url="https://wandb.ai/example", define_metric=lambda *a, **kw: None)
 
         def finish():
@@ -810,8 +813,9 @@ def test_v3_reporter_rechecks_cursor_only_after_confirmed_finish(tmp_path, monke
                 raise WriterBusy("SDK finish was unconfirmed")
 
         def log(row):
-            history.append({**row, "_step": run.step})
-            run.step += 1
+            step = run.step or run.starting_step
+            history.append({**row, "_step": step})
+            run.step = step + 1
 
         run.finish, run.log = finish, log
         return run
