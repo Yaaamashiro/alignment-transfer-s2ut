@@ -13,6 +13,8 @@ import sys
 import time
 from tempfile import TemporaryDirectory, gettempdir
 from threading import Event, Thread
+from traceback import format_exception
+from urllib.parse import quote, quote_plus
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -973,10 +975,18 @@ def report(args, stop):
                                     missing = {}
                                     if schema_v3 and current is not None:
                                         state = writer_state(current)
-                                        history = logical_metric_rows(MetricReader(work / TRAIN_JSONL),
+                                        history = list(logical_metric_rows(MetricReader(work / TRAIN_JSONL),
                                             MetricReader(work / DEV_JSONL), published, contract=args.contract,
                                             schema_v3=True, method=args.method, tau=v3.plan_tau(plan),
-                                            dev_reference=v3.plan_dev_reference(plan))
+                                            dev_reference=v3.plan_dev_reference(plan)))
+                                        # The trainer can replace the local logs while restoring this snapshot.
+                                        # Missing originals would make already-delivered history look foreign.
+                                        observed = {(progress, update) for progress, update, _ in history}
+                                        required = {(TRAIN_UPDATE, 1)}
+                                        required.update((TRAIN_UPDATE, update) for update in range(100, published + 1, 100))
+                                        required.update((DEV_UPDATE, update) for update in range(1000, published + 1, 1000))
+                                        if not required <= observed:
+                                            raise WriterBusy(f"Waiting for local Schema v3 originals through update {published}")
                                         bleu_rows = v3_bleu_rows(args, plan_sha, published, args.contract)
                                         missing, _ = v3.reconcile_delivery(current, {"original_jsonl": history,
                                             "qualified_bleu": bleu_rows}, published)
@@ -1155,7 +1165,17 @@ def supervise(args):
             finally:
                 lock.release()
         except Exception as error:
-            detail = str(error) if isinstance(error, WriterConfigurationError) else type(error).__name__
+            detail = f"{type(error).__name__}: {error}\n" + "".join(format_exception(error)).rstrip()
+            for name in ("WANDB_API_KEY", "GITHUB_TOKEN", "HF_TOKEN", "GOOGLE_OAUTH_ACCESS_TOKEN"):
+                if secret := os.environ.get(name):
+                    for value in {secret, quote(secret, safe=""), quote_plus(secret)}:
+                        detail = detail.replace(value, "[REDACTED]")
+            detail = re.sub(r"(?i)(\bauthorization[\s'\"]*:[\s'\"]*(?:basic|bearer)\s+)[^\s'\";,]+",
+                            r"\1[REDACTED]", detail)
+            detail = re.sub(r"(?i)(https?://)[^/\s@]+@",
+                            r"\1[REDACTED]@", detail)
+            detail = re.sub(r"(?i)([?&](?:api[_-]?key|access_token|token|x-goog-signature)=)[^&\s'\"]+",
+                            r"\1[REDACTED]", detail)
             log_event("wandb", "failed", args.logs, detail)
 
     worker = Thread(target=publish, name="wandb-metrics", daemon=True)

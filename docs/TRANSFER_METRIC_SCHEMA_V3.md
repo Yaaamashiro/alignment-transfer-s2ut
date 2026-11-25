@@ -81,6 +81,12 @@ The same original-row validator runs in the trainer on every successful optimize
 
 The W&B Run ID is the first 24 hexadecimal digits of the SHA-256 of compact UTF-8 JSON `["transfer",3,entity,project,group,method,scientific_contract]`. Config verifies that identity and records `metric_schema=3`. W&B's internal step increases naturally, and every chart uses `update`. `train/target_update`, `train/max_update`, and `train/durable_update` are Summary fields. Existing writers reopen with `resume="must"`. An uncreated v3 Run uses the same derived ID with create-only resume semantics. Sync uses the existing ownership/FileLock mechanism, rejects source and remote conflicts before opening a writer, and waits for acknowledgement if a known watermark covers missing history. For manual recovery without GCS, stop all other writers to the Run across all VMs. A Run already bound to GCS requires the same bucket. [Writer recovery](WANDB_RECOVERY.md#restore-writer-ownership-on-a-cpu-runtime)
 
+### Sync after a reporter failure
+
+See the `[wandb] failed` entry in `execution/notebook-events.log` for the exception and traceback. At reconnect, the reporter waits for all published Train and Dev comparison rows to be visible in the local logs before comparing W&B history.
+
+After all writers have stopped, use **Recover W&B writer and sync saved metrics** with the original experiment and selected method. Run a read-only `snapshot` audit, then a `wandb` audit. If the originals pass and W&B reports only unsent cells, set `AUDIT_WANDB_METRICS_ONLY=False` and `CONFIRM_WANDB_WRITERS_STOPPED=True` to sync only the missing metrics from the verified Snapshot. Run the `wandb` audit again before resuming the same training Run. Allow pending acknowledgements to settle before further writes.
+
 ### Repair repeatedly observed W&B gaps
 
 `missing` identifies eligible cells without an acknowledgement watermark. `ack_pending` means a cell is absent in the current history scan even though the watermark covers it. A single scan cannot distinguish late indexing from a lost cell. Normal sync never resends a cell in `ack_pending`. Duplicates, value conflicts, or a change in Run, writer, or Snapshot identity block gap repair.
