@@ -366,7 +366,8 @@ run.finish()
     assert history[-1]["train/main_loss"] == 1.8
 
 
-def test_wandb_031_real_core_resumes_before_history_step_is_initialized(tmp_path):
+@pytest.mark.parametrize("send_metric", [False, True])
+def test_wandb_031_real_core_resumes_before_history_step_is_initialized(tmp_path, send_metric):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import os
     from threading import Thread
@@ -375,7 +376,10 @@ def test_wandb_031_real_core_resumes_before_history_step_is_initialized(tmp_path
     if sdk_version != "0.31.0":
         pytest.skip("reproduces the pinned W&B SDK 0.31.0")
     stream_requests = []
-    tail = json.dumps({"_step": 139, "_runtime": 5})
+    marker = "wandb_train_update_v2"
+    history = [{"_step": step} for step in range(139)]
+    history.append({"_step": 139, "_runtime": 5, "update": 5000, marker: 5000, "train/main_loss": 2.0})
+    summary = {"_runtime": 5, marker: 5000}
     run = {"id": "existing", "name": "existing", "displayName": "resume-fixture",
            "project": {"name": "fixture", "entity": {"name": "test"}}}
 
@@ -384,19 +388,33 @@ def test_wandb_031_real_core_resumes_before_history_step_is_initialized(tmp_path
             data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if self.path.endswith("/file_stream"):
                 stream_requests.append(data)
+                files = data.get("files", {})
+                if chunk := files.get("wandb-history.jsonl"):
+                    assert chunk["offset"] == len(history)
+                    history.extend(json.loads(line) for line in chunk["content"])
+                if chunk := files.get("wandb-summary.json"):
+                    summary.update(json.loads(chunk["content"][-1]))
                 result = {}
             else:
+                variables = data.get("variables", {})
+                start = int(variables.get("minStep", 0))
+                end = int(variables.get("maxStep", len(history)))
+                public = {**run, "state": "finished", "config": "{}", "systemMetrics": "{}",
+                          "summaryMetrics": json.dumps(summary), "historyKeys": {"lastStep": len(history) - 1},
+                          "history": [json.dumps(row) for row in history if start <= row["_step"] < end]}
                 replies = {
                     "Viewer": {"viewer": {"id": "viewer", "entity": "test", "username": "test", "flags": "{}"}},
                     "RunResumeStatus": {"model": {"bucket": {**run, "wandbConfig": '{"t": {}}',
-                        "config": "{}", "summaryMetrics": tail, "historyTail": json.dumps([tail]),
-                        "historyLineCount": 140, "eventsLineCount": 0, "logLineCount": 0, "eventsTail": "[]"}}},
+                        "config": "{}", "summaryMetrics": json.dumps(summary),
+                        "historyTail": json.dumps([json.dumps(history[-1])]),
+                        "historyLineCount": len(history), "eventsLineCount": 0, "logLineCount": 0, "eventsTail": "[]"}}},
                     "UpsertBucket": {"upsertBucket": {"bucket": run, "inserted": False}},
                     "CreateRunFiles": {"createRunFiles": {"runID": "existing", "uploadHeaders": [], "files": [
                         {"name": name, "uploadUrl": f"http://127.0.0.1:{self.server.server_port}/upload"}
-                        for name in data.get("variables", {}).get("files", [])]}},
+                        for name in variables.get("files", [])]}},
                 }
-                result = {"data": replies.get(data.get("operationName"), {})}
+                default = {**replies["Viewer"], "project": {"run": public}}
+                result = {"data": replies.get(data.get("operationName"), default)}
             payload = json.dumps(result).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -417,42 +435,69 @@ import wandb
 tool = runpy.run_path(sys.argv[1])
 root = Path(sys.argv[2])
 tool["writer_path"].__globals__["gettempdir"] = lambda: str(root)
-settings = wandb.Settings(base_url=sys.argv[3], api_key="a"*40, console="off", disable_git=True,
+send_metric = sys.argv[3] == "send"
+settings = wandb.Settings(console="off", disable_git=True,
                           x_disable_stats=True, x_disable_meta=True, init_timeout=10,
                           finish_timeout=5, finish_timeout_raises=True)
-run = wandb.init(entity="test", project="fixture", id="existing", resume="must", mode="online",
-                 dir=root, settings=settings)
-with tool["shared_writer"](None, {}) as writer:
-    writer.opening()
-    pending = tool["writer_path"]("fixture", ".pending.json")
-    tool["store_writer_record"](pending, {"session": writer.token})
-    try:
-        assert run.resumed and run.starting_step == 140 and run.step == 0
+marker = tool["TRAIN_UPDATE"]
+sources = {"originals": [(marker, 5000, {"train/main_loss": 2.0})]}
+if send_metric:
+    sources["originals"].append((marker, 5100, {"train/main_loss": 1.9}))
+
+for attempt in range(2 if send_metric else 1):
+    target = wandb.Api(timeout=5).run("test/fixture/existing")
+    owner = tool["read_owner"]("fixture") or {}
+    missing, audit = tool["v3"].reconcile_delivery(
+        target, sources, 5100, minimum_history_step=owner.get("history_step", -1))
+    first_send = send_metric and attempt == 0
+    assert audit["history_step"] == 139 + attempt
+    assert missing == ({(marker, 5100): {"train/main_loss": 1.9}} if first_send else {})
+    if attempt:
+        assert audit["status"] == "VERIFIED"
+    output = root / f"session-{attempt}"
+    output.mkdir()
+    with tool["shared_writer"](None, {}) as writer:
+        pending = tool["writer_path"]("fixture", ".pending.json")
+        tool["store_writer_record"](pending, {"session": writer.token})
+        writer.opening()
+        run = wandb.init(entity="test", project="fixture", id="existing", resume="must", mode="online",
+                         dir=output, settings=settings)
         try:
-            tool["check_v3_resume_cursor"](run, {"history_step": 138})
-        except tool["WriterBusy"]:
-            pass
-        else:
-            raise AssertionError("a stale Public API scan must still be rejected")
-        tool["check_v3_resume_cursor"](run, {"history_step": 139})
-    finally:
-        tool["finish_writer"]("fixture", writer, run, track_delivery=True)
-    assert not pending.exists() and tool["read_owner"]("fixture")["history_step"] == 139
+            assert run.id == target.id == "existing" and run.resumed
+            assert run.starting_step == 140 + attempt and run.step == 0
+            try:
+                tool["check_v3_resume_cursor"](run, {"history_step": audit["history_step"] - 1})
+            except tool["WriterBusy"]:
+                pass
+            else:
+                raise AssertionError("a stale Public API scan must still be rejected")
+            tool["check_v3_resume_cursor"](run, audit)
+            watermarks = {}
+            for (progress, update), values in missing.items():
+                tool["publish_metrics"](run, progress, update, values, watermarks, backfill=True)
+            assert run.step == (141 if first_send else 0)
+        finally:
+            tool["finish_writer"]("fixture", writer, run, track_delivery=True)
+        assert not pending.exists()
+        assert tool["read_owner"]("fixture")["history_step"] == (140 if send_metric else 139)
 """
     tools = Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"
     env = {name: value for name, value in os.environ.items() if not name.startswith("WANDB_")}
     env.update(WANDB_ERROR_REPORTING="false", WANDB_SILENT="true")
     with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        env.update(WANDB_BASE_URL=f"http://127.0.0.1:{server.server_port}", WANDB_API_KEY="a" * 40)
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
             subprocess.run([sys.executable, "-c", script, str(tools), str(tmp_path),
-                            f"http://127.0.0.1:{server.server_port}"], env=env, check=True, timeout=45)
+                            "send" if send_metric else "idle"], env=env, check=True, timeout=45)
         finally:
             server.shutdown()
             worker.join()
-    assert any(request.get("complete") for request in stream_requests)
-    assert all("wandb-history.jsonl" not in request.get("files", {}) for request in stream_requests)
+    assert sum(bool(request.get("complete")) for request in stream_requests) == (2 if send_metric else 1)
+    assert len(history) == (141 if send_metric else 140)
+    assert [(row["_step"], row["train/main_loss"]) for row in history if row.get("update") == 5100] == (
+        [(140, 1.9)] if send_metric else [])
 
 
 @pytest.mark.parametrize("prefix", ["INFO:{tag}:", "2026-11-18 00:00:00 | INFO | {tag} | "])
