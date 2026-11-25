@@ -81,8 +81,10 @@ def test_legacy_top_p_compatibility_binds_unchanged_sources(monkeypatch):
     assert old_hash not in calibration.compatible_top_p_hashes(plan)
 
 
-@pytest.mark.parametrize("reuse", [False, True])
-def test_colab_restores_previous_calibration_and_publishes_separately(tmp_path, monkeypatch, reuse):
+@pytest.mark.parametrize("reuse,show,compare_previous", [
+    (False, False, True), (True, False, True), (True, True, True), (True, False, False),
+])
+def test_colab_restores_previous_calibration_and_publishes_separately(tmp_path, monkeypatch, reuse, show, compare_previous):
     notebook = Path(__file__).resolve().parents[1] / "notebooks/colab/training.ipynb"
     cells = {cell["id"]: "".join(cell["source"]) for cell in json.loads(notebook.read_text(encoding="utf-8"))["cells"]}
     output = tmp_path / "new/alignment-calibration.json"
@@ -90,8 +92,12 @@ def test_colab_restores_previous_calibration_and_publishes_separately(tmp_path, 
     top_p = tmp_path / "top-p/top-p.json"
     top_p.parent.mkdir()
     top_p.write_text('{"candidates": {}}', encoding="utf-8")
+    figures = []
     monkeypatch.setitem(sys.modules, "pandas", SimpleNamespace(DataFrame=list))
-    monkeypatch.setitem(sys.modules, "IPython.display", SimpleNamespace(display=lambda _: None, Image=dict))
+    monkeypatch.setitem(sys.modules, "IPython.display", SimpleNamespace(display=figures.append, Image=dict))
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", SimpleNamespace(
+        xlabel=lambda _: None, ylabel=lambda _: None, legend=lambda: None,
+        savefig=lambda _: None, close=lambda: None))
     root, persistent, suffix = tmp_path / "work", tmp_path / "drive", "-all-layers"
     baseline, manifest, teacher = [root / name for name in ("baseline.json", "manifest.jsonl", "teacher")]
     module = "alignment_transfer_s2ut.alignment_calibration"
@@ -102,21 +108,32 @@ def test_colab_restores_previous_calibration_and_publishes_separately(tmp_path, 
     marker.parent.mkdir(parents=True)
     marker.write_text(json.dumps({"files": {"stage-complete.json": "hash"},
                                    "identity": {"command": ["python", "-m", module, *map(str, old_args)]}}))
+    if reuse:
+        final = persistent / "stages" / ("research-v6-calibration-fp16" + suffix) / "pack/snapshot.json"
+        final.parent.mkdir(parents=True)
+        previous_args = ["--previous-calibration", previous] if compare_previous else []
+        current_args = [*old_args[:-2], *previous_args, "--output", output]
+        final.write_text(json.dumps({"files": {"stage-complete.json": "hash"},
+                                    "identity": {"command": ["python", "-m", module, *map(str, current_args)]}}))
     calls = []
     context = dict(Path=Path, json=json, ROOT=root, PERSISTENT=persistent, SCOPE_SUFFIX=suffix,
                    CALIBRATION_SCOPE_SUFFIX=suffix, REUSE_CALIBRATION=reuse,
-                   PREPARE_AUDIO_PACKS=False, NEED_TEACHER=True, BASELINE=baseline, MANIFEST=manifest,
+                   PREPARE_AUDIO_PACKS=False, NEED_CALIBRATION=True, DISPLAY_CALIBRATION_DIAGNOSTICS=show,
+                   BASELINE=baseline, MANIFEST=manifest,
                    TEACHER_ROOT=teacher, CALIBRATION_BATCHES=16, RUN_MASK_TOPP_DIAGNOSTICS=False,
                    RUN_ALIGNMENT_CALIBRATION=not reuse, TOPP_REPORT=top_p, TOPP_ROOT=top_p.parent, PYTHON="python",
                    PREVIOUS_CALIBRATION=previous, CALIBRATION=output, MASK_TOP_P=.8, LOGS=tmp_path,
                    run=lambda *args, **kw: calls.append((args, kw)), log_event=lambda *args: None)
     exec(cells["calibration"], context)
-    if reuse:
-        assert calls[0][0][0] == "research-v5-top-p" + suffix
-        assert calls[0][1]["restore_only"]
-        calls.pop(0)
-    assert calls[0][0][0] == "research-v5-calibration" + suffix
-    assert calls[0][1] == {"restore_only": True}
-    assert calls[1][0][0] == "research-v6-calibration-fp16" + suffix
-    assert calls[1][0][-4:] == ("--previous-calibration", previous, "--output", output)
-    assert calls[1][1] == {"gpu": True, "restore_only": reuse}
+    assert calls[0][0][0] == "research-v5-top-p" + suffix
+    assert calls[0][1] == {"gpu": False, "restore_only": True}
+    if compare_previous:
+        args, options = calls[1]
+        assert args[0] == "research-v5-calibration" + suffix and options == {"restore_only": True}
+        assert calls[-1][0][-4:] == ("--previous-calibration", previous, "--output", output)
+    else:
+        assert len(calls) == 2 and "--previous-calibration" not in calls[-1][0]
+    args, options = calls[-1]
+    assert args[0] == "research-v6-calibration-fp16" + suffix
+    assert options == {"gpu": not reuse, "restore_only": reuse}
+    assert len(figures) == (2 if show else 0)

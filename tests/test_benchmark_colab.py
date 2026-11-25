@@ -96,10 +96,46 @@ if os.environ.get('TEST_INTERRUPT')=='1': raise SystemExit(7)
     work.rename(tmp_path / "second-vm")
     assert c.stage_session(command, work, backup, restore_only=True)["reused"]
     assert len(list(backup.glob("*/snapshot.json"))) == 2
+    with monkeypatch.context() as warm:
+        from direct_s2st import drive_staging
+
+        def unexpected_archive_read(*args):
+            pytest.fail("verified local reuse must not read ZIP payloads")
+
+        warm.setattr(drive_staging, "raw_sha", unexpected_archive_read)
+        warm.setattr(benchmark_runtime, "restore", unexpected_archive_read)
+        assert c.stage_session(command, work, backup, restore_only=True)["reused"]
+    name = next(iter(hashes))
+    damaged = work / name
+    damaged.write_bytes(b"altered local artifact")
+    assert c.stage_session(command, work, backup, restore_only=True)["reused"]
+    assert file_hash(damaged) == hashes[name]
+    work.rename(tmp_path / "third-vm")
     with (markers[0].parent / "snapshot.zip").open("ab") as stream:
         stream.write(b"broken")
     with pytest.raises(ValueError, match="checksum"):
         c.stage_session(command, work, backup)
+
+
+def test_saved_teacher_restores_without_t2tt_or_ctc_inputs(tmp_path, benchmark_runtime):
+    work, backup, frozen = (tmp_path / name for name in ("teacher", "drive", "frozen"))
+    manifest, config = (tmp_path / name for name in ("manifest.jsonl", "backbone.json"))
+    write_json(manifest, {"fixture": "matched corpus"})
+    write_json(config, {"backbone": {"decoder_layers": 6}})
+    command = [sys.executable, "-m", "alignment_transfer_s2ut.build_teacher_alignment",
+               "--manifest", str(manifest), "--mt-attention", str(tmp_path / "t2tt"),
+               "--alignment", str(tmp_path / "ctc"), "--units", str(tmp_path / "units"),
+               "--config", str(config), "--output", str(work), "--resume"]
+    identity = c.identity_for(command, work)
+    write_json(frozen / "stage-complete.json",
+               {"identity": digest(identity), "artifact_receipts_verified": True})
+    write_json(frozen / "fixture.json", {"all_layers": True})
+    benchmark_runtime.publish_packed(frozen, backup, identity, 1)
+    assert c.stage_session(command, work, backup, restore_only=True)["reused"]
+    assert read_json(work / "fixture.json") == {"all_layers": True}
+    write_json(config, {"backbone": {"decoder_layers": 5}}, overwrite=True)
+    with pytest.raises(ValueError, match="input/configuration changed"):
+        c.stage_session(command, work, backup, restore_only=True)
 
 
 def test_benchmark_audio_packs_work_without_original_wavs(tmp_path, benchmark_runtime, monkeypatch):

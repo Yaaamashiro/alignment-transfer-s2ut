@@ -27,7 +27,7 @@ def test_release_manifest_and_notebook_forms():
     assert headings == ["Experiment", "Data and audio preparation", "T2TT teacher model",
                         "S2UT Baseline", "Teacher artifacts", "Top-p diagnostics and calibration",
                         "Transfer training conditions", "Pilot and checkpoint recovery", "Evaluation and diagnostics",
-                        "Weights & Biases (optional)"]
+                        "Optional verification and diagnostics", "Weights & Biases (optional)"]
     for name in ("training", "evaluate"):
         notebook = json.loads((ROOT / f"notebooks/colab/{name}.ipynb").read_text(encoding="utf-8"))
         assert notebook["nbformat"] == 4
