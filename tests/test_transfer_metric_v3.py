@@ -396,6 +396,32 @@ def test_v3_identity_and_transport_validation(tmp_path):
     assert v3.remote_audit(target, source, 100)["status"] == "VERIFIED"
 
 
+@pytest.mark.parametrize("rows,end,status", [
+    ([(0, 100, 2.0), (0, 100, 2.0)], 0, "VERIFIED"),
+    ([(0, 100, 2.0), (0, 100, 2.1)], 0, "CONFLICT"),
+    ([(0, 100, 2.0), (0, 101, 2.0)], 0, "CONFLICT"),
+    ([(0, 100, 2.0), (1, 100, 2.0)], 1, "CONFLICT"),
+    ([(None, 100, 2.0), (None, 100, 2.0)], 0, "CONFLICT"),
+    ([(0, 100, 2.0), (2, 101, 2.0)], 2, "ACK_PENDING"),
+    ([(0, 100, 2.0)], 1, "ACK_PENDING"),
+])
+def test_v3_history_scan_distinguishes_page_overlap_from_conflicts_or_partial_reads(rows, end, status):
+    class Scan(list):
+        max_step = end
+
+    history = Scan(dict(_step=step, update=update, **{"train/main_loss": value}) for step, update, value in rows)
+    sources = {"snapshot": [("train_marker", step, {"train/main_loss": 2.0}) for step in {row[1] for row in rows}]}
+    target = SimpleNamespace(summary={}, scan_history=lambda **opts: history)
+    audit = v3.remote_audit(target, sources, 101)
+    assert audit["status"] == status
+    if status == "ACK_PENDING":
+        from wandb_writer import WriterBusy
+        with pytest.raises(WriterBusy, match="ACK_PENDING"):
+            v3.reconcile_delivery(target, sources, 101)
+    if status == "VERIFIED":
+        assert audit["metric_point_counts"] == {"train/main_loss": 1}
+
+
 def test_v3_bleu_requires_three_values_per_qualified_subset():
     scores = {"policy": v3.BLEU_POLICY, "failure_policy": "generation-only-v1", "generation_failures": {}}
     ids = [str(i) for i in range(500)]
@@ -532,6 +558,81 @@ def test_v3_cold_snapshot_sync_uses_bound_run_id_and_is_idempotent(tmp_path, mon
     assert reporter["audit_v3"](args)
 
 
+def test_v3_recovery_waits_for_both_public_views_and_checks_the_resume_cursor(tmp_path, monkeypatch):
+    from wandb_writer import WriterBusy
+
+    reporter = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    method, contract = "distillation", "a" * 64
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    write_json(work / "native-run.json", {"contract_hash": contract, "transfer": {
+        "method": method, "calibrated": {"tau_kl": TAU}, "coefficient_policy": {"tau": TAU}}})
+    write_jsonl(work / "alignment-train.jsonl", [row_for(update, contract) for update in range(1, 101)])
+    publish_receipt(work, backup, 100, method=method, archive=True)
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, method=method, metric_schema=3,
+                              project=v3.PROJECT, entity=v3.ENTITY, group=v3.GROUP, contract=contract,
+                              recover_writer=True, confirm_writers_stopped=True, bleu_results=None)
+    identity = reporter["run_id"](v3.namespace(contract, args))
+    metric = v3.validate_row(row_for(1, contract), method, contract, "train", tau=TAU)
+    marker = reporter["TRAIN_UPDATE"]
+    history = [dict(metric, _step=0, update=1, **{marker: 1})]
+    summary = {marker: 1, "train/durable_update": 1, "train/max_update": 1,
+               "train/target_update": v3.MAX_UPDATE, reporter["REPORTER_SESSION"]: "previous"}
+    stale_summary = summary.copy()
+    opened = []
+    fresh = False
+    runtime = tmp_path / "original-vm"
+
+    def lookup(path):
+        assert path == f"{v3.ENTITY}/{v3.PROJECT}/{identity}"
+        view = history if fresh else history[:1]
+        scan = type("Scan", (list,), {"max_step": len(view) - 1})
+        # The service can return overlapping pages, including after successful indexing.
+        return SimpleNamespace(id=identity, entity=v3.ENTITY, project=v3.PROJECT, group=v3.GROUP,
+                               state="finished", config=v3.binding(contract, args),
+                               summary=summary if fresh else stale_summary,
+                               scan_history=lambda **opts: scan([*view, *view]))
+
+    def init(**options):
+        assert options["id"] == identity and options["resume"] == "must"
+        opened.append(identity)
+        run = SimpleNamespace(step=len(history), summary=summary, url="https://wandb.ai/example",
+                              define_metric=lambda *a, **kw: None, finish=lambda: None)
+
+        def log(values):
+            history.append({**values, "_step": run.step})
+            run.step += 1
+            summary.update(values)
+
+        run.log = log
+        return run
+
+    monkeypatch.setitem(sys.modules, "wandb", sdk(init, lookup))
+    monkeypatch.setitem(reporter["writer_path"].__globals__, "gettempdir", lambda: str(runtime))
+    with pytest.raises(WriterBusy, match="delivery unconfirmed"):
+        reporter["sync_saved_metrics"](args)
+    assert [row["update"] for row in history] == [1, 100]
+    with pytest.raises(WriterBusy, match="ACK_PENDING"):
+        reporter["sync_saved_metrics"](args)
+    assert opened == [identity]
+
+    # An advanced Summary alone cannot qualify a missing history row for resend.
+    stale_summary[marker] = 100
+    runtime = tmp_path / "cold-vm"
+    with pytest.raises(WriterBusy, match="ACK_PENDING"):
+        reporter["sync_saved_metrics"](args)
+    assert opened == [identity]
+    stale_summary[marker] = 1
+    with pytest.raises(WriterBusy, match="SDK resume cursor"):
+        reporter["sync_saved_metrics"](args)
+    assert opened == [identity, identity] and len(history) == 2
+
+    fresh = True
+    reporter["sync_saved_metrics"](args)
+    assert opened == [identity, identity] and len(history) == 2
+    args.audit_v3, args.final = "wandb", True
+    assert reporter["audit_v3"](args) is True
+
+
 def test_reporter_reconnects_after_5000_bleu_when_dev_originals_are_being_restored(tmp_path, monkeypatch):
     from threading import Event
     from test_wandb_transfer import CommError, RunNotFoundError
@@ -588,6 +689,9 @@ def test_reporter_reconnects_after_5000_bleu_when_dev_originals_are_being_restor
     reporter["report"](args, previous)
     assert finishes == [identity] and summary["eval/aux_bleu"] == 10.
     distinct_before = len(history)
+    # History has all of 5k, but the faster-facing summary can be older.
+    for key in (reporter["TRAIN_UPDATE"], reporter["DEV_UPDATE"], reporter["EVAL_PROGRESS"]):
+        summary.pop(key)
 
     class NextSegment(Event):
         def wait(self, delay):

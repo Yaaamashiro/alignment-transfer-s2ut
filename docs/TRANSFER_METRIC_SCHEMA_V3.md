@@ -85,7 +85,9 @@ The W&B Run ID is the first 24 hexadecimal digits of the SHA-256 of compact UTF-
 
 See the `[wandb] failed` entry in `execution/notebook-events.log` for the exception and traceback. At reconnect, the reporter waits for all published Train and Dev comparison rows to be visible in the local logs before comparing W&B history.
 
-After all writers have stopped, use **Recover W&B writer and sync saved metrics** with the original experiment and selected method. Run a read-only `snapshot` audit, then a `wandb` audit. If the originals pass and W&B reports only unsent cells, set `AUDIT_WANDB_METRICS_ONLY=False` and `CONFIRM_WANDB_WRITERS_STOPPED=True` to sync only the missing metrics from the verified Snapshot. Run the `wandb` audit again before resuming the same training Run. Allow pending acknowledgements to settle before further writes.
+After all writers have stopped, use **Recover W&B writer and sync saved metrics** with the original experiment and selected method. Run a read-only `snapshot` audit, then a `wandb` audit. If the originals pass and W&B reports only unsent cells, set `AUDIT_WANDB_METRICS_ONLY=False` and `CONFIRM_WANDB_WRITERS_STOPPED=True` to sync only the missing metrics from the verified Snapshot. Run the `wandb` audit again before resuming the same training Run.
+
+Identical copies of a metric at the same W&B internal step count once. A partial history scan or a scan behind the locally recorded Writer cursor is reported as `ACK_PENDING`. On resume the SDK cursor must agree with the scanned history before the Writer sends metrics. If the SDK finishes while history or Summary is still catching up, wait and repeat the read-only audit. The same VM retains the cursor in its existing Writer ownership receipt.
 
 ### Repair repeatedly observed W&B gaps
 

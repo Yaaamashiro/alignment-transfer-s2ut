@@ -384,6 +384,9 @@ def store_writer_record(path, record):
 
 
 def store_owner(contract, owner):
+    previous = read_owner(contract) or {}
+    if "history_step" in previous:
+        owner = {**owner, "history_step": max(previous["history_step"], owner.get("history_step", -1))}
     store_writer_record(writer_path(contract, ".owner.json"), owner)
 
 
@@ -411,9 +414,33 @@ def start_writer(wandb, args, identity, lease, resume):
     return open_run(wandb, args, contract, entity=identity["entity"], resume=resume)
 
 
-def finish_writer(contract, lease, run):
+def finish_writer(contract, lease, run, *, track_delivery=False):
+    path = writer_path(contract, ".pending.json")
+    cursor = getattr(run, "step", None) if track_delivery else None
+    if type(cursor) is int:
+        receipt = {**json.loads(path.read_bytes()), "history_step": cursor - 1}
+        store_writer_record(path, receipt)
     lease.finish(run)
-    writer_path(contract, ".pending.json").unlink(missing_ok=True)
+    if type(cursor) is int:
+        store_owner(contract, receipt)
+    path.unlink(missing_ok=True)
+
+
+def v3_history_floor(args, contract):
+    key = v3.namespace(contract, args)
+    owner = read_owner(key) or {}
+    try:
+        pending = json.loads(writer_path(key, ".pending.json").read_bytes())
+    except FileNotFoundError:
+        pending = {}
+    return max(owner.get("history_step", -1), pending.get("history_step", -1))
+
+
+def check_v3_resume_cursor(run, audit):
+    # The SDK's resume cursor is independent of the Public API history scan.
+    last = audit["history_step"]
+    if last is not None and run.step != last + 1:
+        raise WriterBusy("ACK_PENDING: the SDK resume cursor differs from the W&B history scan; run a read-only audit")
 
 
 def bind_writer(run, bucket, lease, contract):
@@ -479,7 +506,7 @@ def sync_writer(wandb, args, contract):
                     recheck()  # A scan can take long enough for another VM to reconnect.
                 run = start_writer(wandb, args, identity, lease, "must" if target is not None else "never")
                 bind_writer(run, bucket, lease, contract)
-                if recover:
+                if recover or v3.enabled(args):
                     run.summary[REPORTER_SESSION] = lease.token
                 return run
 
@@ -748,43 +775,50 @@ def repair_v3_gaps(args, wandb, contract, published, sources):
     def repair_rows(target):
         if target is None:
             raise ValueError("Persistent gap recovery requires the existing verified W&B Run")
-        audit = v3.remote_audit(target, durable, published)
+        audit = v3.remote_audit(target, durable, published, minimum_history_step=v3_history_floor(args, contract))
         if audit["status"] == "CONFLICT":
             raise ValueError(f"W&B value conflict or duplicate; nothing was written: {audit['errors']}")
+        if not audit["history_complete"]:
+            raise WriterBusy("ACK_PENDING: a partial W&B history scan cannot confirm a persistent gap")
         gaps = gap_points(audit["ack_pending"]) & confirmed
         if confirmed & gap_points(audit["missing"]):
             raise ValueError("A confirmed gap is no longer below its recorded watermark; collect fresh observations")
         if gaps and list(writer_state(target)) != second["writer_state"]:
             raise ValueError("Writer changed since the gap observations; collect fresh evidence")
-        return {(progress, update): subset for points in durable.values() for progress, update, values in points
-                if (subset := {key: value for key, value in values.items() if (update, key) in gaps})}
+        return ({(progress, update): subset for points in durable.values() for progress, update, values in points
+                 if (subset := {key: value for key, value in values.items() if (update, key) in gaps})}, audit)
 
     _, target = live_target(wandb, args, contract)
     written = {}
-    if repair_rows(target):
+    if repair_rows(target)[0]:
         with sync_writer(wandb, args, contract) as (_, start_run, lease):
             # Use a fresh uncached scan under the existing writer guards,
             # immediately before wandb.init. This also recomputes the missing cells.
             def check(current):
-                written.update(repair_rows(current))
+                rows, audit = repair_rows(current)
+                written.update(rows)
+                checked.update(audit)
                 if not written:
                     raise WriterBusy("The confirmed gaps became visible; run the read-only audit again")
 
+            checked = {}
             run = start_run(check)
             try:
+                check_v3_resume_cursor(run, checked)
                 watermarks = {}
                 for (progress, update), values in sorted(written.items(), key=lambda item: (item[0][1], item[0][0])):
                     publish_metrics(run, progress, update, values, watermarks, backfill=True)
             finally:
-                finish_writer(v3.namespace(contract, args), lease, run)
+                finish_writer(v3.namespace(contract, args), lease, run, track_delivery=True)
     _, target = live_target(wandb, args, contract)
-    audit = v3.remote_audit(target, durable, published)
+    audit = v3.remote_audit(target, durable, published, minimum_history_step=v3_history_floor(args, contract))
     remaining = confirmed & (gap_points(audit["missing"]) | gap_points(audit["ack_pending"]))
-    status = "CONFLICT" if audit["status"] == "CONFLICT" else "ACK_PENDING" if remaining else "RECOVERED"
+    status = ("CONFLICT" if audit["status"] == "CONFLICT" else
+              "ACK_PENDING" if remaining or not audit["history_complete"] else "RECOVERED")
     print(json.dumps({"status": status,
                       "repaired_rows": len(written), "remaining_confirmed_gaps": sorted(remaining),
                       "delivery": audit}, allow_nan=False, sort_keys=True), flush=True)
-    if remaining or audit["status"] == "CONFLICT":
+    if status != "RECOVERED":
         raise RuntimeError("W&B repair is not verified; wait and rerun the read-only audit before doing anything else")
 
 
@@ -807,7 +841,8 @@ def audit_v3(args):
             remote_ok = False
             report["delivery"] = {"status": "NOT_PUBLISHED"}
         else:
-            report["delivery"] = v3.remote_audit(target, sources, published)
+            floor = v3_history_floor(args, contract)
+            report["delivery"] = v3.remote_audit(target, sources, published, minimum_history_step=floor)
             progress = {key: number(target.summary.get(key)) for key in v3.SUMMARY}
             summary_ok = (progress["train/target_update"] == v3.MAX_UPDATE
                           and progress["train/durable_update"] == published
@@ -817,9 +852,9 @@ def audit_v3(args):
             if record and original_ok:
                 # The evidence covers only durable sources available on a cold VM.
                 scope, durable = gap_sources(args, contract, published, sources)
-                delivery = v3.remote_audit(target, durable, published)
-                if delivery["status"] == "CONFLICT":
-                    raise ValueError("Conflicting or duplicate history cannot produce gap recovery evidence")
+                delivery = v3.remote_audit(target, durable, published, minimum_history_step=floor)
+                if delivery["status"] == "CONFLICT" or not delivery["history_complete"]:
+                    raise ValueError("Conflicting, duplicate or partial history cannot produce gap recovery evidence")
                 with record.open("x", encoding="utf-8") as output:
                     observation = gap_observation(scope, target, delivery)
                     json.dump(observation, output, allow_nan=False, sort_keys=True)
@@ -865,9 +900,11 @@ def sync_saved_metrics(args):
     import wandb
     if getattr(args, "repair_v3_gaps", None):
         return repair_v3_gaps(args, wandb, contract, published, sources)
+    wrote = False
     with sync_writer(wandb, args, contract) as (target, start_run, lease):
         if schema_v3:
-            missing, report = v3.reconcile_delivery(target, sources, published)
+            missing, report = v3.reconcile_delivery(target, sources, published,
+                minimum_history_step=v3_history_floor(args, contract))
         else:
             missing, report = reconcile_history(target, sources, published=published, include_legacy=include_legacy)
         progress_due = schema_v3 and target is not None and (
@@ -878,12 +915,31 @@ def sync_saved_metrics(args):
             # Recheck ownership and idle state after the read-only history scan.
             run = start_run()
             try:
+                if schema_v3:
+                    check_v3_resume_cursor(run, report)
                 watermarks = {}
                 for (progress, update), values in missing.items():
                     publish_metrics(run, progress, update, values, watermarks, backfill=True)
                 set_training_progress(run, published, schema_v3=schema_v3)
+                wrote = True
             finally:
-                finish_writer(v3.namespace(contract, args), lease, run)
+                finish_writer(v3.namespace(contract, args), lease, run, track_delivery=schema_v3)
+    if schema_v3 and wrote:
+        detail = f"SDK finished through update {published}; delivery unconfirmed. Wait and run a read-only W&B audit."
+        try:
+            _, target = live_target(wandb, args, contract)
+        except WriterBusy as error:
+            log_event("wandb-metrics", "ack-pending", args.logs, detail)
+            raise WriterBusy("ACK_PENDING: " + detail) from error
+        delivery = v3.remote_audit(target, sources, published, minimum_history_step=v3_history_floor(args, contract))
+        if delivery["status"] == "CONFLICT":
+            raise ValueError(f"W&B history conflict after SDK finish: {delivery['errors']}; run a read-only audit")
+        if (delivery["status"] != "VERIFIED" or target is None
+                or number(target.summary.get("train/target_update")) != v3.MAX_UPDATE
+                or any((number(target.summary.get(key)) or 0) < published
+                       for key in ("train/durable_update", "train/max_update"))):
+            log_event("wandb-metrics", "ack-pending", args.logs, detail)
+            raise WriterBusy("ACK_PENDING: " + detail)
     if include_legacy:
         print(json.dumps({"run_id": run_id(contract), "published_update": published, **report},
                          allow_nan=False, sort_keys=True), flush=True)
@@ -973,6 +1029,7 @@ def report(args, stop):
                                 with ExitStack() as attempt:
                                     identity, current, lease = reporter_preflight(wandb, args, attempt)
                                     missing = {}
+                                    audit = None
                                     if schema_v3 and current is not None:
                                         state = writer_state(current)
                                         history = list(logical_metric_rows(MetricReader(work / TRAIN_JSONL),
@@ -988,14 +1045,16 @@ def report(args, stop):
                                         if not required <= observed:
                                             raise WriterBusy(f"Waiting for local Schema v3 originals through update {published}")
                                         bleu_rows = v3_bleu_rows(args, plan_sha, published, args.contract)
-                                        missing, _ = v3.reconcile_delivery(current, {"original_jsonl": history,
-                                            "qualified_bleu": bleu_rows}, published)
+                                        missing, audit = v3.reconcile_delivery(current, {"original_jsonl": history,
+                                            "qualified_bleu": bleu_rows}, published,
+                                            minimum_history_step=v3_history_floor(args, args.contract))
+                                        watermarks.update(audit["history_watermarks"])
                                         _, checked = live_target(wandb, args, args.contract)
                                         if writer_state(checked) != state:
                                             raise WriterBusy("Another writer connected during history reconciliation")
                                     writer_scope.callback(attempt.pop_all().close)
                             except Exception as error:
-                                if not retryable_preflight(error, wandb):
+                                if not retryable_preflight(error, wandb) or schema_v3 and retry_delay == 60:
                                     raise
                                 if retry_writer_preflight(stop, args.logs, retry_delay, error):
                                     return
@@ -1007,8 +1066,13 @@ def report(args, stop):
                             session = lease.token
                             run.summary[REPORTER_SESSION] = session
                             bind_writer(run, bucket, lease, args.contract)
+                            if audit is not None:
+                                check_v3_resume_cursor(run, audit)
                             for (progress, update), values in missing.items():
                                 publish_metrics(run, progress, update, values, watermarks, backfill=True)
+                            if audit is not None:
+                                for progress, update, _ in (*history, *bleu_rows):
+                                    watermarks[progress] = max(watermarks.get(progress, 0), update)
                         set_training_progress(run, published, schema_v3=schema_v3)
                     if run is not None:
                         sync_rows(run, train, dev, published, watermarks, contract=args.contract,
@@ -1035,7 +1099,7 @@ def report(args, stop):
     finally:
         try:
             if run is not None:
-                finish_writer(v3.namespace(args.contract, args), lease, run)
+                finish_writer(v3.namespace(args.contract, args), lease, run, track_delivery=schema_v3)
             elif published == 0:
                 log_event("wandb", "skipped", args.logs, "No published updates for this contract")
         finally:
@@ -1176,7 +1240,7 @@ def supervise(args):
                             r"\1[REDACTED]@", detail)
             detail = re.sub(r"(?i)([?&](?:api[_-]?key|access_token|token|x-goog-signature)=)[^&\s'\"]+",
                             r"\1[REDACTED]", detail)
-            log_event("wandb", "failed", args.logs, detail)
+            log_event("wandb", "failed", args.logs, detail + "\nW&B delivery stopped for this segment. Training and Snapshot publication continue.")
 
     worker = Thread(target=publish, name="wandb-metrics", daemon=True)
     worker.start()

@@ -65,6 +65,24 @@ def test_inventory_and_exact_readonly_zip_restore(published, tmp_path):
     assert json.loads(listing)["missing_past"] == [5000, 25000]
 
 
+def test_baseline_dev_hash_reads_only_final_receipts(tmp_path):
+    backup = tmp_path / "baseline"
+    work = tmp_path / "research" / "distillation"
+    dev = str(tmp_path / "data/common/dev.jsonl")
+    earlier = backup / "000000001000-earlier"
+    earlier.mkdir(parents=True)
+    (earlier / "snapshot.json").write_text("unreadable earlier receipt", encoding="utf-8")
+    for name in ("first", "second"):
+        folder = backup / f"000000400000-{name}"
+        folder.mkdir()
+        (folder / "snapshot.zip").touch()
+        write_json(folder / "snapshot.json", {"updates": 400000, "identity": {"inputs": {dev: "a" * 64}}})
+    assert bleu.baseline_dev_hash(backup, work, 400000) == "a" * 64
+    write_json(folder / "snapshot.json", {"updates": 400000, "identity": {"inputs": {dev: "b" * 64}}}, overwrite=True)
+    with pytest.raises(ValueError, match="agree on the Dev references"):
+        bleu.baseline_dev_hash(backup, work, 400000)
+
+
 def test_inventory_allows_a_fresh_run_only_with_explicit_opt_in(tmp_path, benchmark_runtime):
     from direct_s2st.s2ut.paper_recipe import MILESTONES
 
