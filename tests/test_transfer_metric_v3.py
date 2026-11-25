@@ -573,7 +573,8 @@ def test_reporter_failure_leaves_originals_verifiable(tmp_path, monkeypatch, dam
     assert any(event[1] == "failed" for event in events)
 
 
-@pytest.mark.parametrize("latest,stop,audit_failure", [(0, 1000, False), (1000, 1100, False), (1000, 1100, True)])
+@pytest.mark.parametrize("latest,stop,audit_failure", [
+    (0, 1000, False), (1000, 1100, False), (1000, 1100, True), (1100, 1100, False)])
 def test_colab_v3_plan_and_pause_route_without_changing_budget(tmp_path, latest, stop, audit_failure):
     source, ns = namespace(tmp_path, "training")
     exec(source["settings"].replace("TRANSFER_METRIC_PROFILE = 'legacy'", "TRANSFER_METRIC_PROFILE = 'v3'"), ns)
@@ -590,7 +591,7 @@ def test_colab_v3_plan_and_pause_route_without_changing_budget(tmp_path, latest,
         if args[1] == "-m":
             return plan
         assert args[2] == "inventory" and args[-2:] == ("--stop-after-update", stop)
-        return {"targets": v3.segment_targets(latest, stop)}
+        return {"latest": latest, "targets": v3.segment_targets(latest, stop)}
 
     def execute(*args, **_):
         calls.append(args)
@@ -611,8 +612,10 @@ def test_colab_v3_plan_and_pause_route_without_changing_budget(tmp_path, latest,
         return
     exec(source["transfer-training"], ns)
     assert "--verify-v3-plan" in calls[0]
-    assert [argv[-1] for argv in calls[1:] if "--originals-only" in argv] == v3.segment_targets(latest, stop)
-    assert [argv[-1] for argv, _ in train] == v3.segment_targets(latest, stop)
+    expected = v3.segment_targets(latest, stop) or [latest]
+    assert [argv[-1] for argv in calls[1:] if "--originals-only" in argv] == expected
+    assert [argv[-1] for argv, _ in train] == expected
     assert all("--max-update" not in argv and options["env"]["S2ST_TRANSFER_METRIC_SCHEMA"] == "3"
                for argv, options in train)
-    assert [argv[-1] for argv, options in train if "after_training" in options] == [1000]
+    assert [argv[-1] for argv, options in train if "after_training" in options] == [
+        step for step in expected if step in v3.MILESTONES]

@@ -106,7 +106,7 @@ def test_training_recovery_check_routes_one_native_condition(tmp_path, phase, ta
     def execute_json(*args, **kw):
         calls.append(args)
         if args[1] == "-m":
-            return {"training_budget": 400000, "initialization": "fresh", "selection_policy": {},
+            return {"training_budget": 400000, "initialization": "fresh", "selection_policy": {}, "contract_hash": "fixture",
                     "transfer": {"calibration_hash": "fixture", "coefficient_policy": {}}}
         assert args[2] == "recovery" and args[args.index("--phase") + 1] == phase
         return {"target": target}
@@ -125,7 +125,7 @@ def test_training_recovery_check_routes_one_native_condition(tmp_path, phase, ta
 
 def test_training_cpu_pack_mode_skips_all_model_training(tmp_path):
     source, ns = namespace(tmp_path, "training")
-    ns.update(NEED_TEACHER=True, NEED_TEXT=True, RUN_BASELINE=True, RUN_T2TT=True)
+    ns.update(NEED_TEACHER=True, NEED_TEXT=True, RUN_BASELINE=True, RUN_T2TT=True, RUN_NATIVE_SMOKE_TEST=True)
     calls = []
     ns.update(execute=lambda *a, **kw: calls.append(a), execute_json=lambda *a, **kw: calls.append(a))
     for identity in ("text-paths", "text-input", "text-train", "text-restore", "text-evaluate",
@@ -134,6 +134,8 @@ def test_training_cpu_pack_mode_skips_all_model_training(tmp_path):
                      "register-transfers", "layer-diagnostics"):
         exec(source[identity], ns)
     assert calls == []
+    exec(source["preflight"], ns)
+    assert len(calls) == 1 and calls[0][2].endswith(".environment") and "--cuda" not in calls[0]
 
 
 @pytest.mark.parametrize('workers', [1, 2, 4])
@@ -257,6 +259,11 @@ def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(
     write_json(ns["CALIBRATION"], {"fixture": True})
     calls = []
     def execute_json(*args, **kw):
+        if args[2] == "registration-status":
+            assert args[args.index("--contract") + 1] == "native-fixture"
+            if args[args.index("--method") + 1] == "annealed_distillation":
+                return {"status": "PILOT_PAUSED", "durable_updates": 1000, "training_budget": 400000}
+            return {"status": "COMPLETED"}
         validate_command(args[2], args[3:])
         calls.append(list(map(str, args)))
         return dict(training_budget=400000, initialization="fresh", selection_policy={}, contract_hash="native-fixture",
@@ -294,7 +301,8 @@ def test_training_routes_teacher_and_all_transfer_conditions_to_the_same_inputs(
         else:
             assert command[command.index("--mask-lambda") + 1] == "10.0"
     exec(source["register-transfers"], ns)
-    assert len(ns["conditions"]) == (1 if mode == "pilot" else 4)
+    assert [name for name, _, _ in ns["conditions"]] == (
+        ["baseline"] if mode == "pilot" else ["baseline", "distillation", "mask_distillation"])
     attention = next(c for c in calls if c[2] == "alignment_transfer_s2ut.extract_t2tt_attention")
     assert "--teacher-training-manifest" in attention and "--all-layers" in attention
 
@@ -322,9 +330,72 @@ def test_external_text_evaluation_skips_speech_restoration(tmp_path):
 
 def test_text_only_training_skips_speech_preparation(tmp_path):
     source, ns = namespace(tmp_path, "training")
-    ns.update(PREPARE_AUDIO_PACKS=False, PREPARE_S2UT=False)
-    exec(source["audio-staging"], ns)
-    exec(source["speech-preparation"], ns)
+    set_training_switches(source, ns, PREPARE_S2UT=False, RUN_T2TT=True)
+    calls = []
+    ns.update(execute=lambda *a, **kw: calls.append(kw.get("name")),
+              execute_json=lambda *a, **kw: calls.append(kw.get("name")) or {})
+    for cell in ("audio-staging", "speech-preparation", "text-paths", "text-input", "text-train", "text-restore"):
+        exec(source[cell], ns)
+    assert calls == ["prepare-external-text", "text-t2tt-training"]
+
+
+def set_training_switches(source, ns, **switches):
+    settings = source["settings"].replace("PREPARE_AUDIO_PACKS = True", "PREPARE_AUDIO_PACKS = False", 1)
+    for key, enabled in switches.items():
+        if enabled:
+            settings = settings.replace(f"{key} = False #@param", f"{key} = True #@param", 1)
+        else:
+            settings = settings.replace(f"{key} = True #@param", f"{key} = False #@param", 1)
+    exec(settings, ns)
+
+
+@pytest.mark.parametrize("projection_audit", [False, True])
+def test_saved_teacher_resume_skips_intermediates_and_cannot_build(tmp_path, projection_audit):
+    source, ns = namespace(tmp_path, "training")
+    switches = {"RUN_DISTILLATION": True}
+    if projection_audit:
+        switches |= {"RUN_TEACHER_PROJECTION_AUDIT": True, "CHECK_SAVED_BASELINE": True, "RUN_NATIVE_SMOKE_TEST": True}
+    set_training_switches(source, ns, **switches)
+    assert ns["NEED_TEACHER"] and not ns["NEED_TEXT"]
+    assert ns["RESTORE_SPEECH_ONLY"]
+    events = []
+    ns.update(config={}, execute=lambda *a, **kw: events.append(kw["name"]),
+              execute_json=lambda *a, **kw: events.append(kw["name"]),
+              run=lambda name, *a, **kw: events.append((name, kw.get("restore_only", False))),
+              corpus_common=lambda **kw: events.append(("common", kw["restore_only"])),
+              corpus_prepare=lambda **kw: events.append(("prepare", kw["restore_only"])),
+              corpus_baseline=lambda **kw: events.append(("baseline", kw["restore_only"])),
+              corpus_stage_audio=lambda **kw: events.append(("index-wavs", kw["create"])))
+    for cell in ("baseline-readiness", "preflight", "audio-staging", "speech-preparation", "baseline",
+                 "speech-artifacts", "text-paths", "text-input", "text-train", "text-restore",
+                 "teacher-paths", "teacher-extraction"):
+        exec(source[cell], ns)
+    with pytest.raises(ValueError, match="RUN_TEACHER_ARTIFACTS=True"):
+        exec(source["teacher-projection"], ns)
+    write_json(Path(ns["PERSISTENT"]) / "stages/teacher-all-layers/pack/snapshot.json",
+               {"files": {"stage-complete.json": "sha"}})
+    exec(source["teacher-projection"], ns)
+    expected = ["corpus-environment", "corpus-paper-dependencies", ("common", True), ("index-wavs", False),
+                ("prepare", True), "corpus-registration-preflight", ("baseline", True),
+                ("full-manifest", True), ("import-units", True), ("teacher-all-layers", True)]
+    if projection_audit:
+        expected = ["baseline-completion-check", *expected[:2], "corpus-native-fp16-test", *expected[2:],
+                    ("teacher-projection-audit-v2", False)]
+    assert events == expected
+
+
+@pytest.mark.parametrize("verify", [False, True])
+def test_baseline_registration_always_runs_but_provenance_is_optional(tmp_path, verify):
+    source, ns = namespace(tmp_path, "training")
+    set_training_switches(source, ns, RUN_DISTILLATION=True, RUN_BASELINE_PROVENANCE_CHECK=verify)
+    ns.update(BASELINE=tmp_path / "baseline.json", BACKBONE_CONFIG=tmp_path / "backbone.json")
+    write_json(ns["BASELINE"], {"checkpoint_updates": 400000, "training_budget": 400000, "selection_policy": {},
+                                "backbone": {}})
+    events = []
+    ns.update(run=lambda name, *a, **kw: events.append(name),
+              execute_json=lambda *a, **kw: events.append(kw["name"]))
+    exec(source["registration"], ns)
+    assert events == (["register-baseline", "baseline-provenance"] if verify else ["register-baseline"])
 
 
 @pytest.mark.parametrize("name", ["training", "evaluate"])

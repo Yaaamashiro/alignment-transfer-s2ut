@@ -1,4 +1,4 @@
-"""Verify saved Baseline provenance and report a short native transfer recovery check."""
+"""Inspect Baseline provenance, transfer recovery and checkpoint registration readiness."""
 
 import argparse
 from datetime import datetime, timedelta
@@ -218,6 +218,39 @@ def recovery_check(work, backup, method, phase, *, baseline=None, report=False, 
     return result
 
 
+def registration_status(work, backup, method, contract):
+    """Check the local durable state before choosing to register or skip."""
+    from transfer_bleu import CHECKPOINT, PLAN, snapshots
+
+    work = Path(work).resolve()
+    plan_bytes = (work / PLAN).read_bytes()
+    plan = json.loads(plan_bytes)
+    actual = digest({key: value for key, value in plan.items() if key != "contract_hash"})
+    if plan["contract_hash"] != actual or actual != contract or plan["transfer"]["method"] != method:
+        raise ValueError("registration status: local plan differs from the requested transfer contract")
+    found = snapshots(Path(backup), work, method, sha256(plan_bytes).hexdigest())
+    update = max(found)
+    budget = plan["training_budget"]
+    session = read_json(work / "native-session.json")
+    if (not 0 < update <= budget or session["training_budget"] != budget
+            or session["durable_updates"] != update):
+        raise ValueError("registration status: session, published checkpoint and budget disagree")
+    expected = "COMPLETED" if update == budget else "PILOT_PAUSED"
+    if session["status"] != expected:
+        raise ValueError("registration status: unexpected native session status")
+    files = found[update][1]["files"]
+    last = work / CHECKPOINT
+    for name in (CHECKPOINT, BASELINE_MEMBERS[1]):
+        if file_hash(work / name) != files.get(name):
+            raise ValueError(f"registration status: {name} differs from its published checksum")
+    if expected == "PILOT_PAUSED":
+        state = benchmark.load_native(last)
+        if (benchmark.checkpoint_updates(state) != update or not state.get("last_optimizer_state")
+                or state.get("extra_state", {}).get("alignment_contract_hash") != contract):
+            raise ValueError("registration status: paused checkpoint is inconsistent")
+    return {"status": expected, "durable_updates": update, "training_budget": budget}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -233,14 +266,19 @@ def main():
     child.add_argument("--baseline", required=True)
     child.add_argument("--report", action="store_true")
     child.add_argument("--output")
+    child = sub.add_parser("registration-status")
+    for name in ("work", "backup", "method", "contract"):
+        child.add_argument("--" + name, required=True)
     args = vars(parser.parse_args())
     action = args.pop("action")
     if action == "baseline":
         result = verify_baseline(**args)
         for warning in result["warnings"]:
             print("WARNING: " + warning, file=sys.stderr, flush=True)
-    else:
+    elif action == "recovery":
         result = recovery_check(**args)
+    else:
+        result = registration_status(**args)
     print(json.dumps(result, allow_nan=False))
 
 

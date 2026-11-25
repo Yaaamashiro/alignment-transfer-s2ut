@@ -533,37 +533,60 @@ def stage_session(command, work, backup, interval=600, *, restore_only=False):
         "alignment_transfer_s2ut.extract_t2tt_attention", "alignment_transfer_s2ut.align_speech_text",
         "alignment_transfer_s2ut.extract_units", "alignment_transfer_s2ut.build_teacher_alignment")) or any(
         list(command[i:i + 2]) == ["alignment_transfer_s2ut.benchmark_data", "units"] for i in range(len(command) - 1))
-    receipts = sorted(backup.glob("*/snapshot.json"))
-    versions, stamps, generation = {}, {}, 0
-    for marker in receipts:
+    packs, versions = [], {}
+    for marker in sorted(backup.glob("*/snapshot.json")):
         state = read_json(marker)
         if state["identity"] != identity:
             raise ValueError("stage input/configuration changed; use a new backup directory")
+        archive = marker.parent / "snapshot.zip"
+        if archive.is_symlink() or not archive.is_file():
+            raise ValueError(f"missing or unsafe stage archive at {archive}")
+        for name in state["files"]:
+            bench.safe_relative(name)
+        versions.update(state["files"])
+        packs.append((marker.parent, state))
+
+    complete = work / "stage-complete.json"
+
+    def verified_completion():
+        if not complete.is_file() or versions.get("stage-complete.json") != file_hash(complete):
+            return False
+        state = read_json(complete)
+        return (state.get("identity") == digest(identity)
+                and (not pair_outputs or state.get("artifact_receipts_verified") is True))
+
+    def verified_local_file(name, sha):
+        path = work / name
+        return (not path.is_symlink() and path.resolve().is_relative_to(work)
+                and path.is_file() and file_hash(path) == sha)
+
+    if verified_completion() and all(verified_local_file(name, sha) for name, sha in versions.items()):
+        progress(f"stage reuse: {len(versions)} local files match the published stage receipts")
+        return {"status": "COMPLETE", "reused": True}
+
+    stamps, generation = {}, 0
+    for directory, state in packs:
         # Use the benchmark verifier on this individual incremental recovery point.
         with tempfile.TemporaryDirectory(dir=work.parent, prefix=".stage-restore-") as temp:
             restored = Path(temp) / "files"
             # latest() on all packs could hide a corrupt earlier pack; verify
             # each ZIP explicitly before delegating the unchanged extractor.
             from direct_s2st.drive_staging import raw_sha
-            if raw_sha(marker.parent / "snapshot.zip") != state["zip_sha256"]:
+            if raw_sha(directory / "snapshot.zip") != state["zip_sha256"]:
                 raise ValueError("stage archive checksum mismatch")
-            bench.restore((marker.parent, state), restored)
-            for name, sha in state["files"].items():
+            bench.restore((directory, state), restored)
+            for name in state["files"]:
                 source, target = restored / name, work / name
                 if target.is_symlink() or not target.resolve().is_relative_to(work):
                     raise ValueError("stage restore escapes output")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
-                versions[name] = sha
                 stat = target.stat()
                 stamps[name] = (stat.st_size, stat.st_mtime_ns)
         generation = max(generation, state["updates"])
-    complete = work / "stage-complete.json"
     if complete.is_file():
         state = read_json(complete)
-        if (state.get("identity") == digest(identity) and
-                (not pair_outputs or state.get("artifact_receipts_verified") is True) and
-                versions.get("stage-complete.json") == file_hash(complete)):
+        if verified_completion():
             return {"status": "COMPLETE", "reused": True}
         if restore_only:
             raise ValueError(f"no completed, verified stage at {backup}")
