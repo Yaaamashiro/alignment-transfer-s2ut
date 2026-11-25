@@ -240,8 +240,15 @@ def registration_status(work, backup, method, contract):
         raise ValueError("registration status: unexpected native session status")
     files = found[update][1]["files"]
     last = work / CHECKPOINT
-    for name in (CHECKPOINT, BASELINE_MEMBERS[1]):
-        if file_hash(work / name) != files.get(name):
+    best = BASELINE_MEMBERS[1]
+    required = [CHECKPOINT, best]
+    if expected == "PILOT_PAUSED" and best not in files and not (work / best).exists():
+        selection = plan["selection_policy"]
+        if selection["mode"] == "unit_loss_report_only" and update < selection["interval"]:
+            required.remove(best)
+    for name in required:
+        path = work / name
+        if name not in files or not path.is_file() or file_hash(path) != files[name]:
             raise ValueError(f"registration status: {name} differs from its published checksum")
     if expected == "PILOT_PAUSED":
         state = benchmark.load_native(last)

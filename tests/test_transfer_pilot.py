@@ -193,10 +193,24 @@ def test_native_pilot_restore_and_continue_matches_resident_run(calibrated, nati
     assert record["scientific_config"] == read_json(baseline)["scientific_config"]
     assert record["training_budget"] == budget and record["method"] == method
     assert {path: file_hash(path) for path in protected} == protected
-@pytest.mark.parametrize("update,fault", [
-    (1000, None), (400000, None), (1000, "session"), (1000, "last"), (1000, "best"), (1000, "contract"),
+
+
+@pytest.mark.parametrize("update,publish_best,fault", [
+    (500, False, None),
+    (500, False, "last"),
+    (500, True, "missing-best"),
+    (500, True, "best"),
+    (1000, False, "unpublished-best"),
+    (1000, True, None),
+    (400000, False, "unpublished-best"),
+    (400000, True, None),
+    (1000, True, "session"),
+    (1000, True, "last"),
+    (1000, True, "best"),
+    (1000, True, "contract"),
 ])
-def test_registration_status_requires_a_matching_published_checkpoint(tmp_path, benchmark_runtime, monkeypatch, update, fault):
+def test_registration_status_requires_a_matching_published_checkpoint(
+        tmp_path, benchmark_runtime, monkeypatch, update, publish_best, fault):
     from alignment_transfer_s2ut.colab_runtime import BENCHMARK_REVISION
     from alignment_transfer_s2ut.io import digest
 
@@ -208,13 +222,15 @@ def test_registration_status_requires_a_matching_published_checkpoint(tmp_path, 
     best = work / "checkpoints/checkpoint_best.pt"
     last.parent.mkdir(parents=True)
     method = "distillation"
-    plan = {"training_budget": 400000, "transfer": {"method": method}}
+    plan = {"training_budget": 400000, "transfer": {"method": method},
+            "selection_policy": {"mode": "unit_loss_report_only", "interval": 1000}}
     contract = plan["contract_hash"] = digest(plan)
     write_json(work / "native-run.json", plan)
     state = {"optimizer_history": [{"num_updates": update}], "last_optimizer_state": {"loss_scale": 128},
              "extra_state": {"alignment_contract_hash": contract}}
     torch.save(state, last)
-    torch.save(state, best)
+    if publish_best:
+        torch.save(state, best)
     identity = {"work": str(work), "benchmark_revision": BENCHMARK_REVISION,
                 "command": ["python", "-m", "alignment_transfer_s2ut.benchmark", "train",
                             "--method", method, "--output", str(work)]}
@@ -225,10 +241,13 @@ def test_registration_status_requires_a_matching_published_checkpoint(tmp_path, 
                 "durable_updates": update})
     if fault in ("last", "best"):
         (last if fault == "last" else best).write_bytes(b"corrupted checkpoint")
+    if fault == "missing-best":
+        best.unlink()
     if fault == "contract":
         contract = "wrong"
     if fault:
-        with pytest.raises(ValueError, match="registration status"):
+        message = "checkpoint_best.pt" if fault in ("best", "missing-best", "unpublished-best") else "registration status"
+        with pytest.raises(ValueError, match=message):
             inspect(work, backup, method, contract)
     else:
         assert inspect(work, backup, method, contract) == {
