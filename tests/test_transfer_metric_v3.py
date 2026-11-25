@@ -396,6 +396,55 @@ def test_v3_identity_and_transport_validation(tmp_path):
     assert v3.remote_audit(target, source, 100)["status"] == "VERIFIED"
 
 
+@pytest.mark.parametrize("rows,end,status", [
+    ([(0, 100, 2.0), (0, 100, 2.0)], 0, "VERIFIED"),
+    ([(0, 100, 2.0), (0, 100, 2.1)], 0, "CONFLICT"),
+    ([(0, 100, 2.0), (0, 101, 2.0)], 0, "CONFLICT"),
+    ([(0, 100, 2.0), (1, 100, 2.0)], 1, "CONFLICT"),
+    ([(None, 100, 2.0), (None, 100, 2.0)], 0, "CONFLICT"),
+    ([(0, 100, 2.0), (2, 101, 2.0)], 2, "ACK_PENDING"),
+    ([(0, 100, 2.0)], 1, "ACK_PENDING"),
+])
+def test_v3_history_scan_distinguishes_page_overlap_from_conflicts_or_partial_reads(rows, end, status):
+    class Scan(list):
+        max_step = end
+
+    history = Scan(dict(_step=step, update=update, **{"train/main_loss": value}) for step, update, value in rows)
+    sources = {"snapshot": [("train_marker", step, {"train/main_loss": 2.0}) for step in {row[1] for row in rows}]}
+    target = SimpleNamespace(summary={}, scan_history=lambda **opts: history)
+    audit = v3.remote_audit(target, sources, 101)
+    assert audit["status"] == status
+    if status == "ACK_PENDING":
+        from wandb_writer import WriterBusy
+        with pytest.raises(WriterBusy, match="ACK_PENDING"):
+            v3.reconcile_delivery(target, sources, 101)
+    if status == "VERIFIED":
+        assert audit["metric_point_counts"] == {"train/main_loss": 1}
+
+
+def test_v3_history_watermarks_cover_missing_cells_in_the_same_stream():
+    from wandb_history import DEV_UPDATE, TRAIN_UPDATE
+    from wandb_writer import WriterBusy
+
+    class Scan(list):
+        max_step = 1
+
+    rows = Scan([{"_step": 0, "update": 6000, TRAIN_UPDATE: 6000, "train/task_loss": 3.0},
+                 {"_step": 1, "update": 7400, TRAIN_UPDATE: 7400, "train/main_loss": 2.0}])
+    sources = {"originals": [(TRAIN_UPDATE, 6000, {"train/main_loss": 2.0, "train/task_loss": 3.0}),
+                            (TRAIN_UPDATE, 7400, {"train/main_loss": 2.0}),
+                            (DEV_UPDATE, 7000, {"dev/main_loss": 2.0})]}
+    target = SimpleNamespace(summary={TRAIN_UPDATE: 5000, DEV_UPDATE: 5000}, scan_history=lambda **_: rows)
+    audit = v3.remote_audit(target, sources, 7400)
+    assert audit["history_complete"] and audit["ack_pending"] == {"train/main_loss": [6000]}
+    assert audit["missing"] == {"dev/main_loss": [7000]}
+    with pytest.raises(WriterBusy, match="ACK_PENDING"):
+        v3.reconcile_delivery(target, sources, 7400)
+    rows[0]["train/main_loss"] = 2.0
+    missing, _ = v3.reconcile_delivery(target, sources, 7400)
+    assert missing == {(DEV_UPDATE, 7000): {"dev/main_loss": 2.0}}
+
+
 def test_v3_bleu_requires_three_values_per_qualified_subset():
     scores = {"policy": v3.BLEU_POLICY, "failure_policy": "generation-only-v1", "generation_failures": {}}
     ids = [str(i) for i in range(500)]
@@ -448,16 +497,20 @@ def test_v3_cold_snapshot_sync_uses_bound_run_id_and_is_idempotent(tmp_path, mon
             raise CommError(RunNotFoundError(path))
         return remote
 
-    def log(row):
-        history.append(row)
-        summary.update(row)
-
     def init(**kw):
         assert kw["id"] == identity and kw["resume"] == ("must" if opened else "never")
         assert kw.get("config") == (None if opened else binding)
         opened.append(kw["id"])
-        return SimpleNamespace(log=log, summary=summary, finish=lambda: None, define_metric=lambda *a, **kw: None,
-                               url="https://wandb.ai/example")
+        run = SimpleNamespace(step=len(history), summary=summary, finish=lambda: None, define_metric=lambda *a, **kw: None,
+                              url="https://wandb.ai/example")
+
+        def log(row):
+            history.append({**row, "_step": run.step})
+            run.step += 1
+            summary.update(row)
+
+        run.log = log
+        return run
 
     monkeypatch.setitem(sys.modules, "wandb", sdk(init, lookup))
     monkeypatch.setitem(reporter["writer_path"].__globals__, "gettempdir", lambda: str(tmp_path / "runtime"))
@@ -522,7 +575,7 @@ def test_v3_cold_snapshot_sync_uses_bound_run_id_and_is_idempotent(tmp_path, mon
     secondary = history[0].pop("train/task_loss")  # Single observation is insufficient.
     reporter["sync_saved_metrics"](args)
     appended = history[-1]
-    assert appended == {"update": 1, key: measured, reporter["TRAIN_UPDATE"]: 1}
+    assert appended == {"_step": 2, "update": 1, key: measured, reporter["TRAIN_UPDATE"]: 1}
     assert summary[reporter["TRAIN_UPDATE"]] == 100
     assert opened == [identity, identity]
     reporter["sync_saved_metrics"](args)
@@ -532,7 +585,83 @@ def test_v3_cold_snapshot_sync_uses_bound_run_id_and_is_idempotent(tmp_path, mon
     assert reporter["audit_v3"](args)
 
 
-def test_reporter_reconnects_after_5000_bleu_when_dev_originals_are_being_restored(tmp_path, monkeypatch):
+def test_v3_recovery_waits_for_both_public_views_and_checks_the_resume_cursor(tmp_path, monkeypatch):
+    from wandb_writer import WriterBusy
+
+    reporter = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    method, contract = "distillation", "a" * 64
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    write_json(work / "native-run.json", {"contract_hash": contract, "transfer": {
+        "method": method, "calibrated": {"tau_kl": TAU}, "coefficient_policy": {"tau": TAU}}})
+    write_jsonl(work / "alignment-train.jsonl", [row_for(update, contract) for update in range(1, 101)])
+    publish_receipt(work, backup, 100, method=method, archive=True)
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, method=method, metric_schema=3,
+                              project=v3.PROJECT, entity=v3.ENTITY, group=v3.GROUP, contract=contract,
+                              recover_writer=True, confirm_writers_stopped=True, bleu_results=None)
+    identity = reporter["run_id"](v3.namespace(contract, args))
+    metric = v3.validate_row(row_for(1, contract), method, contract, "train", tau=TAU)
+    marker = reporter["TRAIN_UPDATE"]
+    history = [dict(metric, _step=0, update=1, **{marker: 1})]
+    summary = {marker: 1, "train/durable_update": 1, "train/max_update": 1,
+               "train/target_update": v3.MAX_UPDATE, reporter["REPORTER_SESSION"]: "previous"}
+    stale_summary = summary.copy()
+    opened = []
+    fresh = False
+    runtime = tmp_path / "original-vm"
+
+    def lookup(path):
+        assert path == f"{v3.ENTITY}/{v3.PROJECT}/{identity}"
+        view = history if fresh else history[:1]
+        scan = type("Scan", (list,), {"max_step": len(view) - 1})
+        # The service can return overlapping pages, including after successful indexing.
+        return SimpleNamespace(id=identity, entity=v3.ENTITY, project=v3.PROJECT, group=v3.GROUP,
+                               state="finished", config=v3.binding(contract, args),
+                               summary=summary if fresh else stale_summary,
+                               scan_history=lambda **opts: scan([*view, *view]))
+
+    def init(**options):
+        assert options["id"] == identity and options["resume"] == "must"
+        opened.append(identity)
+        run = SimpleNamespace(step=len(history), summary=summary, url="https://wandb.ai/example",
+                              define_metric=lambda *a, **kw: None, finish=lambda: None)
+
+        def log(values):
+            history.append({**values, "_step": run.step})
+            run.step += 1
+            summary.update(values)
+
+        run.log = log
+        return run
+
+    monkeypatch.setitem(sys.modules, "wandb", sdk(init, lookup))
+    monkeypatch.setitem(reporter["writer_path"].__globals__, "gettempdir", lambda: str(runtime))
+    with pytest.raises(WriterBusy, match="delivery unconfirmed"):
+        reporter["sync_saved_metrics"](args)
+    assert [row["update"] for row in history] == [1, 100]
+    with pytest.raises(WriterBusy, match="ACK_PENDING"):
+        reporter["sync_saved_metrics"](args)
+    assert opened == [identity]
+
+    # An advanced Summary alone cannot qualify a missing history row for resend.
+    stale_summary[marker] = 100
+    runtime = tmp_path / "cold-vm"
+    with pytest.raises(WriterBusy, match="ACK_PENDING"):
+        reporter["sync_saved_metrics"](args)
+    assert opened == [identity]
+    stale_summary[marker] = 1
+    with pytest.raises(WriterBusy, match="SDK resume cursor"):
+        reporter["sync_saved_metrics"](args)
+    assert opened == [identity, identity] and len(history) == 2
+
+    fresh = True
+    reporter["sync_saved_metrics"](args)
+    assert opened == [identity, identity] and len(history) == 2
+    args.audit_v3, args.final = "wandb", True
+    assert reporter["audit_v3"](args) is True
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_reporter_reconnects_after_5000_bleu_when_dev_originals_are_being_restored(tmp_path, monkeypatch, cancel):
     from threading import Event
     from test_wandb_transfer import CommError, RunNotFoundError
 
@@ -557,28 +686,29 @@ def test_reporter_reconnects_after_5000_bleu_when_dev_originals_are_being_restor
                              state="finished", config=v3.binding(contract, args), summary=summary,
                              scan_history=lambda **options: iter(history))
     restoring = work / "dev.restoring"
-    replace_on_lookup = False
+    lookups = []
 
     def lookup(path):
-        nonlocal replace_on_lookup
+        lookups.append(path)
         assert path == f"{v3.ENTITY}/{v3.PROJECT}/{identity}"
         if not sessions:
             raise CommError(RunNotFoundError(path))
-        if replace_on_lookup:
-            replace_on_lookup = False
-            dev.replace(restoring)
         return remote
 
     def init(**options):
         assert options["id"] == identity
         sessions.append(options["resume"])
 
+        run = SimpleNamespace(step=len(history), entity=v3.ENTITY, summary=summary, url="https://wandb.ai/example",
+                              define_metric=lambda *a, **kw: None, finish=lambda: finishes.append(identity))
+
         def log(row):
-            history.append(row)
+            history.append({**row, "_step": run.step})
+            run.step += 1
             summary.update(row)
 
-        return SimpleNamespace(entity=v3.ENTITY, summary=summary, log=log, url="https://wandb.ai/example",
-                               define_metric=lambda *a, **kw: None, finish=lambda: finishes.append(identity))
+        run.log = log
+        return run
 
     monkeypatch.setitem(sys.modules, "wandb", sdk(init, lookup))
     monkeypatch.setitem(scope, "gettempdir", lambda: str(tmp_path / "runtime"))
@@ -588,22 +718,170 @@ def test_reporter_reconnects_after_5000_bleu_when_dev_originals_are_being_restor
     reporter["report"](args, previous)
     assert finishes == [identity] and summary["eval/aux_bleu"] == 10.
     distinct_before = len(history)
+    # History has all of 5k, but the faster-facing summary can be older.
+    for key in (reporter["TRAIN_UPDATE"], reporter["DEV_UPDATE"], reporter["EVAL_PROGRESS"]):
+        summary.pop(key)
+    lookups.clear()
+    delays = []
+    plan = work / "native-run.json"
+    plan_bytes = plan.read_bytes()
+    plan.write_bytes(plan_bytes[:20])  # A restore may expose the plan before the copy completes.
+    dev.replace(restoring)
 
     class NextSegment(Event):
         def wait(self, delay):
-            assert delay == 2 and sessions == ["never"]  # Retry before opening a Writer.
+            assert not lookups and sessions == ["never"]
+            delays.append(delay)
+            if delay == 15:
+                plan.write_bytes(plan_bytes)
+                return False
+            if cancel:
+                self.set()
+                return True
+            if delay < 60:
+                return False
             restoring.replace(dev)
             write_jsonl(train, [dict(original, step=step) for step in range(1, 5101)], overwrite=True)
             publish_receipt(work, backup, 5100, method=method, archive=True)
             self.set()
             return False  # Inputs became ready on the next poll.
 
-    replace_on_lookup = True
     reporter["report"](args, NextSegment())
+    if cancel:
+        assert delays == [15, 2] and sessions == ["never"]
+        return
+    assert delays == [15, 2, 4, 8, 16, 32, 60]
     assert sessions == ["never", "must"] and finishes == [identity, identity]
     assert [row["update"] for row in history[distinct_before:]] == [5100]
     assert sum("eval/aux_bleu" in row for row in history) == 1
     assert summary["train/durable_update"] == 5100
+
+
+@pytest.mark.parametrize("failure", [None, "finish", "conflict", "auth"])
+def test_v3_reporter_rechecks_cursor_only_after_confirmed_finish(tmp_path, monkeypatch, failure):
+    from threading import Event
+    from test_wandb_transfer import CommError
+    from wandb_writer import WriterBusy
+
+    reporter = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    method, contract = "distillation", "a" * 64
+    work, backup, logs = (tmp_path / name for name in ("work", "backup", "logs"))
+    write_json(work / "native-run.json", {"contract_hash": contract, "transfer": {
+        "method": method, "calibrated": {"tau_kl": TAU}, "coefficient_policy": {"tau": TAU}}})
+    write_jsonl(work / "alignment-train.jsonl", [row_for(update, contract) for update in range(1, 201)])
+    publish_receipt(work, backup, 200, method=method, archive=True)
+    args = argparse.Namespace(work=work, backup=backup, logs=logs, method=method, metric_schema=3,
+                              project=v3.PROJECT, entity=v3.ENTITY, group=v3.GROUP, contract=contract,
+                              bleu_results=None)
+    key = v3.namespace(contract, args)
+    identity = reporter["run_id"](key)
+    marker = reporter["TRAIN_UPDATE"]
+    history = [{**v3.validate_row(row_for(update, contract), method, contract, "train", tau=TAU),
+                "_step": index, "update": update, marker: update}
+               for index, update in enumerate((1, 100))]
+    summary = {marker: 1}
+    fresh = False
+    time_out = failure is None
+    opened, finished, delays = [], [], []
+
+    def lookup(path):
+        nonlocal time_out
+        assert path == f"{v3.ENTITY}/{v3.PROJECT}/{identity}"
+        if failure == "auth":
+            error = RuntimeError("unauthorized")
+            error.response = SimpleNamespace(status_code=401)
+            raise CommError(error)
+        if time_out:
+            time_out = False
+            raise TimeoutError("temporary W&B API failure")
+        view = history if fresh else history[:1]
+        return SimpleNamespace(id=identity, entity=v3.ENTITY, project=v3.PROJECT, group=v3.GROUP, state="finished",
+                               config=v3.binding(contract, args), summary=summary, scan_history=lambda **_: iter(view))
+
+    def init(**options):
+        assert options["resume"] == "must" and options["id"] == identity
+        opened.append(identity)
+        run = SimpleNamespace(step=len(history), entity=v3.ENTITY, summary=summary,
+                              url="https://wandb.ai/example", define_metric=lambda *a, **kw: None)
+
+        def finish():
+            finished.append(identity)
+            if failure == "finish":
+                raise WriterBusy("SDK finish was unconfirmed")
+
+        def log(row):
+            history.append({**row, "_step": run.step})
+            run.step += 1
+
+        run.finish, run.log = finish, log
+        return run
+
+    monkeypatch.setitem(sys.modules, "wandb", sdk(init, lookup))
+    monkeypatch.setitem(reporter["writer_path"].__globals__, "gettempdir", lambda: str(tmp_path / "runtime"))
+
+    class Segment(Event):
+        def wait(self, delay):
+            nonlocal fresh
+            delays.append(delay)
+            if opened:
+                assert finished == [identity] and len(history) == 2
+                assert not reporter["writer_path"](key, ".pending.json").exists()
+                fresh = True
+                self.set()
+            return False
+
+    if failure == "conflict":
+        history[0]["train/main_loss"] += 1
+    if failure:
+        error, message = {"finish": (WriterBusy, "finish was unconfirmed"),
+                          "conflict": (ValueError, "history conflict"), "auth": (CommError, "unauthorized")}[failure]
+        with pytest.raises(error, match=message):
+            reporter["report"](args, Segment())
+        assert delays == [] and len(history) == 2
+        assert opened == finished == ([identity] if failure == "finish" else [])
+        assert reporter["writer_path"](key, ".pending.json").exists() == (failure == "finish")
+    else:
+        reporter["report"](args, Segment())
+        assert delays == [2, 4] and opened == finished == [identity, identity]
+        assert [row["update"] for row in history] == [1, 100, 200]
+
+
+@pytest.mark.parametrize("finish_fails", [False, True])
+def test_v3_finish_attempts_shutdown_even_when_sdk_step_times_out(tmp_path, monkeypatch, finish_fails):
+    from wandb_writer import WriterLease
+
+    reporter = runpy.run_path(str(Path(__file__).resolve().parents[1] / "tools/wandb_transfer.py"))
+    monkeypatch.setitem(reporter["writer_path"].__globals__, "gettempdir", lambda: str(tmp_path))
+    key = "verified-contract"
+    owner = reporter["writer_path"](key, ".owner.json")
+    pending = reporter["writer_path"](key, ".pending.json")
+    write_json(owner, {"session": "previous", "history_step": 100})
+    write_json(pending, {"session": "current"})
+    lease = WriterLease()
+    lease.opening()
+    finish_calls = []
+
+    class Run:
+        @property
+        def step(self):
+            raise TimeoutError("SDK history step request timed out")
+
+        def finish(self):
+            finish_calls.append(True)
+            if finish_fails:
+                raise OSError("SDK finish failed")
+
+    if finish_fails:
+        with pytest.raises(OSError, match="finish failed") as failure:
+            reporter["finish_writer"](key, lease, Run(), track_delivery=True)
+        assert "delivery unconfirmed" in str(failure.value.__context__)
+    else:
+        with pytest.raises(RuntimeError, match="delivery unconfirmed") as failure:
+            reporter["finish_writer"](key, lease, Run(), track_delivery=True)
+        assert isinstance(failure.value.__cause__, TimeoutError)
+    assert finish_calls == [True] and lease.unfinished == finish_fails
+    assert read_json(owner) == {"session": "previous", "history_step": 100}
+    assert read_json(pending) == {"session": "current"}
 
 
 @pytest.mark.parametrize("damaged", [False, True])

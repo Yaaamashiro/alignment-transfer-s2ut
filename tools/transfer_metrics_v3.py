@@ -114,8 +114,8 @@ def check_bleu(row):
         raise ValueError("BLEU signature differs from the registered scorer")
 
 
-def remote_audit(target, sources, published):
-    from wandb_history import number
+def remote_audit(target, sources, published, *, minimum_history_step=-1):
+    from wandb_history import DEV_UPDATE, DEV_WINDOW, TRAIN_UPDATE, TRAIN_WINDOW, number
 
     expected = {}
     for rows in sources.values():
@@ -124,19 +124,42 @@ def remote_audit(target, sources, published):
                 if expected.setdefault((update, key), (progress, value)) != (progress, value):
                     raise ValueError(f"Conflicting v3 source for {key} at update {update}")
     existing = {}
+    steps, step_values, watermarks = {}, {}, {}
     errors = {"invalid": [], "duplicate": [], "conflict": [], "unexpected": []}
     history = target.scan_history(page_size=1000, use_cache=False) if target is not None else ()
+    scan_end = getattr(history, "max_step", None)
+    unnumbered = False
     for row in history:
         values = {key: value for key, value in row.items() if value is not None and
                   key.startswith(("train/", "dev/", "alignment/", "eval/"))}
         update = number(row.get("update"))
+        step = row.get("_step")
+        if type(step) is int and step >= 0:
+            if step not in steps or steps[step] is None:
+                steps[step] = update
+            elif update is not None and steps[step] != update:
+                errors["conflict"].append({"step": step, "updates": [steps[step], update]})
+        else:
+            step = None
+            unnumbered |= bool(values)
         if update is None or update != int(update) or not 1 <= update <= published:
             if values:
                 errors["unexpected"].append({"update": update, "metrics": sorted(values)})
             continue
         update = int(update)
+        for progress in (TRAIN_UPDATE, DEV_UPDATE, TRAIN_WINDOW, DEV_WINDOW, "wandb_eval_update_v3"):
+            if number(row.get(progress)) == update:
+                watermarks[progress] = max(watermarks.get(progress, 0), update)
         for key, value in values.items():
             point = (update, key)
+            if step is not None:
+                cell = (step, *point)
+                if cell in step_values:
+                    previous = step_values[cell]
+                    if previous != value or valid_number(previous) != valid_number(value):
+                        errors["conflict"].append(point)
+                    continue
+                step_values[cell] = value
             if point in existing:
                 errors["duplicate"].append(point)
             existing[point] = value
@@ -148,12 +171,16 @@ def remote_audit(target, sources, published):
                 errors["conflict"].append(point)
             if point not in expected and (key in COMPARISON_KEYS | TRAIN_DIAGNOSTICS or key.startswith("alignment/update/")):
                 errors["unexpected"].append(point)
+    last_step = max(steps, default=-1)
+    complete_scan = (scan_end is None or not unnumbered and last_step == scan_end and len(steps) == scan_end + 1)
+    complete_scan = complete_scan and last_step >= minimum_history_step
     missing, pending = {}, {}
     for point in expected.keys() - existing.keys():
         update, key = point
         progress = expected[point][0]
-        watermark = (number(target.summary.get(progress)) or 0) if target is not None else 0
-        target_map = pending if update <= watermark else missing
+        summary_watermark = (number(target.summary.get(progress)) or 0) if target is not None else 0
+        watermark = max(summary_watermark, watermarks.get(progress, 0))
+        target_map = pending if not complete_scan or update <= watermark else missing
         target_map.setdefault(key, []).append(update)
     counts = {}
     comparison_counts = {}
@@ -162,9 +189,12 @@ def remote_audit(target, sources, published):
         counts[key] = counts.get(key, 0) + delivered
         if update != 1 and key in COMPARISON_KEYS:
             comparison_counts[key] = comparison_counts.get(key, 0) + delivered
-    status = ("CONFLICT" if any(errors.values()) else "ACK_PENDING" if pending
+    status = ("CONFLICT" if any(errors.values()) else "ACK_PENDING" if pending or not complete_scan
               else "NOT_SENT" if missing else "VERIFIED")
     return {"status": status,
+            "history_complete": complete_scan,
+            "history_step": last_step if steps or scan_end is not None else None,
+            "history_watermarks": watermarks,
             "metric_point_counts": counts,
             "comparison_point_counts": comparison_counts,
             "missing": {key: sorted(updates) for key, updates in sorted(missing.items())},
@@ -172,15 +202,15 @@ def remote_audit(target, sources, published):
             "errors": {key: {"count": len(points), "examples": points[:20]} for key, points in errors.items()}}
 
 
-def reconcile_delivery(target, sources, published):
+def reconcile_delivery(target, sources, published, *, minimum_history_step=-1):
     from wandb_writer import WriterBusy
 
     materialized = {source: list(rows) for source, rows in sources.items()}
-    audit = remote_audit(target, materialized, published)
+    audit = remote_audit(target, materialized, published, minimum_history_step=minimum_history_step)
     if audit["status"] == "CONFLICT":
         raise ValueError("W&B Schema v3 history conflict: " + json.dumps(audit["errors"], sort_keys=True))
     if audit["status"] == "ACK_PENDING":
-        raise WriterBusy("ACK_PENDING: W&B has not indexed previously acknowledged Schema v3 history")
+        raise WriterBusy("ACK_PENDING: Schema v3 history is incomplete or not yet indexed; run a read-only W&B audit")
     missing = {key: set(updates) for key, updates in audit["missing"].items()}
     rows = {}
     for points in materialized.values():

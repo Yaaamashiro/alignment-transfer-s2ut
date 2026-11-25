@@ -148,7 +148,7 @@ def inventory(found, milestones):
 def baseline_dev_hash(backup, work, budget):
     common = str(work.parents[1] / "data/common/dev.jsonl")
     hashes = set()
-    for marker in sorted(backup.glob("*/snapshot.json"), reverse=True):
+    for marker in backup.glob(f"{budget:012d}-*/snapshot.json"):
         receipt = json.loads(marker.read_bytes())
         if (receipt["updates"] == budget and (marker.parent / "snapshot.zip").is_file()):
             checksum = receipt["identity"]["inputs"].get(common, "")
