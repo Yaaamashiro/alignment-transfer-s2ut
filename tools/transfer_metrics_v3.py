@@ -5,7 +5,7 @@ from hashlib import sha256
 import json
 from alignment_transfer_s2ut.metric_integrity_v3 import (
     MAX_UPDATE, METHODS, TRAIN, DEV, check_raw, check_alignment, coverage,
-    metric_values, required_metrics, valid_number, validate_row, plan_tau,
+    metric_values, required_metrics, valid_number, validate_row, plan_tau, plan_dev_reference,
 )
 
 

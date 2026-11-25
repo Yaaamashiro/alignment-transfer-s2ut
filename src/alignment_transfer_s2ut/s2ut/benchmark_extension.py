@@ -88,6 +88,7 @@ class AlignmentTask(SpeechToSpeechTask):
         super().__init__(args, *a, **kw)
         plan = read_json(args.alignment_config)
         record = read_record(plan["baseline_record"])
+        self.dev_tsv_sha256 = record["prepared"]["files"]["dev.tsv"]
         self.transfer_policy = plan["transfer"]
         self.training_budget = plan["training_budget"]
         policy = self.transfer_policy
@@ -423,11 +424,12 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
     original_compute = SpeechToUnitMultitaskTaskCriterion.compute_loss
     schema_v3 = os.environ.get("S2ST_TRANSFER_METRIC_SCHEMA") == "3"
     from ..metric_integrity_v3 import required_metrics, validate_row
+    from ..dev_integrity import attest_selection, checked_ids, native_selection
 
-    def validate_measurement(path, row, policy, split):
+    def validate_measurement(path, row, policy, split, *, dev_reference=None):
         try:
             tau = policy["calibrated"]["tau_mask" if policy["method"] == "mask_distillation" else "tau_kl"]
-            validate_row(row, policy["method"], contract_hash, split, tau=tau)
+            validate_row(row, policy["method"], contract_hash, split, tau=tau, dev_reference=dev_reference)
         except (KeyError, TypeError, ValueError, ArithmeticError) as error:
             reason = f"Schema v3 {split} measurement failed at update {row['step']}: {error}"
             write_json(path.parent / "metric-stop.json", {"split": split, "step": row["step"],
@@ -447,11 +449,12 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
         result = original_compute(self, *args, **kwargs)
         self.native_main_loss_sum = result[0].detach().clone()
         return result
-    def forward(self, *args, **kwargs):
-        loss, size, logs = original_forward(self, *args, **kwargs)
+    def forward(self, model, sample, *args, **kwargs):
+        loss, size, logs = original_forward(self, model, sample, *args, **kwargs)
         logs["native_main_loss_sum"] = self.native_main_loss_sum
         if schema_v3 and not self.training:
             logs["native_task_loss_sum"] = loss.detach()
+            logs["native_dev_indices"] = sample["id"]
         if not isinstance(self, AlignmentCriterion):
             metrics.log_scalar("train/main_loss", float(self.native_main_loss_sum) / size, size)
         return loss, size, logs
@@ -466,6 +469,8 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
         loading_training_checkpoint = False
         resume_mid_epoch = False
         validation_measurements = None
+        validation_indices = None
+        validation_selection = None
         current_measurement = None
 
         def _fp_convert_sample(self, sample):
@@ -487,6 +492,11 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                     if self.model.training:
                         self.current_measurement = v3_loss_measurements([measured_sums], "train")
                     elif isinstance(self.validation_measurements, list):
+                        for log in logging_outputs:
+                            indices = log["native_dev_indices"].tolist()
+                            if len(indices) != log["nsentences"]:
+                                raise ValueError(f"Criterion nsentences disagrees with Dev batch IDs {indices}")
+                            self.validation_indices.extend(indices)
                         self.validation_measurements.append(measured_sums)
                 except (KeyError, TypeError, ValueError, ArithmeticError) as error:
                     if self.model.training:
@@ -537,6 +547,21 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                     stream.write(json.dumps(row, allow_nan=False) + "\n")
                     stream.flush()
             return result
+
+        def get_valid_iterator(self, subset, *args, **kwargs):
+            iterator = super().get_valid_iterator(subset, *args, **kwargs)
+            if schema_v3 and self.validation_indices is not None:
+                from fairseq import utils
+
+                if subset != "dev" or self.data_parallel_world_size != 1:
+                    raise ValueError("Schema v3 Dev integrity requires the registered single-process Dev iterator")
+                dataset = self.task.dataset(subset)
+                positions = utils.resolve_max_positions(self.task.max_positions(), self.model.max_positions())
+                expected, excluded = native_selection(dataset, self.cfg.dataset, positions, self.cfg.common.seed)
+                batches = iterator.frozen_batches
+                checked_ids(expected, (int(i) for batch in batches for i in batch), stage="scheduled batches")
+                self.validation_selection = (expected, excluded, len(batches))
+            return iterator
 
         def valid_step(self, *args, **kwargs):
             result = super().valid_step(*args, **kwargs)
@@ -645,6 +670,7 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
             trainer.validation_main = []
             if schema_v3:
                 trainer.validation_measurements = []
+                trainer.validation_indices = []
             state = rng_state(trainer.model)
             try:
                 train.validate(cfg, trainer, task, epoch_itr, valid_subsets)
@@ -671,9 +697,13 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                         if not isinstance(measured, list) or not measured:
                             raise ValueError(measured or "missing full-Dev criterion measurements")
                         row.update(v3_loss_measurements(measured, "dev"))
+                        expected, excluded, batches = trainer.validation_selection
+                        row["dev_coverage"] = attest_selection(task.dataset("dev"), expected, excluded,
+                            cfg.dataset.required_batch_size_multiple, task.dev_tsv_sha256, trainer.validation_indices, batches)
                     except (KeyError, TypeError, ValueError, ArithmeticError) as error:
                         row["measurement_error"] = str(error)
-                    validate_measurement(output, row, task.transfer_policy, "dev")
+                    validate_measurement(output, row, task.transfer_policy, "dev",
+                        dev_reference=(task.dev_tsv_sha256, cfg.dataset.required_batch_size_multiple))
                 values = read_jsonl(output) if output.is_file() else []
                 if schema_v3 and any(item["step"] == update for item in values):
                     raise ValueError("full-Dev measurement already exists for this update")
@@ -681,6 +711,8 @@ def trainer_hooks(contract_hash, selection_policy=None, *, stop_after_update=Non
                 write_jsonl(output, values, overwrite=True)
             if schema_v3:
                 trainer.validation_measurements = None
+                trainer.validation_indices = None
+                trainer.validation_selection = None
             trainer.selection_state = saved
             if improved:
                 trainer.checkpoint_epoch_loss = loss

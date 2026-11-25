@@ -18,6 +18,7 @@ from test_wandb_transfer import publish_receipt, sdk
 from native_plan_fixture import fixture_plan
 from alignment_transfer_s2ut import benchmark, metric_integrity_v3 as integrity
 from alignment_transfer_s2ut.alignment.losses import coefficient_policy
+from alignment_transfer_s2ut.dev_integrity import TAIL_REASON, ids_hash
 from alignment_transfer_s2ut.io import ArtifactStore, digest, file_hash, read_json, read_jsonl, write_json, write_jsonl
 from alignment_transfer_s2ut.s2ut.benchmark_extension import (
     loss_sums, METRIC_AUXILIARIES, trainer_hooks, trim_v3_metrics, v3_loss_measurements,
@@ -29,6 +30,7 @@ import transfer_metrics_v3 as v3
 
 FIXTURE = Path(__file__).parent / "fixtures/wandb_metric_schema_v3.json"
 TAU = .4
+DEV_REFERENCE = ("d" * 64, 8)
 
 
 def full_layer_plan(root, folder, method):
@@ -44,6 +46,7 @@ def full_layer_plan(root, folder, method):
                         root / "manifest.jsonl", root / "units", root / "teacher", all_layers=True)
     if method == "mask_distillation":
         plan["transfer"]["mask_lambda"] = 10.0
+    plan["config"]["dataset"]["required_batch_size_multiple"] = 1  # The native test set contains one Dev row.
     plan["transfer"]["coefficient_policy"] = coefficient_policy(plan["transfer"], plan["training_budget"])
     plan["contract_hash"] = digest({key: value for key, value in plan.items() if key != "contract_hash"})
     return plan
@@ -140,6 +143,7 @@ def test_v3_observes_real_native_training_and_dev_without_changing_updates(nativ
                 assert row["alignment/weighted_loss"] > 0
                 assert dev["dev/main_loss"] == pytest.approx(values[0] * torch.log(torch.tensor(2.)).item())
                 assert dev["sample_count"] == 1 and "weighted_alignment" not in dev["loss_sums"]
+                assert dev["dev_coverage"]["evaluated_ids"] == ["2"]
     for old, new in zip(*results, strict=True):
         equal_state(old, new)
 
@@ -207,8 +211,14 @@ def test_native_v3_pause_and_restore_keep_400k_contract(native_data, monkeypatch
 def row_for(update, contract, split="train", *, method="distillation"):
     _, logs = fixture_logs((1., 2.) if split == "train" else (0., 0.))
     if split == "dev":
-        logs[0]["nsentences"], logs[1]["nsentences"] = 500, 953
+        logs[0]["nsentences"], logs[1]["nsentences"] = 500, 951
     row = v3_loss_measurements([loss_sums(logs, training=split == "train")], split)
+    if split == "dev":
+        evaluated = [f"d{i:04d}" for i in range(1451)]
+        row["dev_coverage"] = dict(prepared_sha256=DEV_REFERENCE[0], batch_size_multiple=DEV_REFERENCE[1],
+            prepared_count=1453, prepared_ids_sha256=ids_hash(evaluated + ["d1451", "d1452"]),
+            evaluated_ids=evaluated, expected_ids_sha256=ids_hash(evaluated), batch_count=2,
+            excluded=[dict(id=f"d{i}", source_frames=22, target_units=8, reason=TAIL_REASON) for i in (1451, 1452)])
     if split == "train":
         mask = method == "mask_distillation"
         row.update({"train/learning_rate": .0005, "alignment/tau": TAU,
@@ -282,7 +292,8 @@ def test_full_original_audit_exact_points_and_1100_resume(tmp_path):
     assert v3.segment_targets(0, 1000) == [1000]
     assert v3.segment_targets(1000, 1100) == [1000, 1100]
     assert v3.segment_targets(1100, 0) == list(v3.MILESTONES[1:])
-    assert v3.coverage(dev, 1100, "distillation", contract, "dev", tau=TAU)[1]["complete"]
+    report = v3.coverage(dev, 1100, "distillation", contract, "dev", tau=TAU, dev_reference=DEV_REFERENCE)[1]
+    assert report["complete"] and report["dev_population"]["evaluated_count"] == 1451
     logged, result = v3.coverage(train, 1100, "distillation", contract, "train", tau=TAU)
     assert result["complete"] and set(logged) == {1, *range(100, 1101, 100)}
     trim_v3_metrics(tmp_path, 1000)
@@ -298,7 +309,55 @@ def test_full_original_audit_exact_points_and_1100_resume(tmp_path):
     assert not bad["complete"] and bad["missing_examples"] == [301]
     assert len(bad["invalid_examples"]) == 3
     dev.write_text(json.dumps(row_for(999, contract, "dev")) + "\n", encoding="utf-8")
-    assert not v3.coverage(dev, 1100, "distillation", contract, "dev", tau=TAU)[1]["complete"]
+    assert not v3.coverage(dev, 1100, "distillation", contract, "dev", tau=TAU, dev_reference=DEV_REFERENCE)[1]["complete"]
+
+
+@pytest.mark.parametrize("corruption", ["unknown-id", "duplicate", "missing", "invalid-exclusion", "wrong-tsv"])
+def test_dev_coverage_rejects_incomplete_or_foreign_evidence(corruption):
+    contract = "a" * 64
+    row = row_for(1000, contract, "dev")
+    proof = row["dev_coverage"]
+    if corruption == "unknown-id":
+        proof["evaluated_ids"][0] = "not scheduled"
+    elif corruption == "duplicate":
+        proof["evaluated_ids"][0] = proof["evaluated_ids"][1]
+    elif corruption == "missing":
+        proof["evaluated_ids"].pop()
+    elif corruption == "invalid-exclusion":
+        proof["excluded"][0]["reason"] = "arbitrary"
+    else:
+        proof["prepared_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="Dev"):
+        v3.validate_row(row, "distillation", contract, "dev", tau=TAU, dev_reference=DEV_REFERENCE)
+
+
+def test_pinned_fairseq_dev_tail_and_criterion_id_observation():
+    pytest.importorskip("fairseq.data.data_utils_fast")
+    from fairseq.data import FairseqDataset
+    from alignment_transfer_s2ut.dev_integrity import attest_selection, native_selection
+
+    class Metadata(FairseqDataset):
+        ids = [f"pair-{i}" for i in range(10)]
+
+        def __len__(self):
+            return len(self.ids)
+
+        def size(self, index):
+            return 10, 2
+
+        def num_tokens(self, index):
+            return 10
+
+    dataset = Metadata()
+    settings = SimpleNamespace(max_tokens_valid=100, batch_size_valid=None, required_batch_size_multiple=8)
+    selected, excluded = native_selection(dataset, settings, (30, 20), seed=1)
+    native = dataset.batch_by_size(dataset.ordered_indices(), max_tokens=100, required_batch_size_multiple=8)
+    assert selected == list(native[0]) == list(range(8))
+    assert [row["id"] for row in excluded] == ["pair-8", "pair-9"]
+    proof = attest_selection(dataset, selected, excluded, 8, DEV_REFERENCE[0], list(reversed(selected)), 1)
+    assert proof["evaluated_ids"] == dataset.ids[:8]
+    with pytest.raises(ValueError, match="missing IDs.*pair-7.*duplicate IDs.*pair-0"):
+        attest_selection(dataset, selected, excluded, 8, DEV_REFERENCE[0], [*selected[:-1], 0], 1)
 
 
 def test_v3_identity_and_transport_validation(tmp_path):

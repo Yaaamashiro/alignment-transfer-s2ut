@@ -6,7 +6,7 @@ The training runtime remains pinned at `0c0024ea888206149a3119bf096b86ba66d63b66
 
 ## Comparison series
 
-For microbatch \(i\), \(C_i\) is the raw label-smoothed Unit CE sum, \(N_i\) is the main sample size, \(A_{i,k}\) and \(M_{i,k}\) are auxiliary loss sum and sample size for task \(k\), and \(B_i\) is the actual weighted alignment contribution added to the objective. Sizes are summed over all gathered microbatches. Training records one successful logical update and Dev records a complete teacher-forced pass of 1,453 examples.
+For microbatch \(i\), \(C_i\) is the raw label-smoothed Unit CE sum, \(N_i\) is the main sample size, \(A_{i,k}\) and \(M_{i,k}\) are auxiliary loss sum and sample size for task \(k\), and \(B_i\) is the actual weighted alignment contribution added to the objective. Sizes are summed over all gathered microbatches. Training records one successful logical update. Dev loss uses the entire validation population selected by the registered Baseline's Fairseq batching policy.
 
 | Metric | Formula and source | Unit and cadence |
 | --- | --- | --- |
@@ -21,6 +21,28 @@ For microbatch \(i\), \(C_i\) is the raw label-smoothed Unit CE sum, \(N_i\) is 
 The recorder saves raw sums and denominators in `loss_sums` and the sampled population in `sample_count`. Raw criterion losses are in nats. Baseline's importer converts normalized stored bits using \(\ln 2\). V1/v2 reuse the name `dev/main_loss` for bits under the legacy profile, which is why v3 publication has a distinct Run binding.
 
 At 1,000 updates the comparison grid is 10 Train points per metric, one Dev point per metric, and one of each BLEU triplet. At 1,100 the Train grid has 11 points and the earlier Dev/BLEU point remains. At 400k, the expectations are 4,000 per Train metric, 400 per Dev metric, and eight per BLEU metric. Baseline Aux-BLEU remains unavailable under the Benchmark evidence rules. Update 1 is displayed separately as a diagnostic in the audit.
+
+### Matched Dev-loss population
+
+The registered Dev TSV and transfer manifest have the same 1,453 unique IDs. The pinned Fairseq sampler admits all of them through its size filter. Its Cython sampler produces 112 batches, and its Python `batch_by_size` wrapper discards the last batch because its length of two is not divisible by the registered batch multiple of eight. The validation iterator consequently yields 1,451 IDs in 111 batches. The stock criterion counts `sample["target"].size(0)` for each batch. These counts agree with the collated and scheduled IDs. [Pinned Fairseq tail rule](https://github.com/facebookresearch/fairseq/blob/3d262bb25690e4eb2e7d3c1309b1e9c406ca4b99/fairseq/data/data_utils.py#L339-L360)
+
+| Excluded ID | Source frames | Target units |
+| --- | ---: | ---: |
+| `p000007427853` | 317 | 73 |
+| `p000005353923` | 285 | 42 |
+
+The Baseline and earlier transfer plans use this same registered Dev TSV, size limits and batch multiple. Their saved loss records contain aggregate values. The expected historical IDs above come from replaying their pinned iterator on the verified data. BLEU populations keep their own independent selection rules. [Registered data receipt](https://drive.google.com/file/d/1nEnMdMe4kIP4HKP1ICVgyzangvWpv44g/view)
+
+The recorder reconstructs the expected population from the raw sampler, then checks the IDs scheduled by the native iterator and those counted by the criterion. Each `native-dev.jsonl` row stores the verified prepared TSV hash, the expected ID hashes, the actual evaluated IDs and the reason for each tail exclusion. Missing, duplicate, unexpected, or mismatched IDs block publication. A count of 1,451 by itself is insufficient.
+
+Run this read-only diagnostic on CPU after the prepared Dev metadata and Baseline registration have been restored. It reports the IDs and batch counts without loading a checkpoint, decoding audio or starting training. Use the notebook's process logger in Colab.
+
+```python
+execute(PYTHON, '-m', 'alignment_transfer_s2ut.dev_integrity', '--baseline', BASELINE,
+        '--manifest', MANIFEST, name='schema-v3-dev-population')
+```
+
+For a local copy of the verified metadata, pass `--prepared <folder-containing-dev.tsv-config.yaml-and-dict.txt>`. The same run ID and experiment settings resume from the published checkpoint after an interrupted Dev pass. For the incident at 1,000 the published recovery point is 900. Keep `FULL_STOP_AFTER_UPDATE=1000` for the retry and inspect `dev_population` in the automatically logged Snapshot audit. [900-update receipt](https://drive.google.com/file/d/1CuLoI0fzj4lEbN6PYwycRrMxpCOMQYeA/view)
 
 ### Diagnostic series
 
