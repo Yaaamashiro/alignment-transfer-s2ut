@@ -416,12 +416,19 @@ def start_writer(wandb, args, identity, lease, resume):
 
 def finish_writer(contract, lease, run, *, track_delivery=False):
     path = writer_path(contract, ".pending.json")
-    cursor = getattr(run, "step", None) if track_delivery else None
-    if type(cursor) is int:
-        receipt = {**json.loads(path.read_bytes()), "history_step": cursor - 1}
-        store_writer_record(path, receipt)
-    lease.finish(run)
-    if type(cursor) is int:
+    try:
+        if track_delivery:
+            try:
+                cursor = run.step
+                if type(cursor) is not int or cursor < 0:
+                    raise ValueError("W&B returned an invalid history cursor")
+            except Exception as error:
+                raise RuntimeError("W&B history cursor unavailable at shutdown; delivery unconfirmed. Run a read-only audit.") from error
+            receipt = {**json.loads(path.read_bytes()), "history_step": cursor - 1}
+            store_writer_record(path, receipt)
+    finally:
+        lease.finish(run)
+    if track_delivery:
         store_owner(contract, receipt)
     path.unlink(missing_ok=True)
 
@@ -1010,64 +1017,82 @@ def report(args, stop):
     writer_scope = ExitStack()
     bucket = getattr(args, "writer_bucket", None)
     schema_v3 = v3.enabled(args)
+    key = v3.namespace(args.contract, args)
     retry_delay = 2
     try:
         while True:
             finishing = stop.is_set()
-            plan_path = work / "native-run.json"
-            if plan_path.is_file():
-                plan_bytes = plan_path.read_bytes()
-                plan = json.loads(plan_bytes)
+            if run is None:
+                try:
+                    plan_bytes = (work / PLAN).read_bytes()
+                except FileNotFoundError:
+                    plan_bytes = None
+                plan_sha = hashlib.sha256(plan_bytes).hexdigest() if plan_bytes is not None else None
+                snapshot = published_snapshot(work, args.backup, plan_sha, 0, args.method) if plan_sha else None
+                # Restore can replace the local plan while copying it. Only parse published bytes.
+                plan = json.loads(plan_bytes) if snapshot is not None else None
+            else:
+                snapshot = published_snapshot(work, args.backup, plan_sha, published, args.method)
+            if plan is not None:
                 if plan.get("contract_hash") == args.contract:
-                    plan_sha = hashlib.sha256(plan_bytes).hexdigest()
-                    snapshot = published_snapshot(work, args.backup, plan_sha, published if run is not None else 0,
-                                                  args.method)
                     if snapshot is not None:
                         published, published_command, _ = snapshot
                         if run is None:
+                            can_retry = True
                             try:
+                                if schema_v3:
+                                    history = list(logical_metric_rows(MetricReader(work / TRAIN_JSONL),
+                                        MetricReader(work / DEV_JSONL), published, contract=args.contract,
+                                        schema_v3=True, method=args.method, tau=v3.plan_tau(plan),
+                                        dev_reference=v3.plan_dev_reference(plan)))
+                                    # Wait locally during restore, before touching the API or taking a remote lease.
+                                    observed = {(progress, update) for progress, update, _ in history}
+                                    required = {(TRAIN_UPDATE, 1)}
+                                    required.update((TRAIN_UPDATE, update) for update in range(100, published + 1, 100))
+                                    required.update((DEV_UPDATE, update) for update in range(1000, published + 1, 1000))
+                                    if not required <= observed:
+                                        raise WriterBusy(f"Waiting for local Schema v3 originals through update {published}")
                                 with ExitStack() as attempt:
                                     identity, current, lease = reporter_preflight(wandb, args, attempt)
                                     missing = {}
                                     audit = None
                                     if schema_v3 and current is not None:
                                         state = writer_state(current)
-                                        history = list(logical_metric_rows(MetricReader(work / TRAIN_JSONL),
-                                            MetricReader(work / DEV_JSONL), published, contract=args.contract,
-                                            schema_v3=True, method=args.method, tau=v3.plan_tau(plan),
-                                            dev_reference=v3.plan_dev_reference(plan)))
-                                        # The trainer can replace the local logs while restoring this snapshot.
-                                        # Missing originals would make already-delivered history look foreign.
-                                        observed = {(progress, update) for progress, update, _ in history}
-                                        required = {(TRAIN_UPDATE, 1)}
-                                        required.update((TRAIN_UPDATE, update) for update in range(100, published + 1, 100))
-                                        required.update((DEV_UPDATE, update) for update in range(1000, published + 1, 1000))
-                                        if not required <= observed:
-                                            raise WriterBusy(f"Waiting for local Schema v3 originals through update {published}")
                                         bleu_rows = v3_bleu_rows(args, plan_sha, published, args.contract)
                                         missing, audit = v3.reconcile_delivery(current, {"original_jsonl": history,
                                             "qualified_bleu": bleu_rows}, published,
                                             minimum_history_step=v3_history_floor(args, args.contract))
-                                        watermarks.update(audit["history_watermarks"])
                                         _, checked = live_target(wandb, args, args.contract)
                                         if writer_state(checked) != state:
                                             raise WriterBusy("Another writer connected during history reconciliation")
                                     writer_scope.callback(attempt.pop_all().close)
+                                # An attempted init may have opened a writer even if the SDK raises.
+                                can_retry = False
+                                resume = "must" if current is not None else "never" if schema_v3 else "allow"
+                                run = start_writer(wandb, args, identity, lease, resume)
+                                session = lease.token
+                                run.summary[REPORTER_SESSION] = session
+                                bind_writer(run, bucket, lease, args.contract)
+                                if audit is not None:
+                                    try:
+                                        check_v3_resume_cursor(run, audit)
+                                    except WriterBusy:
+                                        candidate, run = run, None
+                                        try:
+                                            finish_writer(key, lease, candidate, track_delivery=True)
+                                        finally:
+                                            writer_scope.close()
+                                        can_retry = True
+                                        raise
                             except Exception as error:
-                                if not retryable_preflight(error, wandb) or schema_v3 and retry_delay == 60:
+                                if not can_retry or not retryable_preflight(error, wandb):
                                     raise
                                 if retry_writer_preflight(stop, args.logs, retry_delay, error):
                                     return
                                 retry_delay = min(2 * retry_delay, 60)
                                 continue
-                            # After attempting init only confirmed finish can release this writer.
-                            resume = "must" if current is not None else "never" if schema_v3 else "allow"
-                            run = start_writer(wandb, args, identity, lease, resume)
-                            session = lease.token
-                            run.summary[REPORTER_SESSION] = session
-                            bind_writer(run, bucket, lease, args.contract)
                             if audit is not None:
-                                check_v3_resume_cursor(run, audit)
+                                watermarks.update(audit["history_watermarks"])
                             for (progress, update), values in missing.items():
                                 publish_metrics(run, progress, update, values, watermarks, backfill=True)
                             if audit is not None:
@@ -1099,7 +1124,7 @@ def report(args, stop):
     finally:
         try:
             if run is not None:
-                finish_writer(v3.namespace(args.contract, args), lease, run, track_delivery=schema_v3)
+                finish_writer(key, lease, run, track_delivery=schema_v3)
             elif published == 0:
                 log_event("wandb", "skipped", args.logs, "No published updates for this contract")
         finally:

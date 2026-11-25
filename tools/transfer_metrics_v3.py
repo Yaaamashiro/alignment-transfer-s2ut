@@ -178,7 +178,8 @@ def remote_audit(target, sources, published, *, minimum_history_step=-1):
     for point in expected.keys() - existing.keys():
         update, key = point
         progress = expected[point][0]
-        watermark = (number(target.summary.get(progress)) or 0) if target is not None else 0
+        summary_watermark = (number(target.summary.get(progress)) or 0) if target is not None else 0
+        watermark = max(summary_watermark, watermarks.get(progress, 0))
         target_map = pending if not complete_scan or update <= watermark else missing
         target_map.setdefault(key, []).append(update)
     counts = {}
