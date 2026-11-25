@@ -636,12 +636,12 @@ def v3_bleu_rows(args, plan_sha, maximum, contract):
             for update, row in points]
 
 
-def v3_source_rows(args, plan_sha, maximum, contract, local, *, tau, allow_unpublished=False,
+def v3_source_rows(args, plan_sha, maximum, contract, local, *, tau, dev_reference, allow_unpublished=False,
                    originals_only=False):
     train, train_status = v3.coverage(local / TRAIN_JSONL, maximum, args.method, contract, "train",
                                       tau=tau, allow_unpublished=allow_unpublished)
     dev, dev_status = v3.coverage(local / DEV_JSONL, maximum, args.method, contract, "dev",
-                                  tau=tau, allow_unpublished=allow_unpublished)
+                                  tau=tau, dev_reference=dev_reference, allow_unpublished=allow_unpublished)
     rows = [(TRAIN_UPDATE, update, values) for update, values in train.items()]
     rows.extend((DEV_UPDATE, update, values) for update, values in dev.items())
     if originals_only:
@@ -679,13 +679,14 @@ def verified_v3_sources(args, audit_scope="snapshot", *, originals_only=False):
             raise ValueError("Schema v3 snapshot exceeds the registered budget")
         plan_bytes = (local / PLAN).read_bytes()
         plan_sha = hashlib.sha256(plan_bytes).hexdigest()
-        tau = v3.plan_tau(json.loads(plan_bytes))
+        plan = json.loads(plan_bytes)
+        tau = v3.plan_tau(plan)
         source = args.work if audit_scope == "local" else local
         if audit_scope == "local" and (not (source / PLAN).is_file()
                 or hashlib.sha256((source / PLAN).read_bytes()).hexdigest() != plan_sha):
             raise ValueError("Local metric plan differs from the published snapshot")
         metrics, bleu, reports = v3_source_rows(args, plan_sha, published, contract, source, tau=tau,
-            allow_unpublished=audit_scope == "local", originals_only=originals_only)
+            dev_reference=v3.plan_dev_reference(plan), allow_unpublished=audit_scope == "local", originals_only=originals_only)
     windows = () if originals_only else fairseq_metric_rows(
         FairseqProgressReader(args.logs, compare_attempts=True), command, contract, published)
     return contract, published, members, {"original_jsonl": metrics, "local_fairseq": windows,
@@ -974,7 +975,8 @@ def report(args, stop):
                                         state = writer_state(current)
                                         history = logical_metric_rows(MetricReader(work / TRAIN_JSONL),
                                             MetricReader(work / DEV_JSONL), published, contract=args.contract,
-                                            schema_v3=True, method=args.method, tau=v3.plan_tau(plan))
+                                            schema_v3=True, method=args.method, tau=v3.plan_tau(plan),
+                                            dev_reference=v3.plan_dev_reference(plan))
                                         bleu_rows = v3_bleu_rows(args, plan_sha, published, args.contract)
                                         missing, _ = v3.reconcile_delivery(current, {"original_jsonl": history,
                                             "qualified_bleu": bleu_rows}, published)
@@ -1000,7 +1002,8 @@ def report(args, stop):
                         set_training_progress(run, published, schema_v3=schema_v3)
                     if run is not None:
                         sync_rows(run, train, dev, published, watermarks, contract=args.contract,
-                                  schema_v3=schema_v3, method=args.method, tau=v3.plan_tau(plan) if schema_v3 else None)
+                                  schema_v3=schema_v3, method=args.method, tau=v3.plan_tau(plan) if schema_v3 else None,
+                                  dev_reference=v3.plan_dev_reference(plan) if schema_v3 else None)
                         sync_logged_layers(run, layers, published_command, args.contract, published,
                                            watermarks)
                         if getattr(args, "bleu_results", None) and (snapshot is not None or finishing):
@@ -1058,7 +1061,8 @@ def logical_train_metrics(row):
     return output
 
 
-def logical_metric_rows(train, dev, published, *, contract=None, schema_v3=False, method=None, tau=None):
+def logical_metric_rows(train, dev, published, *, contract=None, schema_v3=False, method=None, tau=None,
+                        dev_reference=None):
     for reader, progress in ((train, TRAIN_UPDATE), (dev, DEV_UPDATE)):
         for row in reader.rows(published):
             update = row["step"]
@@ -1068,7 +1072,7 @@ def logical_metric_rows(train, dev, published, *, contract=None, schema_v3=False
                     raise ValueError(f"Foreign Schema v3 measurement at update {update}")
                 if (split == "train" and update != 1 and update % 100) or (split == "dev" and update % 1000):
                     continue
-                values = v3.validate_row(row, method, contract, split, tau=tau)
+                values = v3.validate_row(row, method, contract, split, tau=tau, dev_reference=dev_reference)
                 yield progress, update, values
                 continue
             if row.get("metric_schema") == 3:
@@ -1084,9 +1088,11 @@ def logical_metric_rows(train, dev, published, *, contract=None, schema_v3=False
                 yield progress, update, values
 
 
-def sync_rows(run, train, dev, published, watermarks, *, contract=None, schema_v3=False, method=None, tau=None):
+def sync_rows(run, train, dev, published, watermarks, *, contract=None, schema_v3=False, method=None, tau=None,
+              dev_reference=None):
     for progress, update, values in logical_metric_rows(train, dev, published, contract=contract,
-                                                        schema_v3=schema_v3, method=method, tau=tau):
+                                                        schema_v3=schema_v3, method=method, tau=tau,
+                                                        dev_reference=dev_reference):
         publish_metrics(run, progress, update, values, watermarks)
 
 

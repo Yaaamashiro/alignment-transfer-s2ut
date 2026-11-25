@@ -117,7 +117,31 @@ def valid_number(value):
         return False
 
 
-def check_raw(row, split):
+def plan_dev_reference(plan):
+    return (plan.get("prepared", {}).get("files", {}).get("dev.tsv"),
+            plan.get("config", {}).get("dataset", {}).get("required_batch_size_multiple"))
+
+
+def check_dev_coverage(proof, samples, batches, reference):
+    from .dev_integrity import TAIL_REASON, ids_hash
+
+    if not isinstance(proof, dict) or reference is None or not reference[0] or (
+            proof.get("prepared_sha256"), proof.get("batch_size_multiple")) != reference:
+        raise ValueError("Dev ID coverage is missing or does not bind the registered prepared data and batching policy")
+    ids, excluded, multiple = proof["evaluated_ids"], proof["excluded"], proof["batch_size_multiple"]
+    omitted_ids = [item["id"] for item in excluded]
+    if (type(multiple) is not int or multiple < 1 or len(ids) != samples or proof.get("batch_count") != batches
+            or any(not isinstance(key, str) or not key for key in ids + omitted_ids)
+            or len(set(ids + omitted_ids)) != len(ids) + len(omitted_ids)
+            or proof.get("prepared_count") != DEV_SAMPLES or len(ids) + len(omitted_ids) != DEV_SAMPLES
+            or proof.get("prepared_ids_sha256") != ids_hash(ids + omitted_ids)
+            or proof.get("expected_ids_sha256") != ids_hash(ids)):
+        raise ValueError("Dev Criterion coverage has missing, duplicate or unexpected IDs or counts")
+    if excluded and (len(excluded) % multiple == 0 or any(item.get("reason") != TAIL_REASON for item in excluded)):
+        raise ValueError("Unexpected Dev exclusions outside the registered Fairseq tail rule")
+
+
+def check_raw(row, split, *, dev_reference=None):
     if row.get("measurement_error"):
         raise ValueError(str(row["measurement_error"]))
     raw = row.get("loss_sums")
@@ -141,8 +165,8 @@ def check_raw(row, split):
     samples, batches = terms("samples")
     if samples != row.get("sample_count") or samples < batches or samples != int(samples):
         raise ValueError("invalid criterion sample count")
-    if split == "dev" and samples != DEV_SAMPLES:
-        raise ValueError(f"full Dev expected {DEV_SAMPLES} samples, measured {samples}")
+    if split == "dev":
+        check_dev_coverage(row.get("dev_coverage"), samples, batches, dev_reference)
     weighted = (ce + math.fsum(weight * terms(f"aux/{task_name}_loss")[0]
                                for task_name, weight in zip(AUXILIARIES, (8, 8, 1.6), strict=True)))
     alignment, alignment_size = terms("weighted_alignment") if split == "train" else (0, size)
@@ -155,11 +179,11 @@ def check_raw(row, split):
         raise ValueError("alignment objective diagnostics differ from the captured raw sums")
 
 
-def validate_row(row, method, contract, split, *, tau):
+def validate_row(row, method, contract, split, *, tau, dev_reference=None):
     if row.get("alignment_contract_hash") != contract:
         raise ValueError("foreign metric row")
     values = metric_values(row, split)
-    check_raw(row, split)
+    check_raw(row, split, dev_reference=dev_reference)
     needed = required_metrics(method, row["step"]) if split == "train" else DEV
     missing = [key for key in needed if key not in values]
     invalid = [key for key, value in values.items() if not valid_number(value)]
@@ -172,10 +196,11 @@ def validate_row(row, method, contract, split, *, tau):
     return values
 
 
-def coverage(path, maximum, method, contract, split, *, tau, allow_unpublished=False):
+def coverage(path, maximum, method, contract, split, *, tau, dev_reference=None, allow_unpublished=False):
     required = (range(1, maximum + 1) if split == "train" else range(1000, maximum + 1, 1000))
     expected = set(required)
     seen, bad, rows, previous = set(), [], {}, 0
+    population = None
     if Path(path).is_file():
         with Path(path).open(encoding="utf-8") as stream:
             for line in stream:
@@ -193,7 +218,14 @@ def coverage(path, maximum, method, contract, split, *, tau, allow_unpublished=F
                         raise ValueError(f"unexpected or duplicated {split} update {update}")
                     seen.add(update)
                     previous = update
-                    values = validate_row(row, method, contract, split, tau=tau)
+                    values = validate_row(row, method, contract, split, tau=tau, dev_reference=dev_reference)
+                    if split == "dev":
+                        proof = row["dev_coverage"]
+                        current = {key: proof[key] for key in ("prepared_count", "expected_ids_sha256", "excluded", "batch_count")}
+                        current["evaluated_count"] = row["sample_count"]
+                        if population is not None and current != population:
+                            raise ValueError("registered Dev ID population changed across updates")
+                        population = current
                     if split == "dev" or update == 1 or update % 100 == 0:
                         rows[update] = values
                 except (ValueError, KeyError, TypeError, ArithmeticError) as error:
@@ -205,16 +237,18 @@ def coverage(path, maximum, method, contract, split, *, tau, allow_unpublished=F
                   "missing_examples": absent[:20], "invalid_examples": bad, "complete": not absent and not bad,
                   "comparison_point_counts": {key: sum(key in values for update, values in rows.items() if update != 1)
                                               for key in comparison},
-                  "additional_diagnostic_updates": [1] if 1 in rows else []}
+                  "additional_diagnostic_updates": [1] if 1 in rows else [],
+                  **({"dev_population": population} if population is not None else {})}
 
 
 def checkpoint_originals(folder, update, plan, *, tail_only=False):
     """Fail before resume, or check the boundary of an immutable freeze of checked rows."""
     method, contract, tau = plan["transfer"]["method"], plan["contract_hash"], plan_tau(plan)
+    reference = plan_dev_reference(plan)
     for split, name, point in (("train", TRAIN_JSONL, update), ("dev", DEV_JSONL, update // 1000 * 1000)):
         path = folder / name
         if not tail_only:
-            _, report = coverage(path, update, method, contract, split, tau=tau)
+            _, report = coverage(path, update, method, contract, split, tau=tau, dev_reference=reference)
             if not report["complete"]:
                 raise ValueError(f"Incomplete Schema v3 {split} originals through update {update}: "
                                  f"{report['missing_examples']} {report['invalid_examples']}")
@@ -230,4 +264,4 @@ def checkpoint_originals(folder, update, plan, *, tail_only=False):
             row = json.loads(data.splitlines()[-1])
             if row.get("step") != point:
                 raise ValueError(f"Frozen Schema v3 {split} ends at {row.get('step')}, expected {point}")
-            validate_row(row, method, contract, split, tau=tau)
+            validate_row(row, method, contract, split, tau=tau, dev_reference=reference)
